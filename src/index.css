@@ -1,0 +1,29 @@
+@import url("https://rsms.me/inter/inter.css");
+@import "tailwindcss";
+
+@theme {
+  --color-indigo: #4F46E5;
+  --color-teal: #06B6D4;
+  --color-charcoal: #0F172A;
+  --color-slate-muted: #64748B;
+  --color-bg: #FFFFFF;
+  --color-muted: #F8FAFC;
+  --color-border: #E2E8F0;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-danger: #EF4444;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-charcoal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="fav-top" x1="8" y1="8" x2="56" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4F46E5"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+    <linearGradient id="fav-bot" x1="56" y1="56" x2="8" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M 14 30 Q 14 22 22 22 L 42 22 Q 50 22 50 14 Q 50 8 42 8 L 22 8 Q 8 8 8 22 Q 8 32 22 32 L 42 32"
+        fill="none"
+        stroke="url(#fav-top)"
+        stroke-width="12"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <path d="M 50 34 Q 50 42 42 42 L 22 42 Q 14 42 14 50 Q 14 56 22 56 L 42 56 Q 56 56 56 42 Q 56 32 42 32 L 22 32"
+        fill="none"
+        stroke="url(#fav-bot)"
+        stroke-width="12"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>

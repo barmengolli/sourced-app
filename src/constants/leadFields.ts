@@ -1,0 +1,71 @@
+import type { Lead } from '../types/db';
+
+export type EditableLeadField =
+  | 'first_name'
+  | 'last_name'
+  | 'account'
+  | 'title'
+  | 'country'
+  | 'owner'
+  | 'lead_source'
+  | 'current_stage'
+  | 'marketing_sourced_date'
+  | 'source_channel_id'
+  | 'notes';
+
+export const EDITABLE_LEAD_FIELDS: EditableLeadField[] = [
+  'first_name',
+  'last_name',
+  'account',
+  'title',
+  'country',
+  'owner',
+  'lead_source',
+  'current_stage',
+  'marketing_sourced_date',
+  'source_channel_id',
+  'notes',
+];
+
+export const LOCKABLE_LEAD_FIELDS: ReadonlySet<EditableLeadField> = new Set(
+  EDITABLE_LEAD_FIELDS,
+);
+
+export type LeadFieldKind = 'text' | 'date' | 'stage' | 'channel' | 'longText';
+
+export const LEAD_FIELD_LABELS: Record<EditableLeadField, string> = {
+  first_name: 'First name',
+  last_name: 'Last name',
+  account: 'Account',
+  title: 'Title',
+  country: 'Country',
+  owner: 'Owner',
+  lead_source: 'Lead source',
+  current_stage: 'Stage',
+  marketing_sourced_date: 'Marketing sourced date',
+  source_channel_id: 'Source channel',
+  notes: 'Notes',
+};
+
+export const LEAD_FIELD_KIND: Record<EditableLeadField, LeadFieldKind> = {
+  first_name: 'text',
+  last_name: 'text',
+  account: 'text',
+  title: 'text',
+  country: 'text',
+  owner: 'text',
+  lead_source: 'text',
+  current_stage: 'stage',
+  marketing_sourced_date: 'date',
+  source_channel_id: 'channel',
+  notes: 'longText',
+};
+
+export function isEditableLeadField(k: string): k is EditableLeadField {
+  return (EDITABLE_LEAD_FIELDS as string[]).includes(k);
+}
+
+// Compile-time guard: every EditableLeadField must be a real key on Lead.
+type _AssertSubset = EditableLeadField extends keyof Lead ? true : never;
+const _assert: _AssertSubset = true;
+void _assert;
