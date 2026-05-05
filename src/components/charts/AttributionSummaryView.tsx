@@ -8,21 +8,42 @@ import {
 } from '../../constants/funnelStages';
 import { CHART_COLORS, CHART_PALETTE } from '../../constants/chartColors';
 
+// Channel-to-stage Sankey driven by the rolled-up grid totals.
+//
+// Source nodes: every depth-1 channel, regardless of whether it has any
+// attribution_touches yet (so high-volume top-of-funnel channels like
+// Marketing SDR show up before any HPPs are created from them).
+//
+// Link weights:
+//   • Lead and MQL stages: read from grid.rows (computed from leads
+//     + stage_history in compute.ts step 2 + tree rollup in step 5).
+//   • HPP/Opp/Pursuit/CloseWon stages: read from grid.rows as well —
+//     compute.ts step 3 already counts attributions per cell and the
+//     parent rollup in step 5 sums children's attribution counts up to
+//     each top-level channel. Period filtering happens inside computeGrid
+//     so this component doesn't re-do it.
+//
+// Stage nodes: always all 6 stages on the right. A stage with zero total
+// incoming weight gets a tiny synthetic link (value < 0.001, suppressed by
+// the custom link renderer) so Recharts keeps the node visible.
+
 interface AttributionSummaryViewProps {
   rows: ComputedRow[];
   channels: Channel[];
 }
 
-// Placeholder visualization: flow from depth-1 channels into the 6 funnel
-// stages, weighted by each channel's actual at that stage. Real
-// touch-attribution Sankey lands in M7 with the attribution_touches data
-// model; until then this just shows the channel × stage cross-section.
+// Synthetic-link epsilon: small enough that Recharts barely allocates any
+// width to it but non-zero so the layout keeps the stage node visible.
+const EPSILON_LINK = 0.0001;
 
 interface NodePayload {
   name: string;
   isChannel: boolean;
   // Used by the custom node renderer to color channel nodes from the palette.
   paletteIndex?: number;
+  // Set on stage nodes only. Lets the renderer pick a per-stage color
+  // (Closed Lost in red, all others in charcoal).
+  stageKey?: string;
 }
 
 interface SankeyData {
@@ -41,7 +62,9 @@ interface CustomNodeProps {
 function CustomNode({ x, y, width, height, payload }: CustomNodeProps) {
   const fill = payload.isChannel
     ? CHART_PALETTE[(payload.paletteIndex ?? 0) % CHART_PALETTE.length]
-    : CHART_COLORS.charcoal;
+    : payload.stageKey === 'closeLost'
+      ? '#EF4444'
+      : CHART_COLORS.charcoal;
   const labelX = payload.isChannel ? x - 8 : x + width + 8;
   const anchor: 'start' | 'end' = payload.isChannel ? 'end' : 'start';
   return (
@@ -70,6 +93,7 @@ interface CustomLinkProps {
   sourceControlX: number;
   targetControlX: number;
   linkWidth: number;
+  payload?: { value: number };
 }
 
 function CustomLink({
@@ -80,7 +104,11 @@ function CustomLink({
   sourceControlX,
   targetControlX,
   linkWidth,
+  payload,
 }: CustomLinkProps) {
+  // Skip rendering for synthetic "presence" links used to keep zero-weight
+  // stage nodes visible in the layout.
+  if (payload && payload.value < 0.001) return null;
   const path =
     `M${sourceX},${sourceY}` +
     `C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}`;
@@ -105,14 +133,14 @@ export default function AttributionSummaryView({
   );
 
   const data: SankeyData = useMemo(() => {
-    const sourceRows = rows.filter((r) => r.depth === 1);
-    const sourcesWithSignal = sourceRows.filter((r) =>
-      FUNNEL_STAGES.some((s) => (r.cells[s].actual ?? 0) > 0),
-    );
+    // Top-level channel rows in their existing display order. We always
+    // emit a node for each, regardless of stage signal, so high-volume
+    // top-of-funnel channels stay visible before any deals are created.
+    const topRows = rows.filter((r) => r.depth === 1);
 
     const nodes: NodePayload[] = [];
     const channelNodeIndex = new Map<string, number>();
-    sourcesWithSignal.forEach((r, i) => {
+    topRows.forEach((r, i) => {
       const channel = channelById.get(r.channelId);
       const name = channel?.name ?? 'Unknown';
       channelNodeIndex.set(r.channelId, nodes.length);
@@ -121,11 +149,18 @@ export default function AttributionSummaryView({
     const stageNodeIndex = new Map<string, number>();
     for (const stage of FUNNEL_STAGES) {
       stageNodeIndex.set(stage, nodes.length);
-      nodes.push({ name: FUNNEL_STAGE_LABELS[stage], isChannel: false });
+      nodes.push({
+        name: FUNNEL_STAGE_LABELS[stage],
+        isChannel: false,
+        stageKey: stage,
+      });
     }
 
+    // Real links: weight = each top-level channel's rolled-up actual at
+    // each stage. Drop zero-weight links so the Sankey stays readable.
     const links: { source: number; target: number; value: number }[] = [];
-    for (const r of sourcesWithSignal) {
+    const stageHasRealLink = new Set<string>();
+    for (const r of topRows) {
       const srcIdx = channelNodeIndex.get(r.channelId);
       if (srcIdx === undefined) continue;
       for (const stage of FUNNEL_STAGES) {
@@ -134,13 +169,38 @@ export default function AttributionSummaryView({
         const tgtIdx = stageNodeIndex.get(stage);
         if (tgtIdx === undefined) continue;
         links.push({ source: srcIdx, target: tgtIdx, value: v });
+        stageHasRealLink.add(stage);
+      }
+    }
+
+    // Synthetic presence links: keep every stage node visible even if it
+    // has no real signal in the period. The custom link renderer suppresses
+    // links below the epsilon threshold so they don't render as visible
+    // ribbons. Source: the first top-level channel (any source works; this
+    // one minimizes layout disturbance).
+    if (topRows.length > 0) {
+      const firstSrc = channelNodeIndex.get(topRows[0].channelId);
+      if (firstSrc !== undefined) {
+        for (const stage of FUNNEL_STAGES) {
+          if (stageHasRealLink.has(stage)) continue;
+          const tgtIdx = stageNodeIndex.get(stage);
+          if (tgtIdx === undefined) continue;
+          links.push({
+            source: firstSrc,
+            target: tgtIdx,
+            value: EPSILON_LINK,
+          });
+        }
       }
     }
 
     return { nodes, links };
   }, [rows, channelById]);
 
-  if (data.links.length === 0) {
+  // Recharts Sankey requires at least one link. If there are zero top-level
+  // channels we fall back to the empty-state copy.
+  const hasAnyVisibleLink = data.links.some((l) => l.value > EPSILON_LINK);
+  if (data.nodes.length === 0 || (!hasAnyVisibleLink && data.links.length === 0)) {
     return (
       <p className="text-xs text-slate-muted italic h-[260px] flex items-center justify-center">
         No channel signal in the selected period.
@@ -168,7 +228,10 @@ export default function AttributionSummaryView({
           formatter={(v) => {
             if (v === null || v === undefined) return '';
             const n = typeof v === 'number' ? v : Number(v);
-            return Number.isNaN(n) ? '' : n.toLocaleString();
+            if (Number.isNaN(n)) return '';
+            // Hide synthetic presence links so empty stages don't show "0".
+            if (n < 0.001) return '';
+            return n.toLocaleString();
           }}
           contentStyle={{
             fontSize: 11,

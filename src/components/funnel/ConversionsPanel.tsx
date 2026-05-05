@@ -4,6 +4,8 @@ import {
   CONVERSION_PAIRS,
   type FunnelStageKey,
 } from '../../constants/funnelStages';
+import { benchmarkFor } from '../../constants/benchmarks';
+import { getOTColor } from '../../lib/formatters';
 
 interface ConversionsPanelProps {
   totals: Record<FunnelStageKey, CellValues>;
@@ -38,6 +40,16 @@ export default function ConversionsPanel({ totals }: ConversionsPanelProps) {
           const numerator = totals[to].actual;
           const denominator = totals[from].actual;
           const p = conversionPercent(numerator, denominator);
+          // Color the rate against this pair's benchmark using getOTColor's
+          // thresholds. ratio = (rate / benchmark), so >=1 green, >=0.75
+          // yellow, below red. Falls back to no color when either is
+          // missing.
+          const benchmark = benchmarkFor(from, to);
+          const ratio =
+            p === null || benchmark === null || benchmark === 0
+              ? null
+              : p / 100 / benchmark;
+          const color = getOTColor(ratio);
           return (
             <li key={`${from}-${to}`} className="space-y-1">
               <div className="flex items-baseline justify-between text-xs">
@@ -45,7 +57,14 @@ export default function ConversionsPanel({ totals }: ConversionsPanelProps) {
                 {p === null ? (
                   <span className="text-slate-muted italic">no data</span>
                 ) : (
-                  <span className="font-medium text-charcoal tabular-nums">
+                  <span
+                    className={`font-medium tabular-nums ${color}`}
+                    title={
+                      benchmark !== null
+                        ? `Benchmark ${(benchmark * 100).toFixed(1)}%`
+                        : undefined
+                    }
+                  >
                     {formatPct(p)}
                   </span>
                 )}
@@ -55,6 +74,53 @@ export default function ConversionsPanel({ totals }: ConversionsPanelProps) {
           );
         })}
       </ul>
+      <WinLossBlock totals={totals} />
     </aside>
+  );
+}
+
+// Win/Loss rates: deal-level outcome breakdown. Denominator is closed deals
+// (won + lost), not anything upstream — these are "of the deals that
+// closed, what fraction closed each way." Renders dashes when neither side
+// has signal in the period so the panel doesn't shout 0% at users.
+function WinLossBlock({
+  totals,
+}: {
+  totals: Record<FunnelStageKey, CellValues>;
+}) {
+  const won = totals.closeWon.actual ?? 0;
+  const lost = totals.closeLost.actual ?? 0;
+  const denom = won + lost;
+  const winRate = denom === 0 ? null : (won / denom) * 100;
+  const lossRate = denom === 0 ? null : (lost / denom) * 100;
+  return (
+    <div className="pt-2 border-t border-border space-y-2">
+      <div className="flex items-baseline justify-between text-xs">
+        <span className="text-charcoal">Win rate</span>
+        {winRate === null ? (
+          <span className="text-slate-muted italic">—</span>
+        ) : (
+          <span
+            className="font-medium tabular-nums text-blue-600"
+            title={`${won} won / ${denom} closed`}
+          >
+            {formatPct(winRate)}
+          </span>
+        )}
+      </div>
+      <div className="flex items-baseline justify-between text-xs">
+        <span className="text-charcoal">Loss rate</span>
+        {lossRate === null ? (
+          <span className="text-slate-muted italic">—</span>
+        ) : (
+          <span
+            className="font-medium tabular-nums text-danger"
+            title={`${lost} lost / ${denom} closed`}
+          >
+            {formatPct(lossRate)}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }

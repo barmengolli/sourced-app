@@ -162,7 +162,7 @@ CREATE TABLE attributions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
   deal_id TEXT,  -- shared across stages for the same deal (HPP -> Opp -> Pursuit -> Won)
-  stage_key TEXT NOT NULL CHECK (stage_key IN ('hpp','opp','pursuit','closeWon')),
+  stage_key TEXT NOT NULL CHECK (stage_key IN ('hpp','opp','pursuit','closeWon','closeLost')),
   channel_id UUID REFERENCES channels(id) ON DELETE SET NULL,
   year INTEGER NOT NULL,
   period_index INTEGER NOT NULL CHECK (period_index BETWEEN 1 AND 4),
@@ -208,7 +208,7 @@ CREATE TABLE funnel_projections (
   channel_id UUID REFERENCES channels(id) ON DELETE CASCADE,
   year INTEGER NOT NULL,
   period_index INTEGER NOT NULL CHECK (period_index BETWEEN 1 AND 4),
-  stage_key TEXT NOT NULL CHECK (stage_key IN ('lead','mql','hpp','opp','pursuit','closeWon')),
+  stage_key TEXT NOT NULL CHECK (stage_key IN ('lead','mql','hpp','opp','pursuit','closeWon','closeLost')),
   projection NUMERIC(10,0),
   edited_at TIMESTAMPTZ DEFAULT NOW(),
   edited_by TEXT,

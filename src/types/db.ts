@@ -1,6 +1,13 @@
+import type { RegionKey } from '../constants/regions';
+
 export type StageKey = 'lead' | 'mql';
 
-export type AttributionStageKey = 'hpp' | 'opp' | 'pursuit' | 'closeWon';
+export type AttributionStageKey =
+  | 'hpp'
+  | 'opp'
+  | 'pursuit'
+  | 'closeWon'
+  | 'closeLost';
 
 export type PeriodIndex = 1 | 2 | 3 | 4;
 
@@ -23,6 +30,7 @@ export interface Lead {
   account?: string | null;
   title?: string | null;
   country?: string | null;
+  region?: RegionKey | null;
   owner?: string | null;
   lead_source?: string | null;
   current_stage: StageKey;
@@ -67,4 +75,76 @@ export interface FunnelActual {
   actual: number | null;
   edited_at: string;
   edited_by?: string | null;
+}
+
+export interface Attribution {
+  id: string;
+  // M7 leaves lead_id null. M8 will add an "associate lead" picker.
+  lead_id?: string | null;
+  // Shared across stages for the same deal so HPP -> Opp -> Pursuit -> Won
+  // all link back to one logical opportunity.
+  deal_id?: string | null;
+  stage_key: AttributionStageKey;
+  // First-touch (primary) channel — the leaf that drives the funnel grid cell.
+  channel_id?: string | null;
+  year: number;
+  period_index: PeriodIndex;
+  label?: string | null;     // Deal name, e.g. "Acme Corp"
+  account?: string | null;
+  amount?: number | null;
+  sf_link?: string | null;
+  region?: RegionKey | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AttributionTouch {
+  id: string;
+  attribution_id: string;
+  touch_order: number;        // 1-indexed
+  channel_id?: string | null;
+  touched_at?: string | null; // ISO date
+  notes?: string | null;
+  created_at: string;
+}
+
+// One row per (sequence, export_date). Populated by the n8n weekly cron;
+// the app never writes here. Region is inferred at read time from
+// sequence_name (lib/outreach.ts) so it isn't on the row.
+export interface OutreachSnapshot {
+  id: string;
+  export_date: string;        // ISO date (YYYY-MM-DD)
+  week_number: number;
+  year: number;
+  sequence_id: number;
+  sequence_name: string;
+  enabled: boolean;
+  step_count: number;
+  duration_days: number;
+  total_sent: number;
+  delivered: number;
+  bounced: number;
+  failed: number;
+  opened: number;
+  clicked: number;
+  replied: number;
+  positive_replies: number;
+  neutral_replies: number;
+  negative_replies: number;
+  opted_out: number;
+  delivery_rate: number;      // percentage 0-100
+  open_rate: number;
+  click_rate: number;
+  reply_rate: number;
+  bounce_rate: number;
+  opt_out_rate: number;
+  contacted_prospects: number;
+  replied_prospects: number;
+  prospects_added: number;
+  prospects_active: number;
+  total_tasks: number;
+  overdue_tasks: number;
+  outbound_calls: number;
+  linkedin_tasks_completed: number;
+  created_at: string;
 }

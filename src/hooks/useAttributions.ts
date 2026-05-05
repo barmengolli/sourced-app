@@ -1,0 +1,387 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RealtimeChannel } from '@supabase/supabase-js';
+import { supabase } from '../lib/supabase';
+import type {
+  Attribution,
+  AttributionStageKey,
+  PeriodIndex,
+} from '../types/db';
+import type { RegionKey } from '../constants/regions';
+import { TERMINAL_STAGES } from '../constants/funnelStages';
+
+const PAGE = 1000;
+
+export interface NewAttributionInput {
+  stage_key: AttributionStageKey;
+  channel_id: string;
+  year: number;
+  period_index: PeriodIndex;
+  label?: string | null;
+  account?: string | null;
+  amount?: number | null;
+  sf_link?: string | null;
+  region?: RegionKey | null;
+  deal_id?: string | null;
+  lead_id?: string | null;
+}
+
+export interface UseAttributionsResult {
+  attributions: Attribution[];
+  loading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;
+  create: (input: NewAttributionInput) => Promise<Attribution>;
+  update: (id: string, patch: Partial<Attribution>) => Promise<void>;
+  deleteAttribution: (id: string) => Promise<void>;
+  // Promote copies the source attribution into a new one at the next stage,
+  // preserving deal_id and copying touches. Source is NOT deleted (history).
+  promote: (
+    id: string,
+    newPeriod: { year: number; periodIndex: PeriodIndex },
+  ) => Promise<Attribution>;
+  // markLost is the parallel-terminal action to promote: insert a new row
+  // at stage_key='closeLost' sharing the source's deal_id. The source row
+  // is preserved so the deal's history stays intact.
+  markLost: (
+    id: string,
+    newPeriod: { year: number; periodIndex: PeriodIndex },
+  ) => Promise<Attribution>;
+}
+
+const STAGE_NEXT: Record<AttributionStageKey, AttributionStageKey | null> = {
+  hpp: 'opp',
+  opp: 'pursuit',
+  pursuit: 'closeWon',
+  closeWon: null,
+  closeLost: null,
+};
+
+// PostgREST default cap is 1000 rows; page until exhausted to support full set.
+async function fetchAllAttributions(): Promise<Attribution[]> {
+  const all: Attribution[] = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('attributions')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    all.push(...(data as Attribution[]));
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+  return all;
+}
+
+export function useAttributions(): UseAttributionsResult {
+  const [attributions, setAttributions] = useState<Attribution[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  const attributionsRef = useRef<Attribution[]>([]);
+  attributionsRef.current = attributions;
+
+  const channelRef = useRef<RealtimeChannel | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const all = await fetchAllAttributions();
+      setAttributions(all);
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error(String(err)));
+      console.error('Failed to load attributions', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchAllAttributions()
+      .then((all) => {
+        if (cancelled) return;
+        setAttributions(all);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err : new Error(String(err)));
+        console.error('Failed to load attributions', err);
+        setLoading(false);
+      });
+
+    // Unique per mount to avoid .on()-after-.subscribe() collisions.
+    const channelName = `public:attributions:${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+    channelRef.current = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attributions' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const next = payload.new as Attribution;
+            setAttributions((prev) =>
+              prev.some((a) => a.id === next.id) ? prev : [next, ...prev],
+            );
+          } else if (payload.eventType === 'UPDATE') {
+            const next = payload.new as Attribution;
+            setAttributions((prev) =>
+              prev.map((a) => (a.id === next.id ? next : a)),
+            );
+          } else if (payload.eventType === 'DELETE') {
+            const old = payload.old as { id?: string };
+            if (!old?.id) return;
+            setAttributions((prev) => prev.filter((a) => a.id !== old.id));
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      if (channelRef.current) {
+        supabase.removeChannel(channelRef.current);
+        channelRef.current = null;
+      }
+    };
+  }, []);
+
+  const create = useCallback(
+    async (input: NewAttributionInput): Promise<Attribution> => {
+      const { data, error: err } = await supabase
+        .from('attributions')
+        .insert(input)
+        .select()
+        .single();
+      if (err) {
+        console.error('Attribution insert failed', err);
+        throw err;
+      }
+      const created = data as Attribution;
+      // Optimistic add; realtime echo will be a no-op since we dedupe by id.
+      setAttributions((prev) =>
+        prev.some((a) => a.id === created.id) ? prev : [created, ...prev],
+      );
+      return created;
+    },
+    [],
+  );
+
+  const update = useCallback(
+    async (id: string, patch: Partial<Attribution>): Promise<void> => {
+      const before = attributionsRef.current.find((a) => a.id === id);
+      if (!before) throw new Error('Attribution not found');
+      const optimistic = { ...before, ...patch } as Attribution;
+      setAttributions((prev) => prev.map((a) => (a.id === id ? optimistic : a)));
+      const { error: err } = await supabase
+        .from('attributions')
+        .update(patch)
+        .eq('id', id);
+      if (err) {
+        // Roll back on failure.
+        setAttributions((prev) => prev.map((a) => (a.id === id ? before : a)));
+        console.error('Attribution update failed', err);
+        throw err;
+      }
+    },
+    [],
+  );
+
+  const deleteAttribution = useCallback(
+    async (id: string): Promise<void> => {
+      const before = attributionsRef.current;
+      setAttributions((prev) => prev.filter((a) => a.id !== id));
+      const { error: err } = await supabase
+        .from('attributions')
+        .delete()
+        .eq('id', id);
+      if (err) {
+        setAttributions(before);
+        console.error('Attribution delete failed', err);
+        throw err;
+      }
+    },
+    [],
+  );
+
+  const promote = useCallback(
+    async (
+      id: string,
+      newPeriod: { year: number; periodIndex: PeriodIndex },
+    ): Promise<Attribution> => {
+      const source = attributionsRef.current.find((a) => a.id === id);
+      if (!source) throw new Error('Attribution not found');
+      const next = STAGE_NEXT[source.stage_key];
+      if (!next) {
+        throw new Error('Already at the final stage');
+      }
+
+      // 1. Insert the new attribution.
+      const newRow: NewAttributionInput = {
+        stage_key: next,
+        channel_id: source.channel_id ?? '',
+        year: newPeriod.year,
+        period_index: newPeriod.periodIndex,
+        label: source.label,
+        account: source.account,
+        amount: source.amount,
+        sf_link: source.sf_link,
+        deal_id: source.deal_id,
+        lead_id: source.lead_id,
+      };
+      const { data: inserted, error: insErr } = await supabase
+        .from('attributions')
+        .insert(newRow)
+        .select()
+        .single();
+      if (insErr) {
+        console.error('Promote insert failed', insErr);
+        throw insErr;
+      }
+      const created = inserted as Attribution;
+
+      // 2. Copy touches.
+      const { data: srcTouches, error: tErr } = await supabase
+        .from('attribution_touches')
+        .select('*')
+        .eq('attribution_id', source.id)
+        .order('touch_order', { ascending: true });
+      if (tErr) {
+        console.error('Promote touches read failed', tErr);
+        throw tErr;
+      }
+      const newTouches = (srcTouches ?? []).map(
+        (t: {
+          touch_order: number;
+          channel_id: string | null;
+          touched_at: string | null;
+          notes: string | null;
+        }) => ({
+          attribution_id: created.id,
+          touch_order: t.touch_order,
+          channel_id: t.channel_id,
+          touched_at: t.touched_at,
+          notes: t.notes,
+        }),
+      );
+      if (newTouches.length > 0) {
+        const { error: tInsErr } = await supabase
+          .from('attribution_touches')
+          .insert(newTouches);
+        if (tInsErr) {
+          // Rollback the new attribution row so we don't orphan a deal at the
+          // new stage with no touches.
+          await supabase.from('attributions').delete().eq('id', created.id);
+          console.error('Promote touches insert failed', tInsErr);
+          throw tInsErr;
+        }
+      }
+
+      setAttributions((prev) =>
+        prev.some((a) => a.id === created.id) ? prev : [created, ...prev],
+      );
+      return created;
+    },
+    [],
+  );
+
+  // markLost: parallel-terminal cousin of promote. Inserts a new row at
+  // stage_key='closeLost' sharing the source's deal_id, copies its touches,
+  // and leaves the source row intact so the deal's stage history is
+  // preserved. Cannot fire from a terminal source (closeWon, closeLost) —
+  // the UI hides the action there but we double-guard here.
+  const markLost = useCallback(
+    async (
+      id: string,
+      newPeriod: { year: number; periodIndex: PeriodIndex },
+    ): Promise<Attribution> => {
+      const source = attributionsRef.current.find((a) => a.id === id);
+      if (!source) throw new Error('Attribution not found');
+      if (TERMINAL_STAGES.includes(source.stage_key)) {
+        throw new Error('Cannot close-lost a terminal deal');
+      }
+
+      const newRow: NewAttributionInput = {
+        stage_key: 'closeLost',
+        channel_id: source.channel_id ?? '',
+        year: newPeriod.year,
+        period_index: newPeriod.periodIndex,
+        label: source.label,
+        account: source.account,
+        amount: source.amount,
+        sf_link: source.sf_link,
+        region: source.region,
+        deal_id: source.deal_id,
+        lead_id: source.lead_id,
+      };
+      const { data: inserted, error: insErr } = await supabase
+        .from('attributions')
+        .insert(newRow)
+        .select()
+        .single();
+      if (insErr) {
+        console.error('markLost insert failed', insErr);
+        throw insErr;
+      }
+      const created = inserted as Attribution;
+
+      // Copy touches so the Lost row has the same channel-influence trail
+      // as the source. Same rollback shape as promote: if touch insert
+      // fails, drop the new attribution row to avoid an orphan.
+      const { data: srcTouches, error: tErr } = await supabase
+        .from('attribution_touches')
+        .select('*')
+        .eq('attribution_id', source.id)
+        .order('touch_order', { ascending: true });
+      if (tErr) {
+        console.error('markLost touches read failed', tErr);
+        throw tErr;
+      }
+      const newTouches = (srcTouches ?? []).map(
+        (t: {
+          touch_order: number;
+          channel_id: string | null;
+          touched_at: string | null;
+          notes: string | null;
+        }) => ({
+          attribution_id: created.id,
+          touch_order: t.touch_order,
+          channel_id: t.channel_id,
+          touched_at: t.touched_at,
+          notes: t.notes,
+        }),
+      );
+      if (newTouches.length > 0) {
+        const { error: tInsErr } = await supabase
+          .from('attribution_touches')
+          .insert(newTouches);
+        if (tInsErr) {
+          await supabase.from('attributions').delete().eq('id', created.id);
+          console.error('markLost touches insert failed', tInsErr);
+          throw tInsErr;
+        }
+      }
+
+      setAttributions((prev) =>
+        prev.some((a) => a.id === created.id) ? prev : [created, ...prev],
+      );
+      return created;
+    },
+    [],
+  );
+
+  return {
+    attributions,
+    loading,
+    error,
+    refresh,
+    create,
+    update,
+    deleteAttribution,
+    promote,
+    markLost,
+  };
+}

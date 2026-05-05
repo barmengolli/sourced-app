@@ -1,4 +1,5 @@
 import type {
+  Attribution,
   AttributionStageKey,
   Channel,
   FunnelActual,
@@ -6,11 +7,12 @@ import type {
   Lead,
   PeriodIndex,
 } from '../types/db';
+import { REGIONS, type RegionKey } from '../constants/regions';
 import {
   FUNNEL_STAGES,
   type FunnelStageKey,
 } from '../constants/funnelStages';
-import { quarterOfIsoDate } from './dates';
+import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
 
 export type PeriodFilter = 'year' | 'Q1' | 'Q2' | 'Q3' | 'Q4';
 
@@ -46,8 +48,17 @@ interface ComputeInput {
   channels: Channel[];
   projections: FunnelProjection[];
   manualActuals: FunnelActual[];
+  // M7: attribution-driven counts for the four attribution stages. Optional
+  // on the input shape so callers that don't need attributions (early tests,
+  // fixtures) can pass minimal input without crashing.
+  attributions?: Attribution[];
   year: number;
   filter: PeriodFilter;
+  // Multi-select region filter. When undefined or fully populated (all five
+  // regions), no filtering happens. When partial, leads and attributions
+  // outside the selected regions are excluded. Null-region rows are
+  // excluded under partial filters.
+  regions?: Set<RegionKey>;
 }
 
 function emptyCells(): Record<FunnelStageKey, CellValues> {
@@ -79,8 +90,31 @@ function firstMqlDate(lead: Lead): string | null {
   return best;
 }
 
+// Region filter helper. Returns true when the row should be included.
+// Undefined regions or a fully-populated set means "no filter, include
+// everything." A partial set excludes rows whose region is null/undefined
+// or not in the set.
+function regionMatches(
+  rowRegion: RegionKey | string | null | undefined,
+  regions: Set<RegionKey> | undefined,
+): boolean {
+  if (!regions) return true;
+  if (regions.size === REGIONS.length) return true;
+  if (!rowRegion) return false;
+  return regions.has(rowRegion as RegionKey);
+}
+
 export function computeGrid(input: ComputeInput): ComputedGrid {
-  const { leads, channels, projections, manualActuals, year, filter } = input;
+  const {
+    leads,
+    channels,
+    projections,
+    manualActuals,
+    attributions = [],
+    year,
+    filter,
+    regions,
+  } = input;
 
   // 1. Initialize per-channel rows (own counts only at this stage; rollup
   //    happens after the lead pass). hasChildren / depth / ancestors are
@@ -98,9 +132,12 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   }
 
   // 2. Lead pass: bucket each lead's lead-stage and (optional) mql-stage
-  //    into its source channel's own counts.
+  //    into its source channel's own counts. Region filter is applied at
+  //    the top of each iteration so a filtered-out lead doesn't contribute
+  //    to grid totals OR to the unassigned count.
   let unassignedLeadCount = 0;
   for (const l of leads) {
+    if (!regionMatches(l.region, regions)) continue;
     // Lead stage: bucket by marketing_sourced_date.
     const leadBucket = quarterOfIsoDate(l.marketing_sourced_date);
     if (leadBucket && matchesPeriod(leadBucket, year, filter)) {
@@ -130,15 +167,55 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     }
   }
 
-  // 3. Manual actuals (HPP / Opp / Pursuit / CloseWon).
-  for (const a of manualActuals) {
-    if (a.actual === null || a.actual === undefined) continue;
+  // 3. Attribution-stage actuals (HPP / Opp / Pursuit / CloseWon).
+  //
+  //    Prefer count(attributions where channel_id, year, period_index,
+  //    stage_key match) over funnel_actuals when one or more attribution
+  //    rows exist for that exact cell. Fall back to funnel_actuals only
+  //    when no attribution covers the cell — this keeps the old cell-edit
+  //    path working through the migration window.
+  //
+  //    M8 cleanup note: once teams commit to attribution-only data entry,
+  //    drop the manualActuals fallback (and useFunnelActuals + the
+  //    funnel_actuals table itself can be retired).
+  const attribKey = (cid: string, y: number, p: number, s: string): string =>
+    `${cid}\x1f${y}\x1f${p}\x1f${s}`;
+
+  // Count attributions per (channel, year, period, stage). One attribution row
+  // contributes 1 to its leaf channel's stage cell. Channel rollup to parents
+  // happens later in step 5. Region filter applied per attribution.
+  const handledByAttribution = new Set<string>();
+  for (const a of attributions) {
+    if (!a.channel_id) continue;
+    if (!regionMatches(a.region, regions)) continue;
     const bucket = { year: a.year, quarter: a.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
     const row = rowMap.get(a.channel_id);
     if (!row) continue;
     const cell = row.cells[a.stage_key];
-    cell.actual = (cell.actual ?? 0) + a.actual;
+    cell.actual = (cell.actual ?? 0) + 1;
+    handledByAttribution.add(
+      attribKey(a.channel_id, a.year, a.period_index, a.stage_key),
+    );
+  }
+
+  // Manual fallback: only contribute when no attribution covers this exact
+  // (channel, year, period, stage) cell.
+  for (const m of manualActuals) {
+    if (m.actual === null || m.actual === undefined) continue;
+    const bucket = { year: m.year, quarter: m.period_index };
+    if (!matchesPeriod(bucket, year, filter)) continue;
+    if (
+      handledByAttribution.has(
+        attribKey(m.channel_id, m.year, m.period_index, m.stage_key),
+      )
+    ) {
+      continue;
+    }
+    const row = rowMap.get(m.channel_id);
+    if (!row) continue;
+    const cell = row.cells[m.stage_key];
+    cell.actual = (cell.actual ?? 0) + m.actual;
   }
 
   // 4. Projections (all 6 stages).
@@ -296,5 +373,208 @@ export function funnelEfficiencyPercent(
 export function isAttributionStage(
   s: FunnelStageKey,
 ): s is AttributionStageKey {
-  return s === 'hpp' || s === 'opp' || s === 'pursuit' || s === 'closeWon';
+  return (
+    s === 'hpp' ||
+    s === 'opp' ||
+    s === 'pursuit' ||
+    s === 'closeWon' ||
+    s === 'closeLost'
+  );
+}
+
+// ---------- Weekly compute (Compare tab) ----------
+
+export interface WeeklyCellValues {
+  // counts[i] is the actual for the ISO week at weekIndices[i].
+  counts: number[];
+}
+
+export interface WeeklyRow {
+  channelId: string;
+  hasChildren: boolean;
+  parentId: string | null;
+  depth: number;
+  ancestors: string[];
+  cells: Record<FunnelStageKey, WeeklyCellValues>;
+}
+
+export interface WeeklyGrid {
+  // Order matches input weekIndices.
+  weeks: IsoWeek[];
+  rows: WeeklyRow[];
+  totals: Record<FunnelStageKey, WeeklyCellValues>;
+  unassignedLeadCount: number;
+}
+
+export interface ComputeWeeklyInput {
+  leads: Lead[];
+  channels: Channel[];
+  attributions?: Attribution[];
+  // ISO weeks to bucket into; results preserve order.
+  weeks: IsoWeek[];
+  regions?: Set<RegionKey>;
+}
+
+function weekKey(w: IsoWeek): string {
+  return `${w.year}-${w.week}`;
+}
+
+function emptyWeeklyCells(numWeeks: number): Record<FunnelStageKey, WeeklyCellValues> {
+  const out = {} as Record<FunnelStageKey, WeeklyCellValues>;
+  for (const s of FUNNEL_STAGES) {
+    out[s] = { counts: new Array<number>(numWeeks).fill(0) };
+  }
+  return out;
+}
+
+// Compute per-channel × stage actuals bucketed by ISO week. Lead and MQL
+// counts come from leads.marketing_sourced_date and stage_history. HPP / Opp /
+// Pursuit / CloseWon counts come from attributions.created_at — i.e., the week
+// the deal was logged at that stage, NOT the underlying transition date in
+// SFDC. This matches how the Funnel Data Entry tab attributes deals (one row
+// per stage) and keeps the math consistent with quarterly compute.
+export function computeWeekly(input: ComputeWeeklyInput): WeeklyGrid {
+  const { leads, channels, attributions = [], weeks, regions } = input;
+  const numWeeks = weeks.length;
+  const weekIndex = new Map<string, number>();
+  weeks.forEach((w, i) => weekIndex.set(weekKey(w), i));
+
+  // 1. Initialize rows.
+  const rowMap = new Map<string, WeeklyRow>();
+  for (const c of channels) {
+    rowMap.set(c.id, {
+      channelId: c.id,
+      hasChildren: false,
+      parentId: c.parent_channel_id ?? null,
+      depth: 1,
+      ancestors: [],
+      cells: emptyWeeklyCells(numWeeks),
+    });
+  }
+
+  // 2. Lead pass.
+  let unassignedLeadCount = 0;
+  for (const l of leads) {
+    if (!regionMatches(l.region, regions)) continue;
+    const leadWeek = isoWeekOf(l.marketing_sourced_date);
+    if (leadWeek) {
+      const idx = weekIndex.get(weekKey(leadWeek));
+      if (idx !== undefined) {
+        if (!l.source_channel_id) {
+          unassignedLeadCount += 1;
+        } else {
+          const row = rowMap.get(l.source_channel_id);
+          if (row) row.cells.lead.counts[idx] += 1;
+        }
+      }
+    }
+    const mqlIso = firstMqlDate(l);
+    if (mqlIso) {
+      const mqlWeek = isoWeekOf(mqlIso);
+      if (mqlWeek) {
+        const idx = weekIndex.get(weekKey(mqlWeek));
+        if (idx !== undefined && l.source_channel_id) {
+          const row = rowMap.get(l.source_channel_id);
+          if (row) row.cells.mql.counts[idx] += 1;
+        }
+      }
+    }
+  }
+
+  // 3. Attribution pass: bucket by created_at week (week-of-creation, not
+  //    week-of-stage-transition; see the doc comment above).
+  for (const a of attributions) {
+    if (!a.channel_id) continue;
+    if (!regionMatches(a.region, regions)) continue;
+    const w = isoWeekOf(a.created_at);
+    if (!w) continue;
+    const idx = weekIndex.get(weekKey(w));
+    if (idx === undefined) continue;
+    const row = rowMap.get(a.channel_id);
+    if (!row) continue;
+    row.cells[a.stage_key].counts[idx] += 1;
+  }
+
+  // 4. Tree rollup. Mirrors computeGrid: parents get their own + sum of all
+  //    descendants.
+  const childrenByParent = new Map<string, string[]>();
+  for (const c of channels) {
+    if (!c.parent_channel_id) continue;
+    const arr = childrenByParent.get(c.parent_channel_id) ?? [];
+    arr.push(c.id);
+    childrenByParent.set(c.parent_channel_id, arr);
+  }
+  const rolledUp = new Set<string>();
+  const rollup = (nodeId: string): void => {
+    if (rolledUp.has(nodeId)) return;
+    rolledUp.add(nodeId);
+    const node = rowMap.get(nodeId);
+    if (!node) return;
+    for (const cid of childrenByParent.get(nodeId) ?? []) {
+      rollup(cid);
+      const childRow = rowMap.get(cid);
+      if (!childRow) continue;
+      for (const stage of FUNNEL_STAGES) {
+        for (let i = 0; i < numWeeks; i++) {
+          node.cells[stage].counts[i] += childRow.cells[stage].counts[i];
+        }
+      }
+    }
+  };
+  for (const c of channels) {
+    if (!c.parent_channel_id) rollup(c.id);
+  }
+
+  // 5. DFS ordering.
+  const sortKey = (c: Channel): [number, string] => [c.display_order, c.name];
+  const cmp = (a: Channel, b: Channel) => {
+    const [ao, an] = sortKey(a);
+    const [bo, bn] = sortKey(b);
+    if (ao !== bo) return ao - bo;
+    return an.localeCompare(bn);
+  };
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+  const sortedChildren = (parentId: string | null): Channel[] => {
+    const ids =
+      parentId === null
+        ? channels.filter((c) => !c.parent_channel_id).map((c) => c.id)
+        : (childrenByParent.get(parentId) ?? []);
+    return ids
+      .map((id) => channelById.get(id))
+      .filter((c): c is Channel => Boolean(c))
+      .slice()
+      .sort(cmp);
+  };
+  const orderedRows: WeeklyRow[] = [];
+  const visit = (nodeId: string, depth: number, ancestors: string[]): void => {
+    const channel = channelById.get(nodeId);
+    if (!channel) return;
+    const row = rowMap.get(nodeId);
+    if (!row) return;
+    row.depth = depth;
+    row.ancestors = ancestors;
+    row.hasChildren = (childrenByParent.get(nodeId)?.length ?? 0) > 0;
+    orderedRows.push(row);
+    for (const child of sortedChildren(nodeId)) {
+      visit(child.id, depth + 1, [...ancestors, nodeId]);
+    }
+  };
+  for (const root of sortedChildren(null)) {
+    visit(root.id, 1, []);
+  }
+
+  // 6. Totals: sum across roots.
+  const totals = emptyWeeklyCells(numWeeks);
+  for (const c of channels) {
+    if (c.parent_channel_id) continue;
+    const r = rowMap.get(c.id);
+    if (!r) continue;
+    for (const stage of FUNNEL_STAGES) {
+      for (let i = 0; i < numWeeks; i++) {
+        totals[stage].counts[i] += r.cells[stage].counts[i];
+      }
+    }
+  }
+
+  return { weeks, rows: orderedRows, totals, unassignedLeadCount };
 }
