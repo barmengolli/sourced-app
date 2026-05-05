@@ -66,6 +66,10 @@ export default function OpportunitiesListModal({
 
   const nextStage = STAGE_NEXT[stageKey];
   const lossEligible = LOSS_ELIGIBLE_STAGES.includes(stageKey);
+  // The full attribution set powers per-row downstream-existence checks
+  // below. Read once at this level so the row map's predicate is just a
+  // .some() over a stable array reference.
+  const allAttributions = attributionsHook.attributions;
 
   const wrap = async (id: string, fn: () => Promise<void>) => {
     setBusyId(id);
@@ -120,6 +124,37 @@ export default function OpportunitiesListModal({
               const isPromoting = promoteFor === a.id;
               const isClosingLost = closeLostFor === a.id;
               const isConfirmingDelete = confirmDeleteFor === a.id;
+
+              // Duplicate-promote guard: when the deal already has a row
+              // at the would-be downstream stage, block Promote at the UI
+              // layer. The hook itself stays permissive (a deal can
+              // legitimately re-enter a stage after a closeLost via
+              // Delete-then-Promote), but the common case is an
+              // accidental double-click on a stale modal view, which the
+              // UI should not let through. Rows without a deal_id keep
+              // the old free-promote behavior.
+              const hasDownstreamPromoteRow =
+                nextStage !== null &&
+                a.deal_id != null &&
+                a.deal_id !== '' &&
+                allAttributions.some(
+                  (other) =>
+                    other.id !== a.id &&
+                    other.deal_id === a.deal_id &&
+                    other.stage_key === nextStage,
+                );
+
+              // Same idea for Close Lost: any other row with this
+              // deal_id at stage_key='closeLost' blocks the action.
+              const hasDownstreamLostRow =
+                a.deal_id != null &&
+                a.deal_id !== '' &&
+                allAttributions.some(
+                  (other) =>
+                    other.id !== a.id &&
+                    other.deal_id === a.deal_id &&
+                    other.stage_key === 'closeLost',
+                );
               return (
                 <li key={a.id} className="py-3 space-y-2">
                   <div className="flex items-baseline justify-between gap-3">
@@ -166,13 +201,24 @@ export default function OpportunitiesListModal({
                         onClick={() =>
                           setPromoteFor(isPromoting ? null : a.id)
                         }
-                        disabled={isBusy || nextStage === null}
+                        disabled={
+                          isBusy ||
+                          nextStage === null ||
+                          hasDownstreamPromoteRow
+                        }
                         title={
                           nextStage === null
                             ? 'Already at the final stage'
-                            : `Promote to ${FUNNEL_STAGE_LABELS[nextStage]}`
+                            : hasDownstreamPromoteRow
+                              ? `Already promoted to ${FUNNEL_STAGE_LABELS[nextStage]}. Delete the downstream row to re-promote.`
+                              : `Promote to ${FUNNEL_STAGE_LABELS[nextStage]}`
                         }
-                        className="text-xs px-2 py-1 rounded border border-border text-charcoal hover:bg-muted disabled:opacity-40"
+                        className={
+                          'text-xs px-2 py-1 rounded border border-border text-charcoal hover:bg-muted disabled:opacity-40 ' +
+                          (hasDownstreamPromoteRow
+                            ? 'opacity-50 cursor-not-allowed'
+                            : '')
+                        }
                       >
                         Promote
                       </button>
@@ -182,9 +228,18 @@ export default function OpportunitiesListModal({
                           onClick={() =>
                             setCloseLostFor(isClosingLost ? null : a.id)
                           }
-                          disabled={isBusy}
-                          title="Close as lost"
-                          className="text-xs px-2 py-1 rounded text-danger hover:bg-danger/10"
+                          disabled={isBusy || hasDownstreamLostRow}
+                          title={
+                            hasDownstreamLostRow
+                              ? 'Already marked Closed Lost. Delete that row to re-mark.'
+                              : 'Close as lost'
+                          }
+                          className={
+                            'text-xs px-2 py-1 rounded text-danger hover:bg-danger/10 ' +
+                            (hasDownstreamLostRow
+                              ? 'opacity-50 cursor-not-allowed'
+                              : '')
+                          }
                         >
                           Close Lost
                         </button>
@@ -202,7 +257,7 @@ export default function OpportunitiesListModal({
                     </div>
                   </div>
 
-                  {isPromoting && nextStage && (
+                  {isPromoting && nextStage && !hasDownstreamPromoteRow && (
                     <PromotePanel
                       onCancel={() => setPromoteFor(null)}
                       onConfirm={async (newYear, newQ) => {
@@ -219,7 +274,7 @@ export default function OpportunitiesListModal({
                     />
                   )}
 
-                  {isClosingLost && lossEligible && (
+                  {isClosingLost && lossEligible && !hasDownstreamLostRow && (
                     <CloseLostPanel
                       onCancel={() => setCloseLostFor(null)}
                       onConfirm={async (newYear, newQ) => {
