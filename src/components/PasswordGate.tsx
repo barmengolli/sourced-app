@@ -1,15 +1,11 @@
 import { useState, useCallback } from 'react';
 
 const STORAGE_KEY = 'sourced_unlocked';
-const FALLBACK_PASSWORD = 'HWWQa4yD5vkX';
 
-const ENV_PASSWORD = import.meta.env.VITE_APP_PASSWORD as string | undefined;
-if (!ENV_PASSWORD) {
-  console.warn(
-    'VITE_APP_PASSWORD is not set. Falling back to default. Set it in .env to override.'
-  );
-}
-const CORRECT_PASSWORD = ENV_PASSWORD || FALLBACK_PASSWORD;
+// Read at module init so the value is captured once. If the env var is missing
+// we render an explicit misconfiguration error rather than letting anyone in
+// with a baked-in fallback (F-004).
+const CORRECT_PASSWORD = import.meta.env.VITE_APP_PASSWORD as string | undefined;
 
 export default function PasswordGate({ children }: { children: React.ReactNode }) {
   const [unlocked, setUnlocked] = useState(
@@ -21,6 +17,7 @@ export default function PasswordGate({ children }: { children: React.ReactNode }
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
+      if (!CORRECT_PASSWORD) return;
       if (password === CORRECT_PASSWORD) {
         sessionStorage.setItem(STORAGE_KEY, 'true');
         setUnlocked(true);
@@ -34,6 +31,30 @@ export default function PasswordGate({ children }: { children: React.ReactNode }
 
   if (unlocked) return <>{children}</>;
 
+  if (!CORRECT_PASSWORD) {
+    return (
+      <div className="min-h-screen bg-muted flex items-center justify-center">
+        <div className="bg-bg rounded-xl shadow-sm border border-border p-8 w-full max-w-sm space-y-3">
+          <div className="flex items-center justify-center gap-2">
+            <img
+              src="/sourced-mark.png"
+              alt="sourced"
+              className="w-10 h-10 object-contain"
+            />
+            <span className="text-lg font-semibold text-charcoal lowercase">sourced</span>
+          </div>
+          <h1 className="text-base font-semibold text-charcoal text-center">
+            App misconfigured
+          </h1>
+          <p className="text-sm text-slate-muted text-center">
+            VITE_APP_PASSWORD is not set. The deployment is missing required
+            configuration; sign-in is disabled until it is added.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-muted flex items-center justify-center">
       <form
@@ -41,7 +62,11 @@ export default function PasswordGate({ children }: { children: React.ReactNode }
         className="bg-bg rounded-xl shadow-sm border border-border p-8 w-full max-w-sm space-y-4"
       >
         <div className="flex items-center justify-center gap-2">
-          <img src="/sourced-mark.svg" alt="" className="w-7 h-7" />
+          <img
+            src="/sourced-mark.png"
+            alt="sourced"
+            className="w-10 h-10 object-contain"
+          />
           <span className="text-lg font-semibold text-charcoal lowercase">sourced</span>
         </div>
         <p className="text-sm text-slate-muted text-center">Enter password to continue</p>
