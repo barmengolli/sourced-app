@@ -578,3 +578,335 @@ export function computeWeekly(input: ComputeWeeklyInput): WeeklyGrid {
 
   return { weeks, rows: orderedRows, totals, unassignedLeadCount };
 }
+
+// ---------- Funnel Flow Sankey (Channel Influence chart) ----------
+//
+// Produces a 7-column Sankey: Channels → Leads → MQL → HPP → Opp → Pursuit
+// → (Closed Won | Closed Lost). Each lead in the cohort is traced by its
+// source_channel_id from the Channels column all the way through the
+// funnel; each edge is tagged with the originating channel id so the
+// renderer can color stacked ribbons per channel. Manual-entry deals
+// (attributions with no lead_id) enter directly at HPP, skipping the Lead
+// and MQL columns, and are colored by the attribution's own channel_id.
+//
+// Cohort definition (from the spec): leads with marketing_sourced_date in
+// the selected period AND region in the active set; manual-entry deals
+// matched by their (year, period_index) and region. Once in the cohort, a
+// lead's downstream stage transitions are NOT re-filtered — the chart
+// answers "for this period's cohort, where did they end up." Drop-off is
+// implicit (the narrowing of the Sankey).
+
+export interface FunnelSankeyEdge {
+  source: string;       // node id, e.g. "channel:<uuid>" or "stage:lead"
+  target: string;
+  value: number;
+  channelId: string;    // top-level channel id; drives the edge color
+}
+
+export interface FunnelSankeyNode {
+  id: string;
+  label: string;
+  kind: 'channel' | 'stage' | 'terminal';
+  channelId?: string;   // populated for channel nodes (used for color)
+  // For stage / terminal nodes only; lets the renderer color closeLost in
+  // red and closeWon in green without re-walking labels.
+  stageKey?: FunnelStageKey;
+}
+
+export interface FunnelSankeyData {
+  nodes: FunnelSankeyNode[];
+  edges: FunnelSankeyEdge[];
+}
+
+export interface ComputeFunnelSankeyInput {
+  leads: Lead[];
+  attributions: Attribution[];
+  channels: Channel[];
+  year: number;
+  filter: PeriodFilter;
+  regions?: Set<RegionKey>;
+}
+
+// Stage progression on the deal side: HPP → Opp → Pursuit → CloseWon, with
+// CloseLost as a parallel terminal reachable from any of HPP / Opp /
+// Pursuit. Order matters: it determines the "did this deal progress past
+// stage X" check and which stage's outgoing edge gets the attribution.
+const DEAL_STAGE_PROGRESSION: AttributionStageKey[] = [
+  'hpp',
+  'opp',
+  'pursuit',
+  'closeWon',
+];
+
+// Walks parent_channel_id up to the root. Returns the channel id of the
+// top-level ancestor (or the input id itself if it's already top-level).
+// Cycles are guarded against via a visited set; an unresolvable id falls
+// back to itself rather than throwing.
+function resolveTopLevelChannelId(
+  channelId: string,
+  channelById: Map<string, Channel>,
+): string {
+  let current: string | undefined = channelId;
+  const seen = new Set<string>();
+  while (current) {
+    if (seen.has(current)) return channelId;
+    seen.add(current);
+    const node = channelById.get(current);
+    if (!node) return channelId;
+    if (!node.parent_channel_id) return current;
+    current = node.parent_channel_id;
+  }
+  return channelId;
+}
+
+export function computeFunnelSankey(
+  input: ComputeFunnelSankeyInput,
+): FunnelSankeyData {
+  const { leads, attributions, channels, year, filter, regions } = input;
+
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+  const topLevelChannels = channels
+    .filter((c) => !c.parent_channel_id)
+    .slice()
+    .sort((a, b) => {
+      if (a.display_order !== b.display_order)
+        return a.display_order - b.display_order;
+      return a.name.localeCompare(b.name);
+    });
+
+  // Edge accumulator keyed by `${source}|${target}|${channelId}`. Multiple
+  // leads/deals from the same channel making the same transition collapse
+  // into one ribbon whose width is the cohort count.
+  const edgeMap = new Map<string, FunnelSankeyEdge>();
+  const bumpEdge = (source: string, target: string, channelId: string) => {
+    const key = `${source}|${target}|${channelId}`;
+    const existing = edgeMap.get(key);
+    if (existing) existing.value += 1;
+    else edgeMap.set(key, { source, target, value: 1, channelId });
+  };
+
+  // Build a deal_id → attribution[] index over all attributions. Used
+  // when tracing a cohort lead through its downstream HPP/Opp/etc. rows
+  // (matched by lead_id) so we can read the deal's stage set in one place.
+  const attrsByLeadId = new Map<string, Attribution[]>();
+  const attrsByDealId = new Map<string, Attribution[]>();
+  for (const a of attributions) {
+    if (a.lead_id) {
+      const arr = attrsByLeadId.get(a.lead_id) ?? [];
+      arr.push(a);
+      attrsByLeadId.set(a.lead_id, arr);
+    }
+    if (a.deal_id) {
+      const arr = attrsByDealId.get(a.deal_id) ?? [];
+      arr.push(a);
+      attrsByDealId.set(a.deal_id, arr);
+    }
+  }
+
+  // Track which deals (by deal_id) we've already counted via lead-sourced
+  // tracing; manual-entry pass below uses this to skip them so a deal
+  // isn't double-counted under both its lead's channel AND its
+  // attribution.channel_id.
+  const dealsCountedViaLead = new Set<string>();
+
+  // Helper: emit the deal-stage edges for one deal (a chain of attribution
+  // rows sharing a deal_id) under the given color channel. Used both by
+  // the cohort-lead pass and the manual-entry pass.
+  const emitDealEdges = (
+    dealAttrs: Attribution[],
+    colorChannelId: string,
+  ): void => {
+    const stageSet = new Set(dealAttrs.map((a) => a.stage_key));
+    // Walk the linear progression first to emit "stage → next stage"
+    // edges for every consecutive pair the deal hit.
+    for (let i = 0; i < DEAL_STAGE_PROGRESSION.length - 1; i++) {
+      const from = DEAL_STAGE_PROGRESSION[i];
+      const to = DEAL_STAGE_PROGRESSION[i + 1];
+      if (stageSet.has(from) && stageSet.has(to)) {
+        bumpEdge(`stage:${from}`, `stage:${to}`, colorChannelId);
+      }
+    }
+    // closeLost branches: the deal terminated at whichever was its
+    // highest progression stage in {hpp, opp, pursuit}. We pick the
+    // highest such stage from the deal's stage set; that's the stage
+    // whose outgoing → closeLost edge the deal contributes to.
+    if (stageSet.has('closeLost')) {
+      let lostFrom: AttributionStageKey | null = null;
+      for (const s of ['pursuit', 'opp', 'hpp'] as const) {
+        if (stageSet.has(s)) {
+          lostFrom = s;
+          break;
+        }
+      }
+      if (lostFrom) {
+        bumpEdge(
+          `stage:${lostFrom}`,
+          'terminal:closeLost',
+          colorChannelId,
+        );
+      }
+    }
+    // closeWon branch: handled implicitly by the linear progression above
+    // (pursuit → closeWon). We retarget that edge to the dedicated
+    // terminal node so closeWon and closeLost render side-by-side at the
+    // right edge instead of closeWon being a generic stage column.
+  };
+
+  // ---------- Pass 1: cohort leads ----------
+  for (const lead of leads) {
+    if (!regionMatches(lead.region, regions)) continue;
+    const leadBucket = quarterOfIsoDate(lead.marketing_sourced_date);
+    if (!leadBucket || !matchesPeriod(leadBucket, year, filter)) continue;
+    if (!lead.source_channel_id) continue; // unattributed leads skip the Sankey
+
+    const topId = resolveTopLevelChannelId(lead.source_channel_id, channelById);
+
+    // Channel → Leads (always for any cohort lead with a source channel).
+    bumpEdge(`channel:${topId}`, 'stage:lead', topId);
+
+    // Leads → MQL if the lead reached MQL.
+    if (firstMqlDate(lead) !== null) {
+      bumpEdge('stage:lead', 'stage:mql', topId);
+    }
+
+    // For deal-side edges, follow this lead's attributions (if any). A
+    // single lead may seed multiple deals over time; each is a separate
+    // chain under attrsByLeadId, then grouped by deal_id.
+    const leadAttrs = attrsByLeadId.get(lead.id) ?? [];
+    if (leadAttrs.length === 0) continue;
+
+    // Group this lead's attributions by deal_id (or by the row's own id
+    // when deal_id is null, so an orphan attribution still flows).
+    const dealsForLead = new Map<string, Attribution[]>();
+    for (const a of leadAttrs) {
+      const key = a.deal_id ?? a.id;
+      const arr = dealsForLead.get(key) ?? [];
+      arr.push(a);
+      dealsForLead.set(key, arr);
+    }
+
+    for (const [dealKey, dealAttrs] of dealsForLead) {
+      const stageSet = new Set(dealAttrs.map((a) => a.stage_key));
+      // MQL → HPP edge: the lead is in the cohort, reached MQL OR went
+      // straight to HPP without a stored MQL transition. We emit the
+      // edge whenever any HPP attribution exists for this lead (matches
+      // the spec: "leads in the cohort that have a downstream HPP
+      // attribution row").
+      if (stageSet.has('hpp')) {
+        bumpEdge('stage:mql', 'stage:hpp', topId);
+      }
+      emitDealEdges(dealAttrs, topId);
+      // Track the deal so the manual-entry pass below skips it.
+      if (dealAttrs.some((a) => a.deal_id)) {
+        dealsCountedViaLead.add(dealKey);
+      }
+    }
+  }
+
+  // ---------- Pass 2: manual-entry deals (no lead) ----------
+  for (const [dealId, dealAttrs] of attrsByDealId) {
+    if (dealsCountedViaLead.has(dealId)) continue;
+    // A manual-entry deal has all its attributions with lead_id = null.
+    // If ANY attribution in the chain has a lead_id, this is a
+    // lead-sourced deal that should have been counted in Pass 1; skip.
+    if (dealAttrs.some((a) => a.lead_id)) continue;
+
+    // Filter by the HPP row's period + region (the entry-point row).
+    const hpp = dealAttrs.find((a) => a.stage_key === 'hpp');
+    if (!hpp) continue; // chains without an HPP entry don't enter the Sankey
+    if (!regionMatches(hpp.region, regions)) continue;
+    if (!matchesPeriod({ year: hpp.year, quarter: hpp.period_index }, year, filter)) {
+      continue;
+    }
+    if (!hpp.channel_id) continue;
+
+    const topId = resolveTopLevelChannelId(hpp.channel_id, channelById);
+
+    // Channel → HPP direct (skips Leads + MQL columns per spec).
+    bumpEdge(`channel:${topId}`, 'stage:hpp', topId);
+    emitDealEdges(dealAttrs, topId);
+  }
+
+  // Pass 2b: HPP rows that lack a deal_id entirely (one-off attribution
+  // rows with no chain). attrsByDealId already covers chains; these
+  // single rows would otherwise fall through silently.
+  for (const a of attributions) {
+    if (a.lead_id) continue;
+    if (a.deal_id) continue;
+    if (a.stage_key !== 'hpp') continue;
+    if (!regionMatches(a.region, regions)) continue;
+    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter)) {
+      continue;
+    }
+    if (!a.channel_id) continue;
+    const topId = resolveTopLevelChannelId(a.channel_id, channelById);
+    bumpEdge(`channel:${topId}`, 'stage:hpp', topId);
+  }
+
+  // The progression's last hop (pursuit → closeWon) needs to retarget to
+  // the terminal:closeWon node so closeWon stacks alongside closeLost on
+  // the right edge instead of being a generic mid-funnel stage. Rewrite
+  // any edge whose target is "stage:closeWon" to "terminal:closeWon".
+  for (const [key, edge] of edgeMap) {
+    if (edge.target === 'stage:closeWon') {
+      edgeMap.delete(key);
+      edge.target = 'terminal:closeWon';
+      const newKey = `${edge.source}|${edge.target}|${edge.channelId}`;
+      const merged = edgeMap.get(newKey);
+      if (merged) merged.value += edge.value;
+      else edgeMap.set(newKey, edge);
+    }
+  }
+
+  // ---------- Build the node list ----------
+  // Order is load-bearing: Recharts assigns column indexes in the order
+  // nodes appear, which controls left-to-right placement.
+  const nodes: FunnelSankeyNode[] = [];
+  const nodeIdSet = new Set<string>();
+  const pushNode = (n: FunnelSankeyNode) => {
+    if (nodeIdSet.has(n.id)) return;
+    nodeIdSet.add(n.id);
+    nodes.push(n);
+  };
+
+  // Channels column: every top-level channel, in the same order as the
+  // grid. We always emit a node so an inactive channel still anchors the
+  // column visually; if it has no edges, the renderer will hide it via
+  // the empty-data guard.
+  for (const ch of topLevelChannels) {
+    pushNode({
+      id: `channel:${ch.id}`,
+      label: ch.name,
+      kind: 'channel',
+      channelId: ch.id,
+    });
+  }
+
+  // Stage columns in funnel order. Closed Won and Closed Lost are the
+  // two terminal nodes — they go last so they share the rightmost
+  // column.
+  const stageNodes: { id: string; label: string; key: FunnelStageKey }[] = [
+    { id: 'stage:lead', label: 'Leads', key: 'lead' },
+    { id: 'stage:mql', label: 'MQL', key: 'mql' },
+    { id: 'stage:hpp', label: 'HPP (SQL)', key: 'hpp' },
+    { id: 'stage:opp', label: 'Opp (SAO)', key: 'opp' },
+    { id: 'stage:pursuit', label: 'Pursuit', key: 'pursuit' },
+  ];
+  for (const s of stageNodes) {
+    pushNode({ id: s.id, label: s.label, kind: 'stage', stageKey: s.key });
+  }
+  pushNode({
+    id: 'terminal:closeWon',
+    label: 'Closed Won',
+    kind: 'terminal',
+    stageKey: 'closeWon',
+  });
+  pushNode({
+    id: 'terminal:closeLost',
+    label: 'Closed Lost',
+    kind: 'terminal',
+    stageKey: 'closeLost',
+  });
+
+  return { nodes, edges: [...edgeMap.values()] };
+}
