@@ -110,7 +110,7 @@ sourced-app/
 
 ## Database schema
 
-The full schema lives in `/sourced/SCHEMA.sql` (alongside this file). Paste into the Supabase SQL Editor on first setup. Do not modify the schema in code; if a change is needed, update SCHEMA.sql and run a migration.
+The full schema lives in `./SCHEMA.sql` at the repo root. Paste into the Supabase SQL Editor on first setup. Incremental changes go in `./migrations/` (see `./migrations/README.md` for naming, status, and apply order). When the schema changes, update `./SCHEMA.sql` in the same commit so the canonical file stays current.
 
 Tables:
 - `channels` — channel taxonomy (LinkedIn Ads, BDR Outreach, Website, Content Syndication, etc.)
