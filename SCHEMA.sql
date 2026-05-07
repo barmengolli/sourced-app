@@ -127,6 +127,14 @@ CREATE INDEX idx_attributions_period ON attributions(year, period_index);
 CREATE INDEX idx_attributions_channel ON attributions(channel_id);
 CREATE INDEX idx_attributions_region ON attributions(region);
 
+-- Defense-in-depth against duplicate downstream rows. UI guard in
+-- OpportunitiesListModal prevents most cases; this constraint catches
+-- bulk imports and direct SQL writes. Partial because legacy rows
+-- can have NULL or empty deal_id.
+CREATE UNIQUE INDEX attributions_deal_stage_uniq
+  ON attributions (deal_id, stage_key)
+  WHERE deal_id IS NOT NULL AND deal_id <> '';
+
 -- Ordered touches per attribution
 CREATE TABLE attribution_touches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

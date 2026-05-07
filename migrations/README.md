@@ -25,6 +25,7 @@ production Supabase project as of 2026-05-06.
 | `2026-05-04_q1_date_correction_book_a_call.sql` | APPLIED | Moved 34 leads' `marketing_sourced_date` from 2026-04-02 to 2026-03-31 (Q1 boundary correction for the "Book a call" form) and locked the field. |
 | `2026-05-04_q1_mql_history_correction_book_a_call.sql` | APPLIED | Of those 34 leads, moved 13 MQL `stage_history` entries' `entered_at` to 2026-03-31 so they bucket into Q1. |
 | `2026-05-04_add_close_lost_stage.sql` | APPLIED | Relaxed the `stage_key` CHECK constraints on `attributions`, `funnel_projections`, and `funnel_actuals` to include `'closeLost'`. |
+| `2026-05-07_attributions_unique_deal_stage.sql` | PENDING | F-006: Adds a partial UNIQUE index on `attributions (deal_id, stage_key)` (where `deal_id` is non-null and non-empty) to prevent duplicate downstream rows from any write path. Run the dedup query in the migration header before applying. |
 
 Status legend: **APPLIED** (run against prod), **PENDING** (committed
 but not yet run), **UNKNOWN** (provenance unclear, verify in Supabase
