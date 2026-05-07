@@ -50,8 +50,12 @@ export function useFunnelProjections(): UseFunnelProjectionsResult {
 
     void refresh();
 
+    // Unique per mount to avoid .on()-after-.subscribe() collisions.
+    const channelName = `public:funnel_projections:${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
     const channel = supabase
-      .channel('public:funnel_projections')
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'funnel_projections' },

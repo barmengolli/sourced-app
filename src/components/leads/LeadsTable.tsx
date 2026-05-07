@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { Channel, Lead } from '../../types/db';
 import { STAGE_LABELS } from '../../constants/stages';
+import { REGION_LABELS } from '../../constants/regions';
 import { formatDate, formatDateTime } from '../../lib/dates';
 import LockIcon from '../common/LockIcon';
 
@@ -10,6 +11,7 @@ export type LeadSortKey =
   | 'account'
   | 'current_stage'
   | 'country'
+  | 'region'
   | 'owner'
   | 'source_channel'
   | 'marketing_sourced_date'
@@ -27,6 +29,7 @@ const COLUMNS: Column[] = [
   { key: 'account', label: 'Account' },
   { key: 'current_stage', label: 'Stage' },
   { key: 'country', label: 'Country' },
+  { key: 'region', label: 'Region' },
   { key: 'owner', label: 'Owner' },
   { key: 'source_channel', label: 'Source channel' },
   { key: 'marketing_sourced_date', label: 'Sourced date' },
@@ -214,6 +217,15 @@ export default function LeadsTable({
                   <td className="px-3 py-2 text-charcoal">
                     {lead.country || <MissingValue />}
                     <CellLockBadge lead={lead} field="country" />
+                  </td>
+                  <td
+                    className="px-3 py-2 text-charcoal"
+                    title={
+                      lead.region ? REGION_LABELS[lead.region] : undefined
+                    }
+                  >
+                    {lead.region || <MissingValue />}
+                    <CellLockBadge lead={lead} field="region" />
                   </td>
                   <td className="px-3 py-2 text-charcoal">
                     {lead.owner || <MissingValue />}

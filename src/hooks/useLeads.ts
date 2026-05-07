@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { Lead, StageHistoryEntry, StageKey } from '../types/db';
@@ -242,6 +242,12 @@ export function useLeads(): UseLeadsResult {
   // subscription without clobbering the useEffect lifecycle.
   const channelRef = useRef<RealtimeChannel | null>(null);
   const realtimePausedRef = useRef(false);
+  // Per-instance unique channel name so multiple parallel mounts don't
+  // collide on .on() after .subscribe().
+  const channelName = useMemo(
+    () => `public:leads:${Math.random().toString(36).slice(2, 10)}`,
+    [],
+  );
 
   const markPending = useCallback((leadId: string, fields: string[]) => {
     const now = Date.now();
@@ -291,7 +297,7 @@ export function useLeads(): UseLeadsResult {
 
     const subscribe = (): RealtimeChannel => {
       return supabase
-        .channel('public:leads')
+        .channel(channelName)
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'leads' },
@@ -357,7 +363,7 @@ export function useLeads(): UseLeadsResult {
     realtimePausedRef.current = false;
     if (channelRef.current) return;
     channelRef.current = supabase
-      .channel('public:leads')
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'leads' },

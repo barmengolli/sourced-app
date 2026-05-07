@@ -6,6 +6,7 @@ export type EditableLeadField =
   | 'account'
   | 'title'
   | 'country'
+  | 'region'
   | 'owner'
   | 'lead_source'
   | 'current_stage'
@@ -19,6 +20,7 @@ export const EDITABLE_LEAD_FIELDS: EditableLeadField[] = [
   'account',
   'title',
   'country',
+  'region',
   'owner',
   'lead_source',
   'current_stage',
@@ -31,7 +33,13 @@ export const LOCKABLE_LEAD_FIELDS: ReadonlySet<EditableLeadField> = new Set(
   EDITABLE_LEAD_FIELDS,
 );
 
-export type LeadFieldKind = 'text' | 'date' | 'stage' | 'channel' | 'longText';
+export type LeadFieldKind =
+  | 'text'
+  | 'date'
+  | 'stage'
+  | 'channel'
+  | 'region'
+  | 'longText';
 
 export const LEAD_FIELD_LABELS: Record<EditableLeadField, string> = {
   first_name: 'First name',
@@ -39,6 +47,7 @@ export const LEAD_FIELD_LABELS: Record<EditableLeadField, string> = {
   account: 'Account',
   title: 'Title',
   country: 'Country',
+  region: 'Region',
   owner: 'Owner',
   lead_source: 'Lead source',
   current_stage: 'Stage',
@@ -53,6 +62,7 @@ export const LEAD_FIELD_KIND: Record<EditableLeadField, LeadFieldKind> = {
   account: 'text',
   title: 'text',
   country: 'text',
+  region: 'region',
   owner: 'text',
   lead_source: 'text',
   current_stage: 'stage',

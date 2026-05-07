@@ -6,6 +6,11 @@ import {
   LEAD_FIELD_LABELS,
 } from '../../constants/leadFields';
 import { STAGE_LABELS, STAGE_ORDER } from '../../constants/stages';
+import {
+  REGIONS,
+  REGION_LABELS,
+  type RegionKey,
+} from '../../constants/regions';
 import { formatDateTime } from '../../lib/dates';
 import LockIcon from '../common/LockIcon';
 
@@ -131,6 +136,29 @@ export default function LeadFieldRow({
           {visible.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}
+            </option>
+          ))}
+        </select>
+      );
+    }
+    if (kind === 'region') {
+      // Region is independent from country: editing country does NOT auto-
+      // update region. Users can revert region to SFDC if they want to
+      // re-derive from the imported country (which sets it via
+      // regionForCountry at import time).
+      const currentRegion = (rawValue as RegionKey | null) ?? '';
+      return (
+        <select
+          value={currentRegion}
+          onChange={(e) =>
+            void commit((e.target.value as RegionKey) || null)
+          }
+          className="w-full text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal focus:outline-none focus:ring-2 focus:ring-indigo focus:border-indigo"
+        >
+          <option value="">(none)</option>
+          {REGIONS.map((r) => (
+            <option key={r} value={r}>
+              {r} — {REGION_LABELS[r]}
             </option>
           ))}
         </select>

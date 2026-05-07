@@ -23,6 +23,7 @@ function candidateToSync(c: LeadCandidate): SfdcSync {
   if (c.account !== undefined) values.account = c.account;
   if (c.title !== undefined) values.title = c.title;
   if (c.country !== undefined) values.country = c.country;
+  if (c.region !== undefined) values.region = c.region;
   if (c.owner !== undefined) values.owner = c.owner;
   if (c.lead_source !== undefined) values.lead_source = c.lead_source;
   if (c.current_stage !== undefined) values.current_stage = c.current_stage;
@@ -41,7 +42,7 @@ function candidateToSync(c: LeadCandidate): SfdcSync {
   };
 }
 
-export default function ImportPage() {
+export default function FunnelImportPage() {
   const { leads, bulkSyncFromSfdc } = useLeads();
 
   const [step, setStep] = useState<Step>('upload');

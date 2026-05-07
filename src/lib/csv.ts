@@ -1,6 +1,10 @@
 import Papa from 'papaparse';
 import type { StageKey } from '../types/db';
 import { mapLifecycleStage } from '../constants/stageMapping';
+import {
+  regionForCountry,
+  type RegionKey,
+} from '../constants/regions';
 
 export interface ParsedCsv {
   headers: string[];
@@ -15,6 +19,7 @@ export interface LeadCandidate {
   account?: string;
   title?: string;
   country?: string;
+  region?: RegionKey;
   owner?: string;
   lead_source?: string;
   current_stage?: StageKey;
@@ -160,13 +165,18 @@ export function coalesceRows(
     const stage: StageKey | undefined =
       stageRaw !== undefined ? mapLifecycleStage(stageRaw) : undefined;
 
+    const country = readMapped(row, mapping.country);
     const candidate: LeadCandidate = {
       email,
       first_name: readMapped(row, mapping.first_name),
       last_name: readMapped(row, mapping.last_name),
       account: readMapped(row, mapping.account),
       title: readMapped(row, mapping.title),
-      country: readMapped(row, mapping.country),
+      country,
+      // Derive region from country at import time. The user can override
+      // later via the Lead drawer; the lock contract preserves overrides
+      // across re-imports.
+      region: regionForCountry(country),
       owner: readMapped(row, mapping.owner),
       lead_source: readMapped(row, mapping.lead_source),
       current_stage: stage,

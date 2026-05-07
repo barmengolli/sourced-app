@@ -650,6 +650,15 @@ export default function FunnelTable({
                         {isCollapsed ? '▶' : '▼'}
                       </span>
                     </button>
+                  ) : row.depth === 1 ? (
+                    // Top-level rows without children (e.g. manually-added
+                    // Sales) reserve the same chevron-sized space so their
+                    // names align with sibling parents that do have a
+                    // chevron. Deeper rows already align via paddingLeft.
+                    <span
+                      className="inline-block w-5 h-5 mr-1 align-middle"
+                      aria-hidden="true"
+                    />
                   ) : null}
                   {channel.name}
                 </td>
