@@ -11,7 +11,7 @@
 // into the function.
 
 import { useCallback, useMemo, useState } from 'react';
-import { Sankey } from 'recharts';
+import { ResponsiveContainer, Sankey } from 'recharts';
 import type {
   Attribution,
   AttributionStageKey,
@@ -305,22 +305,25 @@ function DealJourneySankeyCard({
           )}
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <Sankey
-          width={600}
+      <div className="w-full">
+        <ResponsiveContainer
+          width="100%"
           height={Math.max(100, data.nodes.length * 35)}
-          data={data}
-          nodeWidth={10}
-          nodePadding={16}
-          linkCurvature={0.4}
-          node={CustomNode}
-          link={CustomLink}
-          margin={{ left: 200, right: 80, top: 10, bottom: 10 }}
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={handleMouseLeave}
-          sort={false}
         >
-        </Sankey>
+          <Sankey
+            data={data}
+            nodeWidth={10}
+            nodePadding={16}
+            linkCurvature={0.4}
+            node={CustomNode}
+            link={CustomLink}
+            margin={{ left: 200, right: 80, top: 10, bottom: 10 }}
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+            sort={false}
+          >
+          </Sankey>
+        </ResponsiveContainer>
       </div>
     </div>
   );

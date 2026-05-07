@@ -53,8 +53,12 @@ export function useFunnelActuals(): UseFunnelActualsResult {
 
     void refresh();
 
+    // Unique per mount to avoid .on()-after-.subscribe() collisions.
+    const channelName = `public:funnel_actuals:${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
     const channel = supabase
-      .channel('public:funnel_actuals')
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'funnel_actuals' },

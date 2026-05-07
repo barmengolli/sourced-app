@@ -1,85 +1,261 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import PasswordGate from './components/PasswordGate';
+import Sidebar from './components/Sidebar';
 import LeadsPage from './pages/LeadsPage';
 import ChannelsPage from './pages/ChannelsPage';
-import DashboardPage from './pages/DashboardPage';
-import CohortPage from './pages/CohortPage';
 import SettingsPage from './pages/SettingsPage';
-import ImportPage from './pages/ImportPage';
+import FunnelImportPage from './pages/FunnelImportPage';
+import FunnelDataEntryPage from './pages/FunnelDataEntryPage';
+import FunnelDashboardPage from './pages/FunnelDashboardPage';
+import FunnelComparePage from './pages/FunnelComparePage';
+import OutreachDataPage from './pages/OutreachDataPage';
+import OutreachDashboardPage from './pages/OutreachDashboardPage';
+import OutreachComparePage from './pages/OutreachComparePage';
+import { useOutreachSnapshots } from './hooks/useOutreachSnapshots';
+import type { OutreachSnapshot } from './types/db';
+import { sectionForPage, SIDEBAR_SECTIONS } from './constants/sidebar';
+import { readJson, writeJson } from './lib/storage';
+import { currentIsoWeek, currentQuarter } from './lib/dates';
+import type { PeriodFilter } from './lib/compute';
+import { REGIONS, type RegionKey } from './constants/regions';
 
 export type PageKey =
+  | 'funnel-data'
+  | 'funnel-dashboard'
+  | 'funnel-compare'
+  | 'outreach-data'
+  | 'outreach-dashboard'
+  | 'outreach-compare'
   | 'leads'
   | 'channels'
-  | 'import'
-  | 'dashboard'
-  | 'cohort'
+  | 'funnel-import'
   | 'settings';
 
-const NAV: { key: PageKey; label: string }[] = [
-  { key: 'leads', label: 'Leads' },
-  { key: 'channels', label: 'Channels' },
-  { key: 'import', label: 'Import' },
-  { key: 'dashboard', label: 'Dashboard' },
-  { key: 'cohort', label: 'Cohort' },
-  { key: 'settings', label: 'Settings' },
-];
+// Initial page: pick from the Funnel section's lastTabStorageKey if present,
+// else its defaultChild. So returning users land on whatever Funnel sub-tab
+// they were last on.
+function initialPage(): PageKey {
+  const funnel = SIDEBAR_SECTIONS.find((s) => s.id === 'funnel');
+  if (!funnel) return 'funnel-data';
+  const last = readJson<PageKey | null>(funnel.lastTabStorageKey, null);
+  if (last && funnel.children.some((c) => c.key === last)) return last;
+  return funnel.defaultChild;
+}
+
+export type CompareView = 'single' | 'rolling4';
+
+interface FunnelSubPageProps {
+  year: number;
+  filter: PeriodFilter;
+  onYearChange: (y: number) => void;
+  onFilterChange: (f: PeriodFilter) => void;
+  regions: Set<RegionKey>;
+  onRegionsChange: (next: Set<RegionKey>) => void;
+  // Compare-tab state. Lifted alongside year/filter so a user bouncing
+  // between Compare and Data Entry doesn't lose their week selection.
+  compareWeek: number;
+  onCompareWeekChange: (w: number) => void;
+  compareView: CompareView;
+  onCompareViewChange: (v: CompareView) => void;
+}
+
+// Outreach sub-tabs share the same selectors (year/quarter/week/region/
+// sequences) so navigating between Data and Dashboard preserves the user's
+// view. Sequences is a Set<number> of sequence_ids; an empty set means
+// "All Sequences" (the multi-select treats empty and all-selected the
+// same, matching DataVis 1's contract).
+export interface OutreachSubPageProps {
+  year: number;
+  quarter: 1 | 2 | 3 | 4;
+  week: number;
+  regions: Set<RegionKey>;
+  selectedSequences: Set<number>;
+  onYearChange: (y: number) => void;
+  onQuarterChange: (q: 1 | 2 | 3 | 4) => void;
+  onWeekChange: (w: number) => void;
+  onRegionsChange: (next: Set<RegionKey>) => void;
+  onSelectedSequencesChange: (next: Set<number>) => void;
+  // Snapshots are loaded once at the App level (via useOutreachSnapshots
+  // there) and threaded down so the three sub-pages share one query and
+  // one realtime subscription.
+  snapshots: OutreachSnapshot[];
+  loading: boolean;
+}
 
 function PageBody({
   page,
   onNavigate,
+  funnelProps,
+  outreachProps,
 }: {
   page: PageKey;
   onNavigate: (p: PageKey) => void;
+  funnelProps: FunnelSubPageProps;
+  outreachProps: OutreachSubPageProps;
 }) {
   switch (page) {
+    case 'funnel-data':
+      return <FunnelDataEntryPage {...funnelProps} />;
+    case 'funnel-dashboard':
+      return <FunnelDashboardPage {...funnelProps} />;
+    case 'funnel-compare':
+      return <FunnelComparePage {...funnelProps} />;
+    case 'outreach-data':
+      return <OutreachDataPage {...outreachProps} />;
+    case 'outreach-dashboard':
+      return <OutreachDashboardPage {...outreachProps} />;
+    case 'outreach-compare':
+      return <OutreachComparePage {...outreachProps} />;
+    case 'funnel-import':
+      return <FunnelImportPage />;
     case 'leads':
       return <LeadsPage onNavigate={onNavigate} />;
     case 'channels':
       return <ChannelsPage onNavigate={onNavigate} />;
-    case 'import':
-      return <ImportPage />;
-    case 'dashboard':
-      return <DashboardPage />;
-    case 'cohort':
-      return <CohortPage />;
     case 'settings':
       return <SettingsPage />;
   }
 }
 
 export default function App() {
-  const [page, setPage] = useState<PageKey>('leads');
+  const [page, setPage] = useState<PageKey>(initialPage);
+
+  // Year/quarter selector state lifts to App.tsx so switching between Funnel
+  // sub-tabs preserves what the user is looking at. Default is the current
+  // calendar quarter.
+  const initialQ = currentQuarter();
+  const [year, setYear] = useState<number>(initialQ.year);
+  const [filter, setFilter] = useState<PeriodFilter>(
+    `Q${initialQ.quarter}` as PeriodFilter,
+  );
+  // Region filter: defaults to all-on. React state only, matches the
+  // year/filter lifecycle (resets to all-on on full reload, persists
+  // across Funnel sub-tab switches).
+  const [regions, setRegions] = useState<Set<RegionKey>>(
+    () => new Set<RegionKey>(REGIONS),
+  );
+  // Compare tab: default to the current ISO week, single-week view.
+  const [compareWeek, setCompareWeek] = useState<number>(
+    () => currentIsoWeek().week,
+  );
+  const [compareView, setCompareView] = useState<CompareView>('single');
+
+  // Outreach selectors. Independent from the Funnel selectors so the two
+  // domains don't fight over the same week/quarter. Defaults to current
+  // ISO week's quarter, current week, all regions, all sequences.
+  const initialIso = currentIsoWeek();
+  const initialOutreachQuarter = (() => {
+    const w = initialIso.week;
+    if (w <= 13) return 1 as const;
+    if (w <= 26) return 2 as const;
+    if (w <= 39) return 3 as const;
+    return 4 as const;
+  })();
+  const [outreachYear, setOutreachYear] = useState<number>(initialIso.year);
+  const [outreachQuarter, setOutreachQuarter] = useState<1 | 2 | 3 | 4>(
+    initialOutreachQuarter,
+  );
+  const [outreachWeek, setOutreachWeek] = useState<number>(initialIso.week);
+  const [outreachRegions, setOutreachRegions] = useState<Set<RegionKey>>(
+    () => new Set<RegionKey>(REGIONS),
+  );
+  // Empty set = "All Sequences". The dashboard's multi-select treats empty
+  // and full-selected identically.
+  const [outreachSelectedSequences, setOutreachSelectedSequences] = useState<
+    Set<number>
+  >(() => new Set<number>());
+
+  // Snap outreachWeek/Quarter to the latest data once snapshots load. The
+  // "user touched it" ref keeps us from re-snapping on every realtime
+  // event. Any explicit week/quarter change from the user flips the flag,
+  // so subsequent navigation between sub-tabs preserves their selection.
+  const outreachWeekTouched = useRef(false);
+  const { snapshots: outreachSnapshots, loading: outreachLoading } =
+    useOutreachSnapshots();
+  useEffect(() => {
+    if (outreachWeekTouched.current) return;
+    if (outreachSnapshots.length === 0) return;
+    let maxWeek = -1;
+    for (const s of outreachSnapshots) {
+      if (s.year !== outreachYear) continue;
+      if (s.week_number > maxWeek) maxWeek = s.week_number;
+    }
+    if (maxWeek <= 0) return;
+    setOutreachWeek(maxWeek);
+    if (maxWeek <= 13) setOutreachQuarter(1);
+    else if (maxWeek <= 26) setOutreachQuarter(2);
+    else if (maxWeek <= 39) setOutreachQuarter(3);
+    else setOutreachQuarter(4);
+  }, [outreachSnapshots, outreachYear]);
+
+  // Wrap the lifted setters so any explicit user action from a sub-page
+  // marks the week as "touched", preventing the default-to-latest effect
+  // from clobbering subsequent navigation.
+  const setOutreachWeekUser = useCallback((w: number) => {
+    outreachWeekTouched.current = true;
+    setOutreachWeek(w);
+  }, []);
+  const setOutreachQuarterUser = useCallback((q: 1 | 2 | 3 | 4) => {
+    outreachWeekTouched.current = true;
+    setOutreachQuarter(q);
+  }, []);
+  const setOutreachYearUser = useCallback((y: number) => {
+    // Year change: re-allow auto-snap so we land on the latest week of the
+    // newly chosen year (matches how the user expects "show me 2025").
+    outreachWeekTouched.current = false;
+    setOutreachYear(y);
+  }, []);
+
+  // Centralized navigate. Any path to a sub-page (sidebar click, parent
+  // click, deep-link from a utility page) flows through here so the
+  // "last visited child" record stays consistent.
+  const navigate = useCallback((next: PageKey) => {
+    setPage(next);
+    const section = sectionForPage(next);
+    if (section) {
+      writeJson<PageKey>(section.lastTabStorageKey, next);
+    }
+  }, []);
+
+  const funnelProps: FunnelSubPageProps = {
+    year,
+    filter,
+    onYearChange: setYear,
+    onFilterChange: setFilter,
+    regions,
+    onRegionsChange: setRegions,
+    compareWeek,
+    onCompareWeekChange: setCompareWeek,
+    compareView,
+    onCompareViewChange: setCompareView,
+  };
+
+  const outreachProps: OutreachSubPageProps = {
+    year: outreachYear,
+    quarter: outreachQuarter,
+    week: outreachWeek,
+    regions: outreachRegions,
+    selectedSequences: outreachSelectedSequences,
+    onYearChange: setOutreachYearUser,
+    onQuarterChange: setOutreachQuarterUser,
+    onWeekChange: setOutreachWeekUser,
+    onRegionsChange: setOutreachRegions,
+    onSelectedSequencesChange: setOutreachSelectedSequences,
+    snapshots: outreachSnapshots,
+    loading: outreachLoading,
+  };
 
   return (
     <PasswordGate>
       <div className="min-h-screen flex">
-        <aside className="w-56 border-r border-border bg-muted flex flex-col">
-          <div className="flex items-center gap-2 px-5 py-5 border-b border-border">
-            <img src="/sourced-mark.png" alt="" className="w-7 h-7 object-contain" />
-            <span className="text-lg font-semibold text-charcoal lowercase">sourced</span>
-          </div>
-          <nav className="flex-1 p-3 space-y-1">
-            {NAV.map((item) => {
-              const active = item.key === page;
-              return (
-                <button
-                  key={item.key}
-                  onClick={() => setPage(item.key)}
-                  className={
-                    'w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ' +
-                    (active
-                      ? 'bg-indigo text-white'
-                      : 'text-charcoal hover:bg-border/60')
-                  }
-                >
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-        </aside>
+        <Sidebar page={page} onNavigate={navigate} />
         <main className="flex-1 min-w-0">
-          <PageBody page={page} onNavigate={setPage} />
+          <PageBody
+            page={page}
+            onNavigate={navigate}
+            funnelProps={funnelProps}
+            outreachProps={outreachProps}
+          />
         </main>
       </div>
     </PasswordGate>

@@ -147,7 +147,7 @@ export default function LeadsPage({ onNavigate }: LeadsPageProps = {}) {
             {onNavigate && (
               <button
                 type="button"
-                onClick={() => onNavigate('import')}
+                onClick={() => onNavigate('funnel-import')}
                 className="text-sm px-3 py-1.5 rounded border border-border text-charcoal hover:bg-muted"
               >
                 Import

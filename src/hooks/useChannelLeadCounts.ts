@@ -42,8 +42,12 @@ export function useChannelLeadCounts(): Map<string, number> {
 
     // Recompute on any leads INSERT/UPDATE/DELETE. Cheap: one SELECT against
     // 1.7k rows, batched naturally because realtime events come in bursts.
+    // Unique per mount to avoid .on()-after-.subscribe() collisions.
+    const channelName = `public:leads:counts:${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
     const channel = supabase
-      .channel('public:leads:counts')
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'leads' },

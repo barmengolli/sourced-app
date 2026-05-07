@@ -29,7 +29,7 @@ export default function ChannelsPage({ onNavigate }: ChannelsPageProps = {}) {
           No channels yet.{' '}
           <button
             type="button"
-            onClick={() => onNavigate('import')}
+            onClick={() => onNavigate('funnel-import')}
             className="text-indigo hover:underline"
           >
             Run an import
