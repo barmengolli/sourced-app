@@ -27,7 +27,7 @@ production Supabase project as of 2026-05-06.
 | `2026-05-04_add_close_lost_stage.sql` | APPLIED | Relaxed the `stage_key` CHECK constraints on `attributions`, `funnel_projections`, and `funnel_actuals` to include `'closeLost'`. |
 | `2026-05-07_attributions_unique_deal_stage.sql` | PENDING | F-006: Adds a partial UNIQUE index on `attributions (deal_id, stage_key)` (where `deal_id` is non-null and non-empty) to prevent duplicate downstream rows from any write path. Run the dedup query in the migration header before applying. |
 
-Status legend: **APPLIED** (run against prod), **PENDING** (committed
+Status legend: **APPLIED** (run against prod), **APPLIED** (committed
 but not yet run), **UNKNOWN** (provenance unclear, verify in Supabase
 before applying).
 
