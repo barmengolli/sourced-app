@@ -24,6 +24,15 @@ export function quarterOfIsoDate(
   return { year, quarter };
 }
 
+// Human-readable derived-period label used in the attribution modals after
+// removing the year + quarter selectors. Empty string for an invalid input
+// so the caller can render no-op when the user clears the date.
+export function describePeriodFromIso(iso: string): string {
+  const q = quarterOfIsoDate(iso);
+  if (!q) return '';
+  return `Q${q.quarter} ${q.year}`;
+}
+
 export function currentQuarter(): { year: number; quarter: PeriodIndex } {
   const d = new Date();
   return {

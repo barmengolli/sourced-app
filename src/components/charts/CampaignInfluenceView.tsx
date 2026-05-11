@@ -20,14 +20,49 @@ import type {
   PeriodIndex,
 } from '../../types/db';
 import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
-import type { PeriodFilter } from '../../lib/compute';
+import { REGIONS, type RegionKey } from '../../constants/regions';
+
+// "Feb 3, 2026" formatter for the stage-entry-date sub-label under each
+// stage node. Returns '' for an empty/invalid ISO so the renderer can
+// no-op cleanly. Local-date parse to dodge the same UTC-day pitfall the
+// rest of the codebase guards against (lib/dates.ts).
+function formatStageEnteredAt(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return '';
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const d = parseInt(m[3], 10);
+  if (mo < 1 || mo > 12) return '';
+  return new Date(y, mo - 1, d).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
 
 interface CampaignInfluenceViewProps {
   attributions: Attribution[];
   attributionTouches: AttributionTouch[];
   channels: Channel[];
-  year: number;
-  filter: PeriodFilter;
+  // Region filter only. Quarter is intentionally absent: this view is
+  // the deal-portfolio view, not a per-quarter cohort. Deals that span
+  // multiple quarters need to render their full chain regardless of
+  // which quarter the page header is on.
+  regions: Set<RegionKey>;
+}
+
+// True when the row passes the region filter. Empty / all-five-selected
+// regions mean "no filter, include everything"; a partial set excludes
+// rows whose region is null/undefined or not in the set. Same contract
+// as compute.ts's regionMatches helper.
+function regionMatches(
+  rowRegion: RegionKey | string | null | undefined,
+  regions: Set<RegionKey>,
+): boolean {
+  if (regions.size === REGIONS.length) return true;
+  if (!rowRegion) return false;
+  return regions.has(rowRegion as RegionKey);
 }
 
 // ---------- DataVis-shape adapter types ----------
@@ -47,6 +82,10 @@ interface OpportunityAttribution {
   year: number;
   periodIndex: PeriodIndex;
   label?: string | null;
+  // ISO date the deal entered this stage; rendered as a sub-label under
+  // the stage node in the Sankey so each node shows both the stage and
+  // when the deal got there.
+  stageEnteredAt: string;
   touches: InlineTouch[];
 }
 
@@ -72,13 +111,29 @@ function CustomNode({ x, y, width, height, payload }: any) {
   const lines = hasSub ? 3 : 2;
   const startY = centerY - ((lines - 1) * lineHeight) / 2;
 
+  // For stage nodes we render the stage label plus an optional
+  // stage_entered_at sub-label one line below. When a date is present,
+  // shift both lines so they're centered around the node's midline.
+  const stageDate = isStage ? formatStageEnteredAt(payload.stageEnteredAt) : '';
+  const stageHasDate = stageDate !== '';
+  const stageLineHeight = 12;
+  const stageLabelY = stageHasDate ? centerY - stageLineHeight / 2 : centerY;
+  const stageDateY = stageHasDate ? centerY + stageLineHeight / 2 : centerY;
+
   return (
     <g>
       <rect x={x} y={y} width={width} height={height} fill={color} rx={2} />
       {isStage ? (
-        <text x={labelX} y={centerY} textAnchor={anchor} dominantBaseline="central" fontSize={11} fill="#374151" fontWeight={600}>
-          {payload.name}
-        </text>
+        <>
+          <text x={labelX} y={stageLabelY} textAnchor={anchor} dominantBaseline="central" fontSize={11} fill="#374151" fontWeight={600}>
+            {payload.name}
+          </text>
+          {stageHasDate && (
+            <text x={labelX} y={stageDateY} textAnchor={anchor} dominantBaseline="central" fontSize={9} fill="#9ca3af" fontWeight={400}>
+              {stageDate}
+            </text>
+          )}
+        </>
       ) : (
         <>
           <text x={labelX} y={startY} textAnchor={anchor} dominantBaseline="central" fontSize={10} fill="#374151" fontWeight={600}>
@@ -154,11 +209,18 @@ function buildDealJourneySankeyData(
     }));
   }
 
-  // 2. Create stage nodes for each stage the deal has reached
+  // 2. Create stage nodes for each stage the deal has reached. We carry
+  //    stage_entered_at through on the payload so CustomNode can render
+  //    it as a sub-label under the stage name.
   const stageNodeIndices: number[] = [];
   for (const attr of sorted) {
     const stageLabel = FUNNEL_STAGE_LABELS[attr.stageKey] || attr.stageKey;
-    const stageNodeIdx = getOrCreateNode(`stage:${attr.stageKey}`, { name: stageLabel, isStage: true, stageKey: attr.stageKey });
+    const stageNodeIdx = getOrCreateNode(`stage:${attr.stageKey}`, {
+      name: stageLabel,
+      isStage: true,
+      stageKey: attr.stageKey,
+      stageEnteredAt: attr.stageEnteredAt,
+    });
     stageNodeIndices.push(stageNodeIdx);
   }
 
@@ -204,7 +266,12 @@ function buildDealJourneySankeyData(
   }
   for (const sn of stageNodes) {
     idxMap.set(sn.originalIdx, sortedNodes.length);
-    sortedNodes.push({ name: sn.name, isStage: true, stageKey: sn.stageKey });
+    sortedNodes.push({
+      name: sn.name,
+      isStage: true,
+      stageKey: sn.stageKey,
+      stageEnteredAt: sn.stageEnteredAt,
+    });
   }
 
   const remappedLinks = links.map(l => ({
@@ -337,8 +404,7 @@ export default function CampaignInfluenceView({
   attributions,
   attributionTouches,
   channels,
-  year,
-  filter,
+  regions,
 }: CampaignInfluenceViewProps) {
   const [showAll, setShowAll] = useState(false);
 
@@ -357,12 +423,15 @@ export default function CampaignInfluenceView({
     return m;
   }, [attributionTouches]);
 
-  // Filter to selected period (year + Q or 'year') and reshape to the
-  // DataVis OpportunityAttribution inline-touches form.
+  // Filter by region only (no quarter scope: a deal that spans multiple
+  // quarters should render its full chain in every view). Then reshape
+  // to the DataVis OpportunityAttribution inline-touches form. Rows
+  // outside the selected regions are dropped at the attribution level;
+  // a deal whose every attribution falls outside the filter ends up
+  // with zero matches and won't render a card.
   const opportunityAttributions: OpportunityAttribution[] = useMemo(() => {
     return attributions
-      .filter((a) => a.year === year)
-      .filter((a) => filter === 'year' || `Q${a.period_index}` === filter)
+      .filter((a) => regionMatches(a.region, regions))
       .map((a) => {
         const touches = (touchesByAttribution.get(a.id) ?? [])
           .map((t) => ({ channelId: t.channel_id ?? '' }))
@@ -375,10 +444,11 @@ export default function CampaignInfluenceView({
           year: a.year,
           periodIndex: a.period_index,
           label: a.label ?? '',
+          stageEnteredAt: a.stage_entered_at,
           touches,
         };
       });
-  }, [attributions, touchesByAttribution, year, filter]);
+  }, [attributions, touchesByAttribution, regions]);
 
   // Channel parent/sub lookup. Sourced uses parent_channel_id (snake_case)
   // where DataVis used parentChannelId, otherwise identical.
@@ -433,14 +503,44 @@ export default function CampaignInfluenceView({
       group.label = group.attributions.find((a) => a.label)?.label || '';
     }
 
-    return [...groupMap.values()];
+    // Sort: open deals (current stage HPP/Opp/Pursuit) before terminal
+    // deals (closeWon/closeLost). Within each bucket, newest first —
+    // open deals by HPP stage_entered_at (or the earliest stage_entered_at
+    // if there's no HPP row), terminal deals by the terminal stage's
+    // stage_entered_at.
+    const groups = [...groupMap.values()];
+    const isTerminalStage = (s: string) =>
+      s === 'closeWon' || s === 'closeLost';
+    const sortDate = (g: DealGroup): string => {
+      const cur = g.highestStage;
+      if (isTerminalStage(cur)) {
+        const terminal = g.attributions.find((a) => a.stageKey === cur);
+        return terminal?.stageEnteredAt ?? '';
+      }
+      const hpp = g.attributions.find((a) => a.stageKey === 'hpp');
+      if (hpp) return hpp.stageEnteredAt;
+      // No HPP row (rare; manual entry at a later stage). Fall back to
+      // the chain's earliest stage_entered_at.
+      return [...g.attributions]
+        .sort((a, b) => a.stageEnteredAt.localeCompare(b.stageEnteredAt))[0]
+        .stageEnteredAt;
+    };
+    groups.sort((a, b) => {
+      const aTerm = isTerminalStage(a.highestStage);
+      const bTerm = isTerminalStage(b.highestStage);
+      if (aTerm !== bTerm) return aTerm ? 1 : -1; // open first
+      // Within bucket: newest first (descending ISO date).
+      return sortDate(b).localeCompare(sortDate(a));
+    });
+
+    return groups;
   }, [opportunityAttributions]);
 
   if (dealGroups.length === 0) {
     return (
       <p className="text-xs text-slate-muted italic">
-        No opportunities created in this period. Use the Data Entry tab to
-        create one.
+        No opportunities match the current region filter. Use the Data
+        Entry tab to create one, or adjust the region selector above.
       </p>
     );
   }

@@ -8,7 +8,6 @@ import type {
   Attribution,
   AttributionStageKey,
   Channel,
-  PeriodIndex,
 } from '../../types/db';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type {
@@ -21,6 +20,7 @@ import {
   FUNNEL_STAGE_LABELS,
   MANUAL_ACTUAL_STAGES,
 } from '../../constants/funnelStages';
+import { describePeriodFromIso } from '../../lib/dates';
 
 interface AttributionEditorModalProps {
   attributionId: string;
@@ -35,8 +35,6 @@ interface TouchDraft {
   touched_at: string; // ISO date or ''
   notes: string;
 }
-
-const QUARTERS: PeriodIndex[] = [1, 2, 3, 4];
 
 export default function AttributionEditorModal({
   attributionId,
@@ -61,10 +59,18 @@ export default function AttributionEditorModal({
   const [sfLink, setSfLink] = useState('');
   const [channelId, setChannelId] = useState('');
   const [region, setRegion] = useState<RegionKey>('NA');
-  const [year, setYear] = useState<number>(new Date().getFullYear());
-  const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(1);
+  // Year + period_index are derived from stage_entered_at at save time.
+  // No standalone year/quarter controls in the editor anymore.
   const [stageKey, setStageKey] = useState<AttributionStageKey>('hpp');
+  const [stageEnteredAt, setStageEnteredAt] = useState<string>('');
   const [touches, setTouches] = useState<TouchDraft[]>([]);
+
+  const maxDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const minDate = useMemo(() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - 5);
+    return d.toISOString().slice(0, 10);
+  }, []);
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -82,9 +88,8 @@ export default function AttributionEditorModal({
     setSfLink(attribution.sf_link ?? '');
     setRegion((attribution.region as RegionKey) ?? 'NA');
     setChannelId(attribution.channel_id ?? '');
-    setYear(attribution.year);
-    setPeriodIndex(attribution.period_index);
     setStageKey(attribution.stage_key);
+    setStageEnteredAt(attribution.stage_entered_at);
   }, [attribution]);
 
   useEffect(() => {
@@ -97,10 +102,7 @@ export default function AttributionEditorModal({
     );
   }, [existingTouches]);
 
-  const yearOptions = useMemo(() => {
-    const y = new Date().getFullYear();
-    return [y - 1, y, y + 1];
-  }, []);
+  const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
 
   if (!attribution) {
     return (
@@ -119,7 +121,13 @@ export default function AttributionEditorModal({
     );
   }
 
-  const valid = label.trim().length > 0 && channelId !== '';
+  const valid =
+    label.trim().length > 0 &&
+    channelId !== '' &&
+    stageEnteredAt !== '' &&
+    stageEnteredAt >= minDate &&
+    stageEnteredAt <= maxDate &&
+    derivedPeriodLabel !== '';
 
   const moveTouch = (idx: number, dir: -1 | 1) => {
     setTouches((prev) => {
@@ -147,9 +155,10 @@ export default function AttributionEditorModal({
         sf_link: sfLink.trim() || null,
         region,
         channel_id: channelId,
-        year,
-        period_index: periodIndex,
         stage_key: stageKey,
+        // year + period_index get derived from stage_entered_at inside
+        // the hook, so don't pass them here.
+        stage_entered_at: stageEnteredAt,
       });
       const newTouches: NewTouchInput[] = touches
         .filter((t) => t.channel_id !== '')
@@ -270,42 +279,23 @@ export default function AttributionEditorModal({
                 ))}
               </select>
             </Field>
-            <div className="flex gap-2">
-              <Field label="Year">
-                <select
-                  value={year}
-                  onChange={(e) => setYear(parseInt(e.target.value, 10))}
-                  disabled={busy}
-                  className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-                >
-                  {yearOptions.map((y) => (
-                    <option key={y} value={y}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Quarter">
-                <div className="flex gap-1">
-                  {QUARTERS.map((q) => (
-                    <button
-                      key={q}
-                      type="button"
-                      onClick={() => setPeriodIndex(q)}
-                      disabled={busy}
-                      className={
-                        'text-xs px-2 py-1 rounded border ' +
-                        (periodIndex === q
-                          ? 'bg-indigo text-white border-indigo'
-                          : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                      }
-                    >
-                      Q{q}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-            </div>
+            <Field label={`Entered ${FUNNEL_STAGE_LABELS[stageKey]} on (required)`}>
+              <input
+                type="date"
+                value={stageEnteredAt}
+                min={minDate}
+                max={maxDate}
+                onChange={(e) => setStageEnteredAt(e.target.value)}
+                disabled={busy}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+              />
+            </Field>
+            <p className="text-xs text-slate-muted">
+              Will count as:{' '}
+              <span className="text-charcoal font-medium">
+                {derivedPeriodLabel || '—'}
+              </span>
+            </p>
           </section>
 
           <section className="space-y-2">

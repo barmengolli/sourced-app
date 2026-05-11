@@ -7,7 +7,7 @@ import { useMemo, useState } from 'react';
 import type { Channel, PeriodIndex } from '../../types/db';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type { UseAttributionTouchesResult, NewTouchInput } from '../../hooks/useAttributionTouches';
-import { currentQuarter } from '../../lib/dates';
+import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
 
 interface CreateHPPModalProps {
@@ -25,8 +25,6 @@ interface TouchDraft {
   touched_at: string;     // ISO date or ''
   notes: string;
 }
-
-const QUARTERS: PeriodIndex[] = [1, 2, 3, 4];
 
 function newTouch(): TouchDraft {
   return { channel_id: '', touched_at: '', notes: '' };
@@ -127,23 +125,36 @@ export default function CreateHPPModal({
   const [region, setRegion] = useState<RegionKey>('NA');
 
   const [firstChannelId, setFirstChannelId] = useState('');
-  const [year, setYear] = useState<number>(defaultYear);
-  const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(defaultPeriodIndex);
+  // Period (year + quarter) is derived from stage_entered_at at submit
+  // time. Removed the year + quarter selectors so the date and period
+  // can never disagree. The defaultYear / defaultPeriodIndex props are
+  // intentionally unused here; we kept them on the props type to avoid
+  // touching every call site.
+  void defaultYear;
+  void defaultPeriodIndex;
+  const [stageEnteredAt, setStageEnteredAt] = useState<string>(
+    () => new Date().toISOString().slice(0, 10),
+  );
+  const maxDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const minDate = useMemo(() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - 5);
+    return d.toISOString().slice(0, 10);
+  }, []);
 
   const [additional, setAdditional] = useState<TouchDraft[]>([]);
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
+
   const valid =
     label.trim().length > 0 &&
     firstChannelId !== '' &&
-    QUARTERS.includes(periodIndex);
-
-  const yearOptions = useMemo(() => {
-    const y = currentQuarter().year;
-    return [y - 1, y, y + 1];
-  }, []);
+    stageEnteredAt >= minDate &&
+    stageEnteredAt <= maxDate &&
+    derivedPeriodLabel !== '';
 
   const submit = async () => {
     if (!valid) return;
@@ -157,17 +168,24 @@ export default function CreateHPPModal({
       // Generate a stable deal id so future Promote calls keep the deal
       // linked across stages.
       const dealId = crypto.randomUUID();
+      // Derive year + period_index from the date. The hook does this too
+      // (and overrides any caller-passed values); we pass the derived
+      // pair here to keep the call site self-documenting and to satisfy
+      // NewAttributionInput's required year/period_index fields.
+      const derived = quarterOfIsoDate(stageEnteredAt);
+      if (!derived) throw new Error('Invalid stage entered date');
       const created = await attributionsHook.create({
         stage_key: 'hpp',
         channel_id: firstChannelId,
-        year,
-        period_index: periodIndex,
+        year: derived.year,
+        period_index: derived.quarter,
         label: label.trim(),
         account: account.trim() || null,
         amount: parsedAmount,
         sf_link: sfLink.trim() || null,
         region,
         deal_id: dealId,
+        stage_entered_at: stageEnteredAt,
       });
 
       const touches: NewTouchInput[] = [
@@ -280,42 +298,23 @@ export default function CreateHPPModal({
                 disabled={busy}
               />
             </Field>
-            <div className="flex gap-2">
-              <Field label="Year">
-                <select
-                  value={year}
-                  onChange={(e) => setYear(parseInt(e.target.value, 10))}
-                  disabled={busy}
-                  className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-                >
-                  {yearOptions.map((y) => (
-                    <option key={y} value={y}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Quarter">
-                <div className="flex gap-1">
-                  {QUARTERS.map((q) => (
-                    <button
-                      key={q}
-                      type="button"
-                      onClick={() => setPeriodIndex(q)}
-                      disabled={busy}
-                      className={
-                        'text-xs px-2 py-1 rounded border ' +
-                        (periodIndex === q
-                          ? 'bg-indigo text-white border-indigo'
-                          : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                      }
-                    >
-                      Q{q}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-            </div>
+            <Field label="HPP entered on (required)">
+              <input
+                type="date"
+                value={stageEnteredAt}
+                min={minDate}
+                max={maxDate}
+                onChange={(e) => setStageEnteredAt(e.target.value)}
+                disabled={busy}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+              />
+            </Field>
+            <p className="text-xs text-slate-muted">
+              Will count as:{' '}
+              <span className="text-charcoal font-medium">
+                {derivedPeriodLabel || '—'}
+              </span>
+            </p>
           </section>
 
           {/* Additional touches */}

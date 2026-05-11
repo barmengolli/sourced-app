@@ -116,6 +116,12 @@ CREATE TABLE attributions (
   -- Create/Edit modals (defaults to NA in M7 since lead_id is unset).
   region TEXT,
 
+  -- Day the deal entered THIS stage. Velocity between any two stages of
+  -- the same deal_id = downstream.stage_entered_at - upstream.stage_entered_at.
+  -- Captured by the four create/promote/edit/close-lost paths; defaults
+  -- to today when the user does not override.
+  stage_entered_at DATE NOT NULL,
+
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -126,6 +132,7 @@ CREATE INDEX idx_attributions_stage ON attributions(stage_key);
 CREATE INDEX idx_attributions_period ON attributions(year, period_index);
 CREATE INDEX idx_attributions_channel ON attributions(channel_id);
 CREATE INDEX idx_attributions_region ON attributions(region);
+CREATE INDEX idx_attributions_stage_entered_at ON attributions(stage_entered_at);
 
 -- Defense-in-depth against duplicate downstream rows. UI guard in
 -- OpportunitiesListModal prevents most cases; this constraint catches
