@@ -14,6 +14,8 @@
 
 import { useMemo, useState } from 'react';
 import { useAttributions } from '../hooks/useAttributions';
+import { useAttributionTouches } from '../hooks/useAttributionTouches';
+import { useChannels } from '../hooks/useChannels';
 import { useLeads } from '../hooks/useLeads';
 import {
   computeDealVelocities,
@@ -23,6 +25,8 @@ import {
 } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
+import ChartCard from '../components/charts/ChartCard';
+import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
 import {
   VELOCITY_THRESHOLDS,
   type VelocityThreshold,
@@ -106,6 +110,8 @@ export default function FunnelVelocityPage({
   onRegionsChange,
 }: FunnelVelocityPageProps) {
   const attributionsHook = useAttributions();
+  const touchesHook = useAttributionTouches();
+  const channels = useChannels();
   // Pull leads only to derive yearOptions consistently with the other
   // funnel sub-pages; the velocity compute itself doesn't read leads.
   const { leads } = useLeads();
@@ -186,7 +192,7 @@ export default function FunnelVelocityPage({
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-charcoal">
-            Marketing Funnel: Velocity
+            Marketing Funnel: Opportunities
           </h1>
           <p className="mt-1 text-sm text-slate-muted">
             Per-transition velocity averages and per-deal time-in-stage.
@@ -292,6 +298,23 @@ export default function FunnelVelocityPage({
           </div>
         )}
       </section>
+
+      {/* Opportunity Influence — one Sankey per deal in the selected
+          period, showing the touch flow into the deal's stage chain.
+          Moved here from the Leads & MQLs tab so deal-side analytics
+          live together. */}
+      <ChartCard
+        title="Opportunity Influence"
+        subtitle="One card per opportunity in the selected period, with its full touch flow"
+      >
+        <CampaignInfluenceView
+          attributions={attributionsHook.attributions}
+          attributionTouches={touchesHook.touches}
+          channels={channels}
+          year={year}
+          filter={filter}
+        />
+      </ChartCard>
     </div>
   );
 }

@@ -4,7 +4,6 @@ import { useChannels } from '../hooks/useChannels';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
-import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { computeGrid, type PeriodFilter } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
@@ -14,7 +13,6 @@ import DonutChartView from '../components/charts/DonutChartView';
 import FunnelChartView from '../components/charts/FunnelChartView';
 import TrendLineChartView from '../components/charts/TrendLineChartView';
 import FunnelSankeyView from '../components/charts/FunnelSankeyView';
-import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
 import type { RegionKey } from '../constants/regions';
 
 interface FunnelDashboardPageProps {
@@ -39,7 +37,6 @@ export default function FunnelDashboardPage({
   const projectionsHook = useFunnelProjections();
   const actualsHook = useFunnelActuals();
   const attributionsHook = useAttributions();
-  const touchesHook = useAttributionTouches();
 
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -109,7 +106,7 @@ export default function FunnelDashboardPage({
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-charcoal">
-            Marketing Funnel: Dashboard
+            Marketing Funnel: Leads & MQLs
           </h1>
           <p className="mt-1 text-sm text-slate-muted">
             Read-only funnel charts for the selected period. Edit values on
@@ -172,18 +169,6 @@ export default function FunnelDashboardPage({
           />
         </ChartCard>
 
-        <ChartCard
-          title="Opportunity Influence"
-          subtitle="One card per opportunity in the selected period, with its full touch flow"
-        >
-          <CampaignInfluenceView
-            attributions={attributionsHook.attributions}
-            attributionTouches={touchesHook.touches}
-            channels={channels}
-            year={year}
-            filter={filter}
-          />
-        </ChartCard>
       </section>
     </div>
   );

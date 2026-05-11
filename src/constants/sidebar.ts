@@ -32,8 +32,12 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     expandedStorageKey: 'sourced.sidebar.expanded.funnel',
     children: [
       { key: 'funnel-data', label: 'Data Entry' },
-      { key: 'funnel-dashboard', label: 'Dashboard' },
-      { key: 'funnel-velocity', label: 'Velocity' },
+      // PageKey values stay as `funnel-dashboard` / `funnel-velocity` so
+      // storage and routing identifiers don't move when these labels
+      // change. The labels reflect the user-facing content split:
+      // lead/MQL-side analytics vs deal-side analytics.
+      { key: 'funnel-dashboard', label: 'Leads & MQLs' },
+      { key: 'funnel-velocity', label: 'Opportunities' },
       { key: 'funnel-compare', label: 'Compare' },
     ],
   },
