@@ -299,20 +299,21 @@ export default function FunnelVelocityPage({
         )}
       </section>
 
-      {/* Opportunity Influence — one Sankey per deal in the selected
-          period, showing the touch flow into the deal's stage chain.
-          Moved here from the Leads & MQLs tab so deal-side analytics
-          live together. */}
+      {/* Opportunity Influence — one Sankey per deal, showing the full
+          touch flow into the deal's stage chain. The Sankey is
+          intentionally quarter-agnostic: a deal whose journey spans
+          multiple quarters (e.g. HPP in Q1, Closed Lost in Q2) should
+          render its complete chain in any view. Region filter still
+          applies. */}
       <ChartCard
         title="Opportunity Influence"
-        subtitle="One card per opportunity in the selected period, with its full touch flow"
+        subtitle="Every deal's full touch flow, regardless of quarter. Region filter applies."
       >
         <CampaignInfluenceView
           attributions={attributionsHook.attributions}
           attributionTouches={touchesHook.touches}
           channels={channels}
-          year={year}
-          filter={filter}
+          regions={regions}
         />
       </ChartCard>
     </div>
