@@ -14,7 +14,7 @@ import {
   FUNNEL_STAGE_LABELS,
   LOSS_ELIGIBLE_STAGES,
 } from '../../constants/funnelStages';
-import { currentQuarter } from '../../lib/dates';
+import { describePeriodFromIso } from '../../lib/dates';
 
 interface OpportunitiesListModalProps {
   attributions: Attribution[];
@@ -35,8 +35,6 @@ const STAGE_NEXT: Record<AttributionStageKey, AttributionStageKey | null> = {
   closeWon: null,
   closeLost: null,
 };
-
-const QUARTERS: PeriodIndex[] = [1, 2, 3, 4];
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -272,11 +270,9 @@ export default function OpportunitiesListModal({
                   {isPromoting && nextStage && !hasDownstreamPromoteRow && (
                     <PromotePanel
                       onCancel={() => setPromoteFor(null)}
-                      onConfirm={async (newYear, newQ, enteredAt) => {
+                      onConfirm={async (enteredAt) => {
                         await wrap(a.id, async () => {
                           await attributionsHook.promote(a.id, {
-                            year: newYear,
-                            periodIndex: newQ,
                             stage_entered_at: enteredAt,
                           });
                           setPromoteFor(null);
@@ -290,11 +286,9 @@ export default function OpportunitiesListModal({
                   {isClosingLost && lossEligible && !hasDownstreamLostRow && (
                     <CloseLostPanel
                       onCancel={() => setCloseLostFor(null)}
-                      onConfirm={async (newYear, newQ, enteredAt) => {
+                      onConfirm={async (enteredAt) => {
                         await wrap(a.id, async () => {
                           await attributionsHook.markLost(a.id, {
-                            year: newYear,
-                            periodIndex: newQ,
                             stage_entered_at: enteredAt,
                           });
                           setCloseLostFor(null);
@@ -302,8 +296,6 @@ export default function OpportunitiesListModal({
                       }}
                       busy={isBusy}
                       sourceStageLabel={FUNNEL_STAGE_LABELS[stageKey]}
-                      defaultYear={year}
-                      defaultPeriod={periodIndex}
                     />
                   )}
 
@@ -368,65 +360,23 @@ function CloseLostPanel({
   onConfirm,
   busy,
   sourceStageLabel,
-  defaultYear,
-  defaultPeriod,
 }: {
   onCancel: () => void;
-  onConfirm: (
-    year: number,
-    periodIndex: PeriodIndex,
-    stageEnteredAt: string,
-  ) => Promise<void>;
+  onConfirm: (stageEnteredAt: string) => Promise<void>;
   busy: boolean;
   sourceStageLabel: string;
-  defaultYear: number;
-  defaultPeriod: PeriodIndex;
 }) {
-  const [year, setYear] = useState<number>(defaultYear);
-  const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(defaultPeriod);
   const [enteredAt, setEnteredAt] = useState<string>(todayIso());
-  const yearOptions = [defaultYear - 1, defaultYear, defaultYear + 1];
   const max = todayIso();
   const min = minDateIso();
-  const valid = enteredAt >= min && enteredAt <= max;
+  const derived = describePeriodFromIso(enteredAt);
+  const valid = enteredAt >= min && enteredAt <= max && derived !== '';
   return (
     <div className="ml-4 p-3 border border-danger/40 rounded-md bg-danger/5 space-y-2">
       <p className="text-xs text-charcoal">
         Close <span className="font-medium">{sourceStageLabel}</span> deal as
-        lost. A new attribution row tagged Closed Lost will be created at:
+        lost. A new attribution row tagged Closed Lost will be created.
       </p>
-      <div className="flex items-center gap-2">
-        <select
-          value={year}
-          onChange={(e) => setYear(parseInt(e.target.value, 10))}
-          disabled={busy}
-          className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
-        >
-          {yearOptions.map((y) => (
-            <option key={y} value={y}>
-              {y}
-            </option>
-          ))}
-        </select>
-        <div className="flex gap-1">
-          {QUARTERS.map((q) => (
-            <button
-              key={q}
-              type="button"
-              onClick={() => setPeriodIndex(q)}
-              disabled={busy}
-              className={
-                'text-xs px-2 py-1 rounded border ' +
-                (periodIndex === q
-                  ? 'bg-danger text-white border-danger'
-                  : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-              }
-            >
-              Q{q}
-            </button>
-          ))}
-        </div>
-      </div>
       <label className="block text-xs text-slate-muted space-y-1">
         <span>Lost on (required)</span>
         <input
@@ -439,10 +389,14 @@ function CloseLostPanel({
           className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
         />
       </label>
+      <p className="text-xs text-slate-muted">
+        Will count as:{' '}
+        <span className="text-charcoal font-medium">{derived || '—'}</span>
+      </p>
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => void onConfirm(year, periodIndex, enteredAt)}
+          onClick={() => void onConfirm(enteredAt)}
           disabled={busy || !valid}
           className="text-xs px-3 py-1 rounded bg-danger text-white disabled:opacity-40"
         >
@@ -468,61 +422,22 @@ function PromotePanel({
   nextStageLabel,
 }: {
   onCancel: () => void;
-  onConfirm: (
-    year: number,
-    periodIndex: PeriodIndex,
-    stageEnteredAt: string,
-  ) => Promise<void>;
+  onConfirm: (stageEnteredAt: string) => Promise<void>;
   busy: boolean;
   nextStageLabel: string;
 }) {
-  const init = currentQuarter();
-  const [year, setYear] = useState<number>(init.year);
-  const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(init.quarter);
   const [enteredAt, setEnteredAt] = useState<string>(todayIso());
 
-  const yearOptions = [init.year - 1, init.year, init.year + 1];
   const max = todayIso();
   const min = minDateIso();
-  const valid = enteredAt >= min && enteredAt <= max;
+  const derived = describePeriodFromIso(enteredAt);
+  const valid = enteredAt >= min && enteredAt <= max && derived !== '';
 
   return (
     <div className="ml-4 p-3 border border-border rounded-md bg-muted space-y-2">
       <p className="text-xs text-charcoal">
-        Promote to <span className="font-medium">{nextStageLabel}</span> at:
+        Promote to <span className="font-medium">{nextStageLabel}</span>.
       </p>
-      <div className="flex items-center gap-2">
-        <select
-          value={year}
-          onChange={(e) => setYear(parseInt(e.target.value, 10))}
-          disabled={busy}
-          className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
-        >
-          {yearOptions.map((y) => (
-            <option key={y} value={y}>
-              {y}
-            </option>
-          ))}
-        </select>
-        <div className="flex gap-1">
-          {QUARTERS.map((q) => (
-            <button
-              key={q}
-              type="button"
-              onClick={() => setPeriodIndex(q)}
-              disabled={busy}
-              className={
-                'text-xs px-2 py-1 rounded border ' +
-                (periodIndex === q
-                  ? 'bg-indigo text-white border-indigo'
-                  : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-              }
-            >
-              Q{q}
-            </button>
-          ))}
-        </div>
-      </div>
       <label className="block text-xs text-slate-muted space-y-1">
         <span>Promoted to {nextStageLabel} on (required)</span>
         <input
@@ -535,10 +450,14 @@ function PromotePanel({
           className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
         />
       </label>
+      <p className="text-xs text-slate-muted">
+        Will count as:{' '}
+        <span className="text-charcoal font-medium">{derived || '—'}</span>
+      </p>
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => void onConfirm(year, periodIndex, enteredAt)}
+          onClick={() => void onConfirm(enteredAt)}
           disabled={busy || !valid}
           className="text-xs px-3 py-1 rounded bg-indigo text-white disabled:opacity-40"
         >

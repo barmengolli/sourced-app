@@ -8,6 +8,7 @@ import type {
 } from '../types/db';
 import type { RegionKey } from '../constants/regions';
 import { TERMINAL_STAGES } from '../constants/funnelStages';
+import { quarterOfIsoDate } from '../lib/dates';
 
 const PAGE = 1000;
 
@@ -33,6 +34,19 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Derive (year, period_index) from an ISO date. Used at every write path
+// so stage_entered_at is the single source of truth for period assignment.
+// Falls back to today if the input is malformed — the modals validate the
+// date before submit, so this branch is defensive.
+function periodFromIso(iso: string): { year: number; period_index: PeriodIndex } {
+  const q = quarterOfIsoDate(iso) ?? quarterOfIsoDate(todayIso());
+  if (!q) {
+    // Truly defensive: today() can only fail in a runtime with a broken Date.
+    return { year: new Date().getFullYear(), period_index: 1 as PeriodIndex };
+  }
+  return { year: q.year, period_index: q.quarter };
+}
+
 export interface UseAttributionsResult {
   attributions: Attribution[];
   loading: boolean;
@@ -43,24 +57,19 @@ export interface UseAttributionsResult {
   deleteAttribution: (id: string) => Promise<void>;
   // Promote copies the source attribution into a new one at the next stage,
   // preserving deal_id and copying touches. Source is NOT deleted (history).
+  // Promote takes only stage_entered_at; year + period_index are derived
+  // from it at write time so a deal's row can never disagree with its date.
   promote: (
     id: string,
-    newPeriod: {
-      year: number;
-      periodIndex: PeriodIndex;
-      stage_entered_at: string;
-    },
+    args: { stage_entered_at: string },
   ) => Promise<Attribution>;
   // markLost is the parallel-terminal action to promote: insert a new row
   // at stage_key='closeLost' sharing the source's deal_id. The source row
-  // is preserved so the deal's history stays intact.
+  // is preserved so the deal's history stays intact. Same date-derives-
+  // period contract as promote.
   markLost: (
     id: string,
-    newPeriod: {
-      year: number;
-      periodIndex: PeriodIndex;
-      stage_entered_at: string;
-    },
+    args: { stage_entered_at: string },
   ) => Promise<Attribution>;
 }
 
@@ -167,9 +176,16 @@ export function useAttributions(): UseAttributionsResult {
 
   const create = useCallback(
     async (input: NewAttributionInput): Promise<Attribution> => {
+      // stage_entered_at is the single source of truth for period
+      // assignment. Override whatever year/period_index the caller passed
+      // so the row's date and period_index can never disagree.
+      const stage_entered_at = input.stage_entered_at ?? todayIso();
+      const derived = periodFromIso(stage_entered_at);
       const row = {
         ...input,
-        stage_entered_at: input.stage_entered_at ?? todayIso(),
+        stage_entered_at,
+        year: derived.year,
+        period_index: derived.period_index,
       };
       const { data, error: err } = await supabase
         .from('attributions')
@@ -194,11 +210,23 @@ export function useAttributions(): UseAttributionsResult {
     async (id: string, patch: Partial<Attribution>): Promise<void> => {
       const before = attributionsRef.current.find((a) => a.id === id);
       if (!before) throw new Error('Attribution not found');
-      const optimistic = { ...before, ...patch } as Attribution;
+      // When the patch changes stage_entered_at, re-derive year +
+      // period_index from the new date and fold them into the patch. The
+      // caller no longer needs to keep these in sync manually.
+      let finalPatch = patch;
+      if (patch.stage_entered_at) {
+        const derived = periodFromIso(patch.stage_entered_at);
+        finalPatch = {
+          ...patch,
+          year: derived.year,
+          period_index: derived.period_index,
+        };
+      }
+      const optimistic = { ...before, ...finalPatch } as Attribution;
       setAttributions((prev) => prev.map((a) => (a.id === id ? optimistic : a)));
       const { error: err } = await supabase
         .from('attributions')
-        .update(patch)
+        .update(finalPatch)
         .eq('id', id);
       if (err) {
         // Roll back on failure.
@@ -230,11 +258,7 @@ export function useAttributions(): UseAttributionsResult {
   const promote = useCallback(
     async (
       id: string,
-      newPeriod: {
-        year: number;
-        periodIndex: PeriodIndex;
-        stage_entered_at: string;
-      },
+      args: { stage_entered_at: string },
     ): Promise<Attribution> => {
       const source = attributionsRef.current.find((a) => a.id === id);
       if (!source) throw new Error('Attribution not found');
@@ -243,19 +267,21 @@ export function useAttributions(): UseAttributionsResult {
         throw new Error('Already at the final stage');
       }
 
-      // 1. Insert the new attribution.
+      // 1. Insert the new attribution. year + period_index derive from
+      //    stage_entered_at so the row can't disagree with its own date.
+      const derived = periodFromIso(args.stage_entered_at);
       const newRow: NewAttributionInput = {
         stage_key: next,
         channel_id: source.channel_id ?? '',
-        year: newPeriod.year,
-        period_index: newPeriod.periodIndex,
+        year: derived.year,
+        period_index: derived.period_index,
         label: source.label,
         account: source.account,
         amount: source.amount,
         sf_link: source.sf_link,
         deal_id: source.deal_id,
         lead_id: source.lead_id,
-        stage_entered_at: newPeriod.stage_entered_at,
+        stage_entered_at: args.stage_entered_at,
       };
       const { data: inserted, error: insErr } = await supabase
         .from('attributions')
@@ -321,11 +347,7 @@ export function useAttributions(): UseAttributionsResult {
   const markLost = useCallback(
     async (
       id: string,
-      newPeriod: {
-        year: number;
-        periodIndex: PeriodIndex;
-        stage_entered_at: string;
-      },
+      args: { stage_entered_at: string },
     ): Promise<Attribution> => {
       const source = attributionsRef.current.find((a) => a.id === id);
       if (!source) throw new Error('Attribution not found');
@@ -333,11 +355,12 @@ export function useAttributions(): UseAttributionsResult {
         throw new Error('Cannot close-lost a terminal deal');
       }
 
+      const derived = periodFromIso(args.stage_entered_at);
       const newRow: NewAttributionInput = {
         stage_key: 'closeLost',
         channel_id: source.channel_id ?? '',
-        year: newPeriod.year,
-        period_index: newPeriod.periodIndex,
+        year: derived.year,
+        period_index: derived.period_index,
         label: source.label,
         account: source.account,
         amount: source.amount,
@@ -345,7 +368,7 @@ export function useAttributions(): UseAttributionsResult {
         region: source.region,
         deal_id: source.deal_id,
         lead_id: source.lead_id,
-        stage_entered_at: newPeriod.stage_entered_at,
+        stage_entered_at: args.stage_entered_at,
       };
       const { data: inserted, error: insErr } = await supabase
         .from('attributions')
