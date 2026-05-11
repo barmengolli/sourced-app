@@ -94,6 +94,9 @@ export interface Attribution {
   amount?: number | null;
   sf_link?: string | null;
   region?: RegionKey | null;
+  // ISO date (YYYY-MM-DD) the deal entered THIS stage. Drives velocity
+  // computations on the Marketing Funnel: Velocity sub-tab.
+  stage_entered_at: string;
   created_at: string;
   updated_at: string;
 }

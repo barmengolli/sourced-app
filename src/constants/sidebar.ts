@@ -33,6 +33,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     children: [
       { key: 'funnel-data', label: 'Data Entry' },
       { key: 'funnel-dashboard', label: 'Dashboard' },
+      { key: 'funnel-velocity', label: 'Velocity' },
       { key: 'funnel-compare', label: 'Compare' },
     ],
   },

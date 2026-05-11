@@ -38,6 +38,18 @@ const STAGE_NEXT: Record<AttributionStageKey, AttributionStageKey | null> = {
 
 const QUARTERS: PeriodIndex[] = [1, 2, 3, 4];
 
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function minDateIso(): string {
+  // Five years before today: a sane floor for stage entry dates so a
+  // typo (e.g. accidentally typing 1980 instead of 2026) can't sneak in.
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - 5);
+  return d.toISOString().slice(0, 10);
+}
+
 function fmtMoney(v: number | null | undefined): string {
   if (v === null || v === undefined) return '';
   return v.toLocaleString('en-US', {
@@ -260,11 +272,12 @@ export default function OpportunitiesListModal({
                   {isPromoting && nextStage && !hasDownstreamPromoteRow && (
                     <PromotePanel
                       onCancel={() => setPromoteFor(null)}
-                      onConfirm={async (newYear, newQ) => {
+                      onConfirm={async (newYear, newQ, enteredAt) => {
                         await wrap(a.id, async () => {
                           await attributionsHook.promote(a.id, {
                             year: newYear,
                             periodIndex: newQ,
+                            stage_entered_at: enteredAt,
                           });
                           setPromoteFor(null);
                         });
@@ -277,11 +290,12 @@ export default function OpportunitiesListModal({
                   {isClosingLost && lossEligible && !hasDownstreamLostRow && (
                     <CloseLostPanel
                       onCancel={() => setCloseLostFor(null)}
-                      onConfirm={async (newYear, newQ) => {
+                      onConfirm={async (newYear, newQ, enteredAt) => {
                         await wrap(a.id, async () => {
                           await attributionsHook.markLost(a.id, {
                             year: newYear,
                             periodIndex: newQ,
+                            stage_entered_at: enteredAt,
                           });
                           setCloseLostFor(null);
                         });
@@ -358,7 +372,11 @@ function CloseLostPanel({
   defaultPeriod,
 }: {
   onCancel: () => void;
-  onConfirm: (year: number, periodIndex: PeriodIndex) => Promise<void>;
+  onConfirm: (
+    year: number,
+    periodIndex: PeriodIndex,
+    stageEnteredAt: string,
+  ) => Promise<void>;
   busy: boolean;
   sourceStageLabel: string;
   defaultYear: number;
@@ -366,7 +384,11 @@ function CloseLostPanel({
 }) {
   const [year, setYear] = useState<number>(defaultYear);
   const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(defaultPeriod);
+  const [enteredAt, setEnteredAt] = useState<string>(todayIso());
   const yearOptions = [defaultYear - 1, defaultYear, defaultYear + 1];
+  const max = todayIso();
+  const min = minDateIso();
+  const valid = enteredAt >= min && enteredAt <= max;
   return (
     <div className="ml-4 p-3 border border-danger/40 rounded-md bg-danger/5 space-y-2">
       <p className="text-xs text-charcoal">
@@ -405,12 +427,24 @@ function CloseLostPanel({
           ))}
         </div>
       </div>
+      <label className="block text-xs text-slate-muted space-y-1">
+        <span>Lost on (required)</span>
+        <input
+          type="date"
+          value={enteredAt}
+          min={min}
+          max={max}
+          onChange={(e) => setEnteredAt(e.target.value)}
+          disabled={busy}
+          className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
+        />
+      </label>
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => void onConfirm(year, periodIndex)}
-          disabled={busy}
-          className="text-xs px-3 py-1 rounded bg-danger text-white"
+          onClick={() => void onConfirm(year, periodIndex, enteredAt)}
+          disabled={busy || !valid}
+          className="text-xs px-3 py-1 rounded bg-danger text-white disabled:opacity-40"
         >
           {busy ? 'Closing' : 'Confirm close-lost'}
         </button>
@@ -434,15 +468,23 @@ function PromotePanel({
   nextStageLabel,
 }: {
   onCancel: () => void;
-  onConfirm: (year: number, periodIndex: PeriodIndex) => Promise<void>;
+  onConfirm: (
+    year: number,
+    periodIndex: PeriodIndex,
+    stageEnteredAt: string,
+  ) => Promise<void>;
   busy: boolean;
   nextStageLabel: string;
 }) {
   const init = currentQuarter();
   const [year, setYear] = useState<number>(init.year);
   const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(init.quarter);
+  const [enteredAt, setEnteredAt] = useState<string>(todayIso());
 
   const yearOptions = [init.year - 1, init.year, init.year + 1];
+  const max = todayIso();
+  const min = minDateIso();
+  const valid = enteredAt >= min && enteredAt <= max;
 
   return (
     <div className="ml-4 p-3 border border-border rounded-md bg-muted space-y-2">
@@ -481,12 +523,24 @@ function PromotePanel({
           ))}
         </div>
       </div>
+      <label className="block text-xs text-slate-muted space-y-1">
+        <span>Promoted to {nextStageLabel} on (required)</span>
+        <input
+          type="date"
+          value={enteredAt}
+          min={min}
+          max={max}
+          onChange={(e) => setEnteredAt(e.target.value)}
+          disabled={busy}
+          className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
+        />
+      </label>
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => void onConfirm(year, periodIndex)}
-          disabled={busy}
-          className="text-xs px-3 py-1 rounded bg-indigo text-white"
+          onClick={() => void onConfirm(year, periodIndex, enteredAt)}
+          disabled={busy || !valid}
+          className="text-xs px-3 py-1 rounded bg-indigo text-white disabled:opacity-40"
         >
           {busy ? 'Promoting' : 'Confirm promote'}
         </button>

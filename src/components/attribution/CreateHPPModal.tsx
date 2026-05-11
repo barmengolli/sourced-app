@@ -129,6 +129,15 @@ export default function CreateHPPModal({
   const [firstChannelId, setFirstChannelId] = useState('');
   const [year, setYear] = useState<number>(defaultYear);
   const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(defaultPeriodIndex);
+  const [stageEnteredAt, setStageEnteredAt] = useState<string>(
+    () => new Date().toISOString().slice(0, 10),
+  );
+  const maxDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const minDate = useMemo(() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - 5);
+    return d.toISOString().slice(0, 10);
+  }, []);
 
   const [additional, setAdditional] = useState<TouchDraft[]>([]);
 
@@ -138,7 +147,9 @@ export default function CreateHPPModal({
   const valid =
     label.trim().length > 0 &&
     firstChannelId !== '' &&
-    QUARTERS.includes(periodIndex);
+    QUARTERS.includes(periodIndex) &&
+    stageEnteredAt >= minDate &&
+    stageEnteredAt <= maxDate;
 
   const yearOptions = useMemo(() => {
     const y = currentQuarter().year;
@@ -168,6 +179,7 @@ export default function CreateHPPModal({
         sf_link: sfLink.trim() || null,
         region,
         deal_id: dealId,
+        stage_entered_at: stageEnteredAt,
       });
 
       const touches: NewTouchInput[] = [
@@ -316,6 +328,17 @@ export default function CreateHPPModal({
                 </div>
               </Field>
             </div>
+            <Field label="HPP entered on (required)">
+              <input
+                type="date"
+                value={stageEnteredAt}
+                min={minDate}
+                max={maxDate}
+                onChange={(e) => setStageEnteredAt(e.target.value)}
+                disabled={busy}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+              />
+            </Field>
           </section>
 
           {/* Additional touches */}

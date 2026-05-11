@@ -23,6 +23,14 @@ export interface NewAttributionInput {
   region?: RegionKey | null;
   deal_id?: string | null;
   lead_id?: string | null;
+  // ISO date the deal entered the new stage. Optional on the input
+  // shape so legacy callers that don't pass a date keep working — the
+  // hook defaults to today before insert.
+  stage_entered_at?: string;
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 export interface UseAttributionsResult {
@@ -37,14 +45,22 @@ export interface UseAttributionsResult {
   // preserving deal_id and copying touches. Source is NOT deleted (history).
   promote: (
     id: string,
-    newPeriod: { year: number; periodIndex: PeriodIndex },
+    newPeriod: {
+      year: number;
+      periodIndex: PeriodIndex;
+      stage_entered_at: string;
+    },
   ) => Promise<Attribution>;
   // markLost is the parallel-terminal action to promote: insert a new row
   // at stage_key='closeLost' sharing the source's deal_id. The source row
   // is preserved so the deal's history stays intact.
   markLost: (
     id: string,
-    newPeriod: { year: number; periodIndex: PeriodIndex },
+    newPeriod: {
+      year: number;
+      periodIndex: PeriodIndex;
+      stage_entered_at: string;
+    },
   ) => Promise<Attribution>;
 }
 
@@ -151,9 +167,13 @@ export function useAttributions(): UseAttributionsResult {
 
   const create = useCallback(
     async (input: NewAttributionInput): Promise<Attribution> => {
+      const row = {
+        ...input,
+        stage_entered_at: input.stage_entered_at ?? todayIso(),
+      };
       const { data, error: err } = await supabase
         .from('attributions')
-        .insert(input)
+        .insert(row)
         .select()
         .single();
       if (err) {
@@ -210,7 +230,11 @@ export function useAttributions(): UseAttributionsResult {
   const promote = useCallback(
     async (
       id: string,
-      newPeriod: { year: number; periodIndex: PeriodIndex },
+      newPeriod: {
+        year: number;
+        periodIndex: PeriodIndex;
+        stage_entered_at: string;
+      },
     ): Promise<Attribution> => {
       const source = attributionsRef.current.find((a) => a.id === id);
       if (!source) throw new Error('Attribution not found');
@@ -231,6 +255,7 @@ export function useAttributions(): UseAttributionsResult {
         sf_link: source.sf_link,
         deal_id: source.deal_id,
         lead_id: source.lead_id,
+        stage_entered_at: newPeriod.stage_entered_at,
       };
       const { data: inserted, error: insErr } = await supabase
         .from('attributions')
@@ -296,7 +321,11 @@ export function useAttributions(): UseAttributionsResult {
   const markLost = useCallback(
     async (
       id: string,
-      newPeriod: { year: number; periodIndex: PeriodIndex },
+      newPeriod: {
+        year: number;
+        periodIndex: PeriodIndex;
+        stage_entered_at: string;
+      },
     ): Promise<Attribution> => {
       const source = attributionsRef.current.find((a) => a.id === id);
       if (!source) throw new Error('Attribution not found');
@@ -316,6 +345,7 @@ export function useAttributions(): UseAttributionsResult {
         region: source.region,
         deal_id: source.deal_id,
         lead_id: source.lead_id,
+        stage_entered_at: newPeriod.stage_entered_at,
       };
       const { data: inserted, error: insErr } = await supabase
         .from('attributions')

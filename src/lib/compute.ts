@@ -13,6 +13,7 @@ import {
   type FunnelStageKey,
 } from '../constants/funnelStages';
 import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
+import { VELOCITY_THRESHOLDS } from '../constants/velocityThresholds';
 
 export type PeriodFilter = 'year' | 'Q1' | 'Q2' | 'Q3' | 'Q4';
 
@@ -909,4 +910,230 @@ export function computeFunnelSankey(
   });
 
   return { nodes, edges: [...edgeMap.values()] };
+}
+
+// ---------- Deal velocity (Marketing Funnel: Velocity sub-tab) ----------
+//
+// One DealVelocity per distinct deal_id. Walks each deal's attribution
+// chain in canonical stage order (hpp → opp → pursuit → closeWon|closeLost)
+// using stage_entered_at as the per-stage date. Lead/MQL are lead-side, not
+// attribution-side, so they're ignored here.
+//
+// Future expansion (out of scope for v1): MQL → HPP velocity can be
+// computed by joining attributions[].lead_id back to leads[].stage_history
+// MQL entries; the lead's earliest MQL stage_history entry combined with
+// the deal's HPP stage_entered_at yields the gap. Add the join + a third
+// VELOCITY_THRESHOLDS key when business demand warrants it.
+
+// Canonical progression among the four "real" stages. closeLost is a
+// parallel terminal reached from any of HPP/Opp/Pursuit and isn't on
+// the linear path, so we treat it separately.
+const VELOCITY_PROGRESSION: AttributionStageKey[] = [
+  'hpp',
+  'opp',
+  'pursuit',
+  'closeWon',
+];
+
+function progressionRank(stage: AttributionStageKey): number {
+  // closeLost: terminal but off-progression. Give it a rank equal to the
+  // highest reached non-lost stage so the "current stage" pick still works
+  // when a deal goes Lost. We special-case in the consumer.
+  const idx = VELOCITY_PROGRESSION.indexOf(stage);
+  return idx === -1 ? -1 : idx;
+}
+
+function daysBetween(fromIso: string, toIso: string): number {
+  // Date subtraction in UTC-day terms. Both inputs are 'YYYY-MM-DD'.
+  const a = Date.parse(`${fromIso}T00:00:00Z`);
+  const b = Date.parse(`${toIso}T00:00:00Z`);
+  if (Number.isNaN(a) || Number.isNaN(b)) return 0;
+  return Math.floor((b - a) / 86_400_000);
+}
+
+export interface DealVelocity {
+  dealId: string;
+  label: string;
+  account: string | null;
+  amount: number | null;
+  currentStage: AttributionStageKey;
+  currentStageEnteredAt: string;       // ISO date
+  daysInCurrentStage: number;
+  hppEnteredAt: string | null;         // null if deal entered at a later stage manually
+  daysSinceHpp: number | null;
+  hppToOppDays: number | null;         // null if deal hasn't reached Opp
+  oppToPursuitDays: number | null;     // null if deal hasn't reached Pursuit
+  isTerminal: boolean;                 // true when current stage is closeWon or closeLost
+  isStale: boolean;                    // currentStage covered by thresholds && daysInCurrentStage > stale
+  // The HPP attribution's (year, period_index) — used by the page to
+  // scope the active deals table by selected period. Null if no HPP row
+  // exists (rare; manual-entry deals at a later stage).
+  hppYear: number | null;
+  hppPeriodIndex: PeriodIndex | null;
+  // The deal's region (taken from the HPP row when present, else from
+  // the earliest attribution in the chain). Drives region filtering.
+  region: RegionKey | null;
+}
+
+export interface ComputeDealVelocityInput {
+  attributions: Attribution[];
+  regions: Set<RegionKey>;
+  // ISO date; defaults to current date. Injectable for testing.
+  today?: string;
+}
+
+export function computeDealVelocities(
+  input: ComputeDealVelocityInput,
+): DealVelocity[] {
+  const { attributions, regions, today } = input;
+  const todayIso = today ?? new Date().toISOString().slice(0, 10);
+
+  // Group attributions by deal_id. Rows without a deal_id can't be
+  // chained, so we skip them (the velocity report is deal-level).
+  const byDeal = new Map<string, Attribution[]>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    const arr = byDeal.get(a.deal_id) ?? [];
+    arr.push(a);
+    byDeal.set(a.deal_id, arr);
+  }
+
+  const out: DealVelocity[] = [];
+  for (const [dealId, rows] of byDeal) {
+    // Pick the row representing the deal's CURRENT stage:
+    // - If closeLost or closeWon is present, that's terminal — use it.
+    // - Else use the row with the highest progression rank.
+    let currentRow: Attribution | null = null;
+    const lost = rows.find((r) => r.stage_key === 'closeLost');
+    const won = rows.find((r) => r.stage_key === 'closeWon');
+    if (lost) currentRow = lost;
+    else if (won) currentRow = won;
+    else {
+      let bestRank = -1;
+      for (const r of rows) {
+        const rank = progressionRank(r.stage_key);
+        if (rank > bestRank) {
+          bestRank = rank;
+          currentRow = r;
+        }
+      }
+    }
+    if (!currentRow) continue;
+
+    // Region filter: take from the HPP row when present (it's the entry
+    // point), else from the current row. Apply the same partial-set
+    // semantics as regionMatches.
+    const hppRow = rows.find((r) => r.stage_key === 'hpp') ?? null;
+    const oppRow = rows.find((r) => r.stage_key === 'opp') ?? null;
+    const pursuitRow = rows.find((r) => r.stage_key === 'pursuit') ?? null;
+    const dealRegion = (hppRow?.region ?? currentRow.region ?? null) as
+      | RegionKey
+      | null;
+    if (!regionMatches(dealRegion, regions)) continue;
+
+    const currentStage = currentRow.stage_key;
+    const currentStageEnteredAt = currentRow.stage_entered_at;
+    const daysInCurrentStage = daysBetween(currentStageEnteredAt, todayIso);
+
+    const hppEnteredAt = hppRow ? hppRow.stage_entered_at : null;
+    const daysSinceHpp =
+      hppEnteredAt !== null ? daysBetween(hppEnteredAt, todayIso) : null;
+    const hppToOppDays =
+      hppRow && oppRow
+        ? daysBetween(hppRow.stage_entered_at, oppRow.stage_entered_at)
+        : null;
+    const oppToPursuitDays =
+      oppRow && pursuitRow
+        ? daysBetween(oppRow.stage_entered_at, pursuitRow.stage_entered_at)
+        : null;
+
+    const isTerminal =
+      currentStage === 'closeWon' || currentStage === 'closeLost';
+
+    // Stale check: look up the threshold for "currentStage → next stage".
+    // Pursuit currently has no Pursuit→Won threshold defined in v1, so
+    // those deals never flag.
+    let isStale = false;
+    if (!isTerminal) {
+      const idx = VELOCITY_PROGRESSION.indexOf(currentStage);
+      if (idx >= 0 && idx < VELOCITY_PROGRESSION.length - 1) {
+        const next = VELOCITY_PROGRESSION[idx + 1];
+        const threshold = VELOCITY_THRESHOLDS[`${currentStage}->${next}`];
+        if (threshold && daysInCurrentStage > threshold.stale) {
+          isStale = true;
+        }
+      }
+    }
+
+    out.push({
+      dealId,
+      label: currentRow.label ?? '(unlabeled)',
+      account: currentRow.account ?? null,
+      amount: currentRow.amount ?? null,
+      currentStage,
+      currentStageEnteredAt,
+      daysInCurrentStage,
+      hppEnteredAt,
+      daysSinceHpp,
+      hppToOppDays,
+      oppToPursuitDays,
+      isTerminal,
+      isStale,
+      hppYear: hppRow ? hppRow.year : null,
+      hppPeriodIndex: hppRow ? (hppRow.period_index as PeriodIndex) : null,
+      region: dealRegion,
+    });
+  }
+
+  return out;
+}
+
+export interface StageVelocityStats {
+  transitionKey: string;               // e.g. 'hpp->opp'
+  average: number | null;
+  median: number | null;
+  count: number;
+}
+
+// One entry per transition key in VELOCITY_THRESHOLDS. Reads the per-
+// deal gap field that matches each transition key.
+export function computeStageVelocityStats(
+  velocities: DealVelocity[],
+): StageVelocityStats[] {
+  const fieldFor = (key: string): keyof DealVelocity | null => {
+    if (key === 'hpp->opp') return 'hppToOppDays';
+    if (key === 'opp->pursuit') return 'oppToPursuitDays';
+    return null;
+  };
+
+  const out: StageVelocityStats[] = [];
+  for (const key of Object.keys(VELOCITY_THRESHOLDS)) {
+    const field = fieldFor(key);
+    const values: number[] = [];
+    if (field) {
+      for (const v of velocities) {
+        const raw = v[field];
+        if (typeof raw === 'number') values.push(raw);
+      }
+    }
+    if (values.length === 0) {
+      out.push({ transitionKey: key, average: null, median: null, count: 0 });
+      continue;
+    }
+    const sum = values.reduce((a, b) => a + b, 0);
+    const average = sum / values.length;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median =
+      sorted.length % 2 === 1
+        ? sorted[mid]
+        : (sorted[mid - 1] + sorted[mid]) / 2;
+    out.push({
+      transitionKey: key,
+      average,
+      median,
+      count: values.length,
+    });
+  }
+  return out;
 }

@@ -64,7 +64,15 @@ export default function AttributionEditorModal({
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [periodIndex, setPeriodIndex] = useState<PeriodIndex>(1);
   const [stageKey, setStageKey] = useState<AttributionStageKey>('hpp');
+  const [stageEnteredAt, setStageEnteredAt] = useState<string>('');
   const [touches, setTouches] = useState<TouchDraft[]>([]);
+
+  const maxDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const minDate = useMemo(() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - 5);
+    return d.toISOString().slice(0, 10);
+  }, []);
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -85,6 +93,7 @@ export default function AttributionEditorModal({
     setYear(attribution.year);
     setPeriodIndex(attribution.period_index);
     setStageKey(attribution.stage_key);
+    setStageEnteredAt(attribution.stage_entered_at);
   }, [attribution]);
 
   useEffect(() => {
@@ -119,7 +128,12 @@ export default function AttributionEditorModal({
     );
   }
 
-  const valid = label.trim().length > 0 && channelId !== '';
+  const valid =
+    label.trim().length > 0 &&
+    channelId !== '' &&
+    stageEnteredAt !== '' &&
+    stageEnteredAt >= minDate &&
+    stageEnteredAt <= maxDate;
 
   const moveTouch = (idx: number, dir: -1 | 1) => {
     setTouches((prev) => {
@@ -150,6 +164,7 @@ export default function AttributionEditorModal({
         year,
         period_index: periodIndex,
         stage_key: stageKey,
+        stage_entered_at: stageEnteredAt,
       });
       const newTouches: NewTouchInput[] = touches
         .filter((t) => t.channel_id !== '')
@@ -306,6 +321,17 @@ export default function AttributionEditorModal({
                 </div>
               </Field>
             </div>
+            <Field label={`Entered ${FUNNEL_STAGE_LABELS[stageKey]} on (required)`}>
+              <input
+                type="date"
+                value={stageEnteredAt}
+                min={minDate}
+                max={maxDate}
+                onChange={(e) => setStageEnteredAt(e.target.value)}
+                disabled={busy}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+              />
+            </Field>
           </section>
 
           <section className="space-y-2">
