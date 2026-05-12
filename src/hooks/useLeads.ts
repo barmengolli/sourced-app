@@ -593,6 +593,44 @@ export function useLeads(): UseLeadsResult {
           patch[field] = incoming;
         }
       }
+      // Detect Lead → MQL stage upgrade on re-import. If the incoming
+      // stage differs from what we have AND the new stage doesn't yet
+      // have a stage_history entry, append one with entered_at = today.
+      //
+      // This is intentionally always auto-append, with no lock. The
+      // existing per-entry edit_locked guards individual history
+      // entries from being overwritten; this path only ever ADDS new
+      // entries, never modifies existing ones.
+      //
+      // Date is today's import date as a best-effort approximation.
+      // The true MQL transition date isn't carried by the SFDC export
+      // today. A future n8n-based SFDC sync could supply the HubSpot
+      // lifecycle stage change date, at which point this should use
+      // that field instead of todayIso().
+      const incomingStage = sync.values.current_stage as
+        | StageKey
+        | undefined;
+      if (
+        incomingStage &&
+        incomingStage !== 'lead' &&
+        incomingStage !== existing.current_stage
+      ) {
+        const alreadyHasEntry = (existing.stage_history ?? []).some(
+          (e) => e.stage === incomingStage,
+        );
+        if (!alreadyHasEntry) {
+          const newEntry: StageHistoryEntry = {
+            stage: incomingStage,
+            entered_at: todayIso(),
+            edited_by: EDITED_BY,
+            edit_locked: false,
+          };
+          patch.stage_history = [
+            ...(existing.stage_history ?? []),
+            newEntry,
+          ];
+        }
+      }
       if (sync.sfdc_lead_id && !existing.sfdc_lead_id) {
         patch.sfdc_lead_id = sync.sfdc_lead_id;
       }
