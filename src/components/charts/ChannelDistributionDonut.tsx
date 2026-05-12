@@ -118,7 +118,13 @@ export default function ChannelDistributionDonut({
                 <Cell key={c.channelId} fill={colorOf(c.channelId)} />
               ))}
             </Pie>
-            <Tooltip content={<DonutTooltip colorOf={colorOf} />} />
+            {/* Pin to top-left so the tooltip never overlaps the donut
+                center label. See RegionDistributionDonut for context. */}
+            <Tooltip
+              content={<DonutTooltip colorOf={colorOf} />}
+              position={{ x: 0, y: 0 }}
+              wrapperStyle={{ outline: 'none' }}
+            />
           </PieChart>
         </ResponsiveContainer>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2">
