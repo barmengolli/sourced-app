@@ -145,15 +145,41 @@ export default function BarChartView({
               labelStyle={{ color: CHART_COLORS.charcoal, fontWeight: 600 }}
             />
             <Legend wrapperStyle={{ fontSize: 11 }} />
+            {/* In-bar value labels above each bar. Zero is suppressed
+                so the chart doesn't show "0" everywhere on empty
+                periods. position="top" handles varied heights better
+                than insideTop because most bars are short. */}
             <Bar
               dataKey="Projections"
               fill={CHART_COLORS.slateMuted}
               radius={[3, 3, 0, 0]}
+              label={{
+                position: 'top',
+                fill: CHART_COLORS.charcoal,
+                fontSize: 11,
+                formatter: (v) => {
+                  const n = typeof v === 'number' ? v : Number(v);
+                  return Number.isFinite(n) && n !== 0
+                    ? n.toLocaleString()
+                    : '';
+                },
+              }}
             />
             <Bar
               dataKey="Actuals"
               fill={CHART_COLORS.indigo}
               radius={[3, 3, 0, 0]}
+              label={{
+                position: 'top',
+                fill: CHART_COLORS.charcoal,
+                fontSize: 11,
+                formatter: (v) => {
+                  const n = typeof v === 'number' ? v : Number(v);
+                  return Number.isFinite(n) && n !== 0
+                    ? n.toLocaleString()
+                    : '';
+                },
+              }}
             />
           </BarChart>
         </ResponsiveContainer>
