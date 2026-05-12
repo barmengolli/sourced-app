@@ -1,12 +1,11 @@
 // ChannelDistributionDonut — fourth summary card on the Opportunities
-// tab. Parallel to RegionDistributionDonut: same hover-driven center
-// label, same legend layout, but buckets by top-level parent channel
-// instead of region. Intentionally ignores the page-level region
-// toggles for the same reason the region donut does.
+// tab. Parallel to RegionDistributionDonut: same boxed tooltip, same
+// legend layout, but buckets by top-level parent channel instead of
+// region. Intentionally ignores the page-level region toggles for the
+// same reason the region donut does.
 
-import { useState } from 'react';
-import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts';
-import { CHART_PALETTE } from '../../constants/chartColors';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
+import { CHART_COLORS, CHART_PALETTE } from '../../constants/chartColors';
 import {
   NO_CHANNEL_KEY,
   type ChannelDistribution,
@@ -32,11 +31,60 @@ function colorForChannel(channelId: string, index: number): string {
   return CHART_PALETTE[index % CHART_PALETTE.length];
 }
 
+interface TooltipPayloadEntry {
+  payload?: {
+    channelId?: string;
+    channelName?: string;
+    dealCount?: number;
+    totalAmount?: number;
+    percentageOfCount?: number;
+  };
+}
+
+interface DonutTooltipProps {
+  active?: boolean;
+  payload?: TooltipPayloadEntry[];
+  // The distribution-order index map flows in via a closure on the
+  // wrapping component so we can recover the per-slice color without
+  // re-deriving order.
+  colorOf?: (channelId: string) => string;
+}
+
+function DonutTooltip({ active, payload, colorOf }: DonutTooltipProps) {
+  if (!active || !payload || payload.length === 0) return null;
+  const d = payload[0].payload;
+  if (!d || !d.channelId) return null;
+  return (
+    <div
+      className="bg-bg rounded shadow-sm text-xs"
+      style={{
+        border: `1px solid ${CHART_COLORS.border}`,
+        padding: 8,
+      }}
+    >
+      <div
+        className="font-semibold"
+        style={{ color: colorOf ? colorOf(d.channelId) : CHART_COLORS.charcoal }}
+      >
+        {d.channelName ?? 'Unknown'}
+      </div>
+      <div className="text-charcoal tabular-nums mt-1">
+        Deals: {d.dealCount ?? 0}
+      </div>
+      <div className="text-charcoal tabular-nums">
+        Amount: {fmtUsdCompact(d.totalAmount ?? 0)}
+      </div>
+      <div className="text-charcoal tabular-nums">
+        Share: {(d.percentageOfCount ?? 0).toFixed(0)}%
+      </div>
+    </div>
+  );
+}
+
 export default function ChannelDistributionDonut({
   distribution,
 }: ChannelDistributionDonutProps) {
   const { channels, totalDeals, totalAmount } = distribution;
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   if (channels.length === 0) {
     return (
@@ -46,14 +94,9 @@ export default function ChannelDistributionDonut({
     );
   }
 
-  // Index lookup once so the legend and the Cell loop share the same
-  // color assignment. NO_CHANNEL gets its own constant, so its index
-  // doesn't matter for color but we still use the distribution-order
-  // index for everything else.
   const idxById = new Map(channels.map((c, i) => [c.channelId, i] as const));
-  const hovered = hoveredId
-    ? channels.find((c) => c.channelId === hoveredId) ?? null
-    : null;
+  const colorOf = (channelId: string) =>
+    colorForChannel(channelId, idxById.get(channelId) ?? 0);
 
   return (
     <div className="space-y-3">
@@ -70,62 +113,33 @@ export default function ChannelDistributionDonut({
               dataKey="dealCount"
               nameKey="channelName"
               isAnimationActive={false}
-              // Recharts types the handler payload as PieSectorDataItem,
-              // but the original datum fields are still on it at runtime.
-              // Read defensively via an unknown cast.
-              onMouseEnter={(d: unknown) => {
-                const id = (d as { channelId?: string } | undefined)?.channelId;
-                setHoveredId(id ?? null);
-              }}
-              onMouseLeave={() => setHoveredId(null)}
             >
-              {channels.map((c) => {
-                const dim = hoveredId !== null && hoveredId !== c.channelId;
-                return (
-                  <Cell
-                    key={c.channelId}
-                    fill={colorForChannel(c.channelId, idxById.get(c.channelId) ?? 0)}
-                    fillOpacity={dim ? 0.4 : 1}
-                  />
-                );
-              })}
+              {channels.map((c) => (
+                <Cell key={c.channelId} fill={colorOf(c.channelId)} />
+              ))}
             </Pie>
+            <Tooltip content={<DonutTooltip colorOf={colorOf} />} />
           </PieChart>
         </ResponsiveContainer>
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2">
-          {hovered ? (
-            <>
-              <div className="text-sm font-semibold text-charcoal">
-                {hovered.channelName}
-              </div>
-              <div className="text-xs text-slate-muted">
-                {hovered.dealCount} deal{hovered.dealCount === 1 ? '' : 's'} ·{' '}
-                {fmtUsdCompact(hovered.totalAmount)} ·{' '}
-                {hovered.percentageOfCount.toFixed(0)}%
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="text-xl font-semibold text-charcoal">
-                {fmtUsdCompact(totalAmount)}
-              </div>
-              <div className="text-xs text-slate-muted">
-                {totalDeals} deal{totalDeals === 1 ? '' : 's'} total
-              </div>
-            </>
-          )}
+          <div className="text-xl font-semibold text-charcoal">
+            {fmtUsdCompact(totalAmount)}
+          </div>
+          <div className="text-xs text-slate-muted">
+            {totalDeals} deal{totalDeals === 1 ? '' : 's'} total
+          </div>
         </div>
       </div>
 
       <ul className="text-xs space-y-1">
-        {channels.map((c, i) => (
+        {channels.map((c) => (
           <li
             key={c.channelId}
             className="grid grid-cols-[12px_1fr_auto_auto_auto] gap-x-2 items-center"
           >
             <span
               className="inline-block w-2.5 h-2.5 rounded-sm"
-              style={{ backgroundColor: colorForChannel(c.channelId, i) }}
+              style={{ backgroundColor: colorOf(c.channelId) }}
               aria-hidden
             />
             <span className="text-charcoal truncate">{c.channelName}</span>
