@@ -1248,3 +1248,134 @@ export function computeRegionDistribution(
 
   return { regions: regionsOut, totalDeals, totalAmount };
 }
+
+// ---------- Channel distribution (Deals by Channel donut) ----------
+//
+// Parallels computeRegionDistribution but buckets per TOP-LEVEL channel.
+// A deal's channel comes from its earliest stage row in chain order
+// (REGION_STAGE_PRIORITY); the row's channel_id is then resolved up to
+// its root via parent_channel_id. Deals whose first-stage row has no
+// channel_id land in a synthetic "No channel" bucket so they aren't
+// silently dropped.
+
+export const NO_CHANNEL_KEY = '__no_channel__';
+
+export interface ChannelDealStats {
+  channelId: string;       // root channel id or NO_CHANNEL_KEY
+  channelName: string;
+  dealCount: number;
+  totalAmount: number;
+  percentageOfCount: number;
+}
+
+export interface ChannelDistribution {
+  channels: ChannelDealStats[];   // only buckets with dealCount > 0
+  totalDeals: number;
+  totalAmount: number;
+}
+
+export interface ComputeChannelDistributionInput {
+  attributions: Attribution[];
+  channels: Channel[];
+  year: number;
+  filter: PeriodFilter;
+}
+
+export function computeChannelDistribution(
+  input: ComputeChannelDistributionInput,
+): ChannelDistribution {
+  const { attributions, channels, year, filter } = input;
+
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // Walk parent_channel_id up to a root. Returns the root channel's id
+  // (or the input id itself if already root or unresolvable). Mirrors
+  // resolveTopLevelChannelId used by the Sankey compute.
+  const rootIdFor = (channelId: string): string => {
+    let current: string | undefined = channelId;
+    const seen = new Set<string>();
+    while (current) {
+      if (seen.has(current)) return channelId;
+      seen.add(current);
+      const node = channelById.get(current);
+      if (!node) return channelId;
+      if (!node.parent_channel_id) return current;
+      current = node.parent_channel_id;
+    }
+    return channelId;
+  };
+
+  // 1. Identify deals (by deal_id) that have ANY attribution in the period.
+  const dealIdsInPeriod = new Set<string>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter))
+      continue;
+    dealIdsInPeriod.add(a.deal_id);
+  }
+
+  // 2. Gather all rows for those deals (across all periods) so we can
+  //    pick the earliest by stage priority. Channel/amount selection
+  //    uses the same priority as the region donut for consistency.
+  const rowsByDeal = new Map<string, Attribution[]>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    if (!dealIdsInPeriod.has(a.deal_id)) continue;
+    const arr = rowsByDeal.get(a.deal_id) ?? [];
+    arr.push(a);
+    rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // 3. Tally per root channel. Deals whose first-stage row has no
+  //    channel_id fall into the NO_CHANNEL bucket.
+  const tally = new Map<string, { count: number; amount: number; name: string }>();
+  for (const [, rows] of rowsByDeal) {
+    let primary: Attribution | null = null;
+    for (const stage of REGION_STAGE_PRIORITY) {
+      const found = rows.find((r) => r.stage_key === stage);
+      if (found) {
+        primary = found;
+        break;
+      }
+    }
+    if (!primary) continue;
+    let bucketId: string;
+    let bucketName: string;
+    if (!primary.channel_id) {
+      bucketId = NO_CHANNEL_KEY;
+      bucketName = 'No channel';
+    } else {
+      bucketId = rootIdFor(primary.channel_id);
+      bucketName = channelById.get(bucketId)?.name ?? 'Unknown';
+    }
+    const entry = tally.get(bucketId) ?? { count: 0, amount: 0, name: bucketName };
+    entry.count += 1;
+    entry.amount += primary.amount ?? 0;
+    // Keep the most-recently-seen name (channel renames mid-period are
+    // rare; first-write semantics would work too).
+    entry.name = bucketName;
+    tally.set(bucketId, entry);
+  }
+
+  let totalDeals = 0;
+  let totalAmount = 0;
+  for (const v of tally.values()) {
+    totalDeals += v.count;
+    totalAmount += v.amount;
+  }
+  const channelsOut: ChannelDealStats[] = [];
+  for (const [channelId, v] of tally) {
+    if (v.count <= 0) continue;
+    channelsOut.push({
+      channelId,
+      channelName: v.name,
+      dealCount: v.count,
+      totalAmount: v.amount,
+      percentageOfCount:
+        totalDeals === 0 ? 0 : (v.count / totalDeals) * 100,
+    });
+  }
+  channelsOut.sort((a, b) => b.dealCount - a.dealCount);
+
+  return { channels: channelsOut, totalDeals, totalAmount };
+}
