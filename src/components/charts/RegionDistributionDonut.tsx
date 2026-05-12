@@ -114,16 +114,11 @@ export default function RegionDistributionDonut({
                 <Cell key={r.region} fill={colorForRegion(r.region)} />
               ))}
             </Pie>
-            {/* Pin the tooltip to the chart's top-left so it never
-                lands on top of the donut center label. The default
-                cursor-follow positioning overlapped the "$X.XM /
-                N deals total" text whenever the cursor crossed the
-                hole. */}
-            <Tooltip
-              content={<DonutTooltip />}
-              position={{ x: 0, y: 0 }}
-              wrapperStyle={{ outline: 'none' }}
-            />
+            {/* Cursor-follow placement matches the Channel Distribution
+                donut on the Leads & MQLs tab. Recharts offsets the box
+                to the side of the cursor, so it sits next to the
+                hovered slice rather than over the donut center. */}
+            <Tooltip content={<DonutTooltip />} />
           </PieChart>
         </ResponsiveContainer>
         {/* Static center label: total $ and deal count. Doesn't react to
