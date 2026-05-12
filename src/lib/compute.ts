@@ -1137,3 +1137,114 @@ export function computeStageVelocityStats(
   }
   return out;
 }
+
+// ---------- Region distribution (Deals by Region donut) ----------
+//
+// Counts distinct deals per region, where a "deal" is any deal_id with at
+// least one attribution in the selected period. Region and dollar amount
+// come from the deal's earliest stage row (HPP if present, else the
+// earliest row in chain order). The region filter intentionally is NOT
+// an input: this is a distribution view and always shows all regions
+// with at least one deal.
+
+export interface RegionDealStats {
+  region: RegionKey;
+  dealCount: number;
+  totalAmount: number;
+  percentageOfCount: number;   // 0-100
+}
+
+export interface RegionDistribution {
+  regions: RegionDealStats[];  // only regions with dealCount > 0
+  totalDeals: number;
+  totalAmount: number;
+}
+
+export interface ComputeRegionDistributionInput {
+  attributions: Attribution[];
+  year: number;
+  filter: PeriodFilter;
+}
+
+// Stage order used to pick the deal's "first" row. Matches VELOCITY_PROGRESSION
+// plus closeLost as a parallel terminal; for region/amount selection
+// closeLost only matters when it's the only row in the chain.
+const REGION_STAGE_PRIORITY: AttributionStageKey[] = [
+  'hpp',
+  'opp',
+  'pursuit',
+  'closeWon',
+  'closeLost',
+];
+
+export function computeRegionDistribution(
+  input: ComputeRegionDistributionInput,
+): RegionDistribution {
+  const { attributions, year, filter } = input;
+
+  // 1. Identify deals (by deal_id) that have ANY attribution in the period.
+  //    Singletons without a deal_id can't form a chain; skip them.
+  const dealIdsInPeriod = new Set<string>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter))
+      continue;
+    dealIdsInPeriod.add(a.deal_id);
+  }
+
+  // 2. For each in-period deal, gather all its rows (across all periods)
+  //    so we can pick the earliest by stage priority. The donut bucket
+  //    uses the deal's region/amount, not any specific period's row.
+  const rowsByDeal = new Map<string, Attribution[]>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    if (!dealIdsInPeriod.has(a.deal_id)) continue;
+    const arr = rowsByDeal.get(a.deal_id) ?? [];
+    arr.push(a);
+    rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // 3. Pick the deal's "first" row by REGION_STAGE_PRIORITY and tally per
+  //    region. A deal whose first row has no region falls into 'Other' so
+  //    every counted deal shows up somewhere.
+  const tally = new Map<RegionKey, { count: number; amount: number }>();
+  for (const [, rows] of rowsByDeal) {
+    let primary: Attribution | null = null;
+    for (const stage of REGION_STAGE_PRIORITY) {
+      const found = rows.find((r) => r.stage_key === stage);
+      if (found) {
+        primary = found;
+        break;
+      }
+    }
+    if (!primary) continue;
+    const region = (primary.region as RegionKey) ?? 'Other';
+    const entry = tally.get(region) ?? { count: 0, amount: 0 };
+    entry.count += 1;
+    entry.amount += primary.amount ?? 0;
+    tally.set(region, entry);
+  }
+
+  // 4. Materialize as a sorted array (largest count first), filter zero
+  //    regions, compute percentages, and roll up totals.
+  let totalDeals = 0;
+  let totalAmount = 0;
+  for (const v of tally.values()) {
+    totalDeals += v.count;
+    totalAmount += v.amount;
+  }
+  const regionsOut: RegionDealStats[] = [];
+  for (const [region, v] of tally) {
+    if (v.count <= 0) continue;
+    regionsOut.push({
+      region,
+      dealCount: v.count,
+      totalAmount: v.amount,
+      percentageOfCount:
+        totalDeals === 0 ? 0 : (v.count / totalDeals) * 100,
+    });
+  }
+  regionsOut.sort((a, b) => b.dealCount - a.dealCount);
+
+  return { regions: regionsOut, totalDeals, totalAmount };
+}

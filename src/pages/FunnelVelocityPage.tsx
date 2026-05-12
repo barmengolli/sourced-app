@@ -19,6 +19,7 @@ import { useChannels } from '../hooks/useChannels';
 import { useLeads } from '../hooks/useLeads';
 import {
   computeDealVelocities,
+  computeRegionDistribution,
   computeStageVelocityStats,
   type DealVelocity,
   type PeriodFilter,
@@ -27,6 +28,7 @@ import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
+import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
 import {
   VELOCITY_THRESHOLDS,
   type VelocityThreshold,
@@ -150,6 +152,20 @@ export default function FunnelVelocityPage({
     return m;
   }, [stats]);
 
+  // Region distribution for the "Deals by Region" donut card. The donut
+  // is a distribution view: it respects the period filter (so the user
+  // can see Q1 vs Q2 vs YTD) but intentionally ignores the region
+  // toggles. `regions` is therefore NOT in this useMemo's deps.
+  const regionDistribution = useMemo(
+    () =>
+      computeRegionDistribution({
+        attributions: attributionsHook.attributions,
+        year,
+        filter,
+      }),
+    [attributionsHook.attributions, year, filter],
+  );
+
   // Active deals table source: non-terminal, in the selected period.
   const activeDeals = useMemo(() => {
     return velocities.filter(
@@ -210,8 +226,10 @@ export default function FunnelVelocityPage({
         />
       </header>
 
-      {/* Summary cards */}
-      <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Summary cards: two velocity cards plus the region-distribution
+          donut. Three columns on lg+ so the donut sits beside the
+          velocity numbers; stacks on smaller viewports. */}
+      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {TRANSITIONS.map((t) => {
           const s = statsByKey.get(t.key);
           const threshold = VELOCITY_THRESHOLDS[t.key];
@@ -226,6 +244,12 @@ export default function FunnelVelocityPage({
             />
           );
         })}
+        <ChartCard
+          title="Deals by Region"
+          subtitle="Distribution across all deals in this period. Region filter does not apply."
+        >
+          <RegionDistributionDonut distribution={regionDistribution} />
+        </ChartCard>
       </section>
 
       {/* Active deals table */}
