@@ -18,6 +18,7 @@ import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { useChannels } from '../hooks/useChannels';
 import { useLeads } from '../hooks/useLeads';
 import {
+  computeChannelDistribution,
   computeDealVelocities,
   computeRegionDistribution,
   computeStageVelocityStats,
@@ -28,6 +29,7 @@ import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
+import ChannelDistributionDonut from '../components/charts/ChannelDistributionDonut';
 import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
 import {
   VELOCITY_THRESHOLDS,
@@ -166,6 +168,20 @@ export default function FunnelVelocityPage({
     [attributionsHook.attributions, year, filter],
   );
 
+  // Channel distribution: same period-yes, region-no contract as the
+  // region donut. Needs the full channel list to resolve sub-channels
+  // to their top-level parent.
+  const channelDistribution = useMemo(
+    () =>
+      computeChannelDistribution({
+        attributions: attributionsHook.attributions,
+        channels,
+        year,
+        filter,
+      }),
+    [attributionsHook.attributions, channels, year, filter],
+  );
+
   // Active deals table source: non-terminal, in the selected period.
   const activeDeals = useMemo(() => {
     return velocities.filter(
@@ -226,30 +242,40 @@ export default function FunnelVelocityPage({
         />
       </header>
 
-      {/* Summary cards: two velocity cards plus the region-distribution
-          donut. Three columns on lg+ so the donut sits beside the
-          velocity numbers; stacks on smaller viewports. */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {TRANSITIONS.map((t) => {
-          const s = statsByKey.get(t.key);
-          const threshold = VELOCITY_THRESHOLDS[t.key];
-          return (
-            <VelocityCard
-              key={t.key}
-              label={t.label}
-              average={s?.average ?? null}
-              median={s?.median ?? null}
-              count={s?.count ?? 0}
-              threshold={threshold}
-            />
-          );
-        })}
-        <ChartCard
-          title="Deals by Region"
-          subtitle="Distribution across all deals in this period. Region filter does not apply."
-        >
-          <RegionDistributionDonut distribution={regionDistribution} />
-        </ChartCard>
+      {/* Summary section: two rows. Top row = velocity numbers, bottom
+          row = distribution donuts. Both rows go 1-col on mobile and
+          2-col on lg+ so the four cards form a 2x2 grid on desktop. */}
+      <section className="space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {TRANSITIONS.map((t) => {
+            const s = statsByKey.get(t.key);
+            const threshold = VELOCITY_THRESHOLDS[t.key];
+            return (
+              <VelocityCard
+                key={t.key}
+                label={t.label}
+                average={s?.average ?? null}
+                median={s?.median ?? null}
+                count={s?.count ?? 0}
+                threshold={threshold}
+              />
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <ChartCard
+            title="Deals by Region"
+            subtitle="Distribution across all deals in this period. Region filter does not apply."
+          >
+            <RegionDistributionDonut distribution={regionDistribution} />
+          </ChartCard>
+          <ChartCard
+            title="Deals by Channel"
+            subtitle="Distribution across all deals in this period, grouped by top-level channel."
+          >
+            <ChannelDistributionDonut distribution={channelDistribution} />
+          </ChartCard>
+        </div>
       </section>
 
       {/* Active deals table */}
