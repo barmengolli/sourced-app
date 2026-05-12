@@ -118,12 +118,22 @@ export default function ChannelDistributionDonut({
                 <Cell key={c.channelId} fill={colorOf(c.channelId)} />
               ))}
             </Pie>
-            {/* Cursor-follow placement, matching the Channel
-                Distribution donut on Leads & MQLs. */}
-            <Tooltip content={<DonutTooltip colorOf={colorOf} />} />
+            {/* Cursor-follow placement matches the Channel Distribution
+                donut on Leads & MQLs. wrapperStyle bumps the tooltip
+                above the static center-label overlay (a later DOM
+                sibling that would otherwise paint over it). */}
+            <Tooltip
+              content={<DonutTooltip colorOf={colorOf} />}
+              wrapperStyle={{ zIndex: 50, pointerEvents: 'none' }}
+            />
           </PieChart>
         </ResponsiveContainer>
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2">
+        {/* Center label kept strictly below the tooltip's z-index so
+            the boxed tooltip paints on top on hover. */}
+        <div
+          className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2"
+          style={{ zIndex: 1 }}
+        >
           <div className="text-xl font-semibold text-charcoal">
             {fmtUsdCompact(totalAmount)}
           </div>

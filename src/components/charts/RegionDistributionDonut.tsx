@@ -115,15 +115,25 @@ export default function RegionDistributionDonut({
               ))}
             </Pie>
             {/* Cursor-follow placement matches the Channel Distribution
-                donut on the Leads & MQLs tab. Recharts offsets the box
-                to the side of the cursor, so it sits next to the
-                hovered slice rather than over the donut center. */}
-            <Tooltip content={<DonutTooltip />} />
+                donut on the Leads & MQLs tab. wrapperStyle bumps the
+                tooltip above the static center-label overlay below
+                (which is a later DOM sibling and would otherwise paint
+                on top). */}
+            <Tooltip
+              content={<DonutTooltip />}
+              wrapperStyle={{ zIndex: 50, pointerEvents: 'none' }}
+            />
           </PieChart>
         </ResponsiveContainer>
-        {/* Static center label: total $ and deal count. Doesn't react to
-            hover so the boxed tooltip handles per-slice context. */}
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2">
+        {/* Static center label: total $ and deal count. Explicit
+            z-index keeps it strictly behind the Recharts tooltip
+            (which we bumped to z-50 above). Without this, the overlay
+            sits later in the DOM than the tooltip portal and paints
+            on top of it on hover. */}
+        <div
+          className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2"
+          style={{ zIndex: 1 }}
+        >
           <div className="text-xl font-semibold text-charcoal">
             {fmtUsdCompact(totalAmount)}
           </div>
