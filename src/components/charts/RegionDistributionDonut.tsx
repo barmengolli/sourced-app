@@ -114,7 +114,16 @@ export default function RegionDistributionDonut({
                 <Cell key={r.region} fill={colorForRegion(r.region)} />
               ))}
             </Pie>
-            <Tooltip content={<DonutTooltip />} />
+            {/* Pin the tooltip to the chart's top-left so it never
+                lands on top of the donut center label. The default
+                cursor-follow positioning overlapped the "$X.XM /
+                N deals total" text whenever the cursor crossed the
+                hole. */}
+            <Tooltip
+              content={<DonutTooltip />}
+              position={{ x: 0, y: 0 }}
+              wrapperStyle={{ outline: 'none' }}
+            />
           </PieChart>
         </ResponsiveContainer>
         {/* Static center label: total $ and deal count. Doesn't react to
