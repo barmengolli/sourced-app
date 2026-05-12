@@ -99,6 +99,15 @@ export default function DonutChartView({ rows, channels }: DonutChartViewProps) 
               paddingAngle={2}
               dataKey="value"
               stroke="none"
+              // Slice percentage labels inline. Slices under 5% are
+              // unlabeled so tiny segments don't pile up unreadable
+              // text. labelLine={false} kills the default connector
+              // lines that Recharts otherwise draws to each label.
+              label={({ percent }: { percent?: number }) => {
+                const pct = Math.round((percent ?? 0) * 100);
+                return pct >= 5 ? `${pct}%` : '';
+              }}
+              labelLine={false}
             >
               {data.map((d, i) => (
                 <Cell key={i} fill={d.color} />

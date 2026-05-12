@@ -4,14 +4,13 @@
 // in the center. Intentionally region-filter-agnostic so the user
 // always sees the full distribution regardless of their region toggles.
 //
-// No floating tooltip: hovering a slice repurposes the center label
-// for that slice's details (region label, count, $, %). The default
-// state shows the period totals. This avoids the overlap a Recharts
-// tooltip would cause centered on the donut hole.
+// Tooltip: boxed Recharts tooltip matching the styling used by the
+// Actuals vs Projections bar chart. The center label is static and
+// always shows the period totals (an earlier "swap center on hover"
+// attempt clipped against the donut ring on multi-line content).
 
-import { useState } from 'react';
-import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts';
-import { CHART_PALETTE } from '../../constants/chartColors';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
+import { CHART_COLORS, CHART_PALETTE } from '../../constants/chartColors';
 import { REGION_LABELS, type RegionKey } from '../../constants/regions';
 import type { RegionDistribution } from '../../lib/compute';
 
@@ -37,11 +36,55 @@ function colorForRegion(region: RegionKey): string {
   return CHART_PALETTE[idx % CHART_PALETTE.length];
 }
 
+interface TooltipPayloadEntry {
+  payload?: {
+    region?: RegionKey;
+    dealCount?: number;
+    totalAmount?: number;
+    percentageOfCount?: number;
+  };
+}
+
+interface DonutTooltipProps {
+  active?: boolean;
+  payload?: TooltipPayloadEntry[];
+}
+
+function DonutTooltip({ active, payload }: DonutTooltipProps) {
+  if (!active || !payload || payload.length === 0) return null;
+  const d = payload[0].payload;
+  if (!d || !d.region) return null;
+  return (
+    <div
+      className="bg-bg rounded shadow-sm text-xs"
+      style={{
+        border: `1px solid ${CHART_COLORS.border}`,
+        padding: 8,
+      }}
+    >
+      <div
+        className="font-semibold"
+        style={{ color: colorForRegion(d.region) }}
+      >
+        {REGION_LABELS[d.region]}
+      </div>
+      <div className="text-charcoal tabular-nums mt-1">
+        Deals: {d.dealCount ?? 0}
+      </div>
+      <div className="text-charcoal tabular-nums">
+        Amount: {fmtUsdCompact(d.totalAmount ?? 0)}
+      </div>
+      <div className="text-charcoal tabular-nums">
+        Share: {(d.percentageOfCount ?? 0).toFixed(0)}%
+      </div>
+    </div>
+  );
+}
+
 export default function RegionDistributionDonut({
   distribution,
 }: RegionDistributionDonutProps) {
   const { regions, totalDeals, totalAmount } = distribution;
-  const [hoveredRegion, setHoveredRegion] = useState<RegionKey | null>(null);
 
   if (regions.length === 0) {
     return (
@@ -50,10 +93,6 @@ export default function RegionDistributionDonut({
       </p>
     );
   }
-
-  const hovered = hoveredRegion
-    ? regions.find((r) => r.region === hoveredRegion) ?? null
-    : null;
 
   return (
     <div className="space-y-3">
@@ -70,54 +109,23 @@ export default function RegionDistributionDonut({
               dataKey="dealCount"
               nameKey="region"
               isAnimationActive={false}
-              // Recharts types the handler payload as PieSectorDataItem,
-              // but at runtime it carries our original datum fields too.
-              // Read off `region` defensively via an unknown cast so
-              // tsc stays happy.
-              onMouseEnter={(d: unknown) => {
-                const region = (d as { region?: RegionKey } | undefined)?.region;
-                setHoveredRegion(region ?? null);
-              }}
-              onMouseLeave={() => setHoveredRegion(null)}
             >
-              {regions.map((r) => {
-                const dim =
-                  hoveredRegion !== null && hoveredRegion !== r.region;
-                return (
-                  <Cell
-                    key={r.region}
-                    fill={colorForRegion(r.region)}
-                    fillOpacity={dim ? 0.4 : 1}
-                  />
-                );
-              })}
+              {regions.map((r) => (
+                <Cell key={r.region} fill={colorForRegion(r.region)} />
+              ))}
             </Pie>
+            <Tooltip content={<DonutTooltip />} />
           </PieChart>
         </ResponsiveContainer>
-        {/* Center label overlay. Swaps to slice-specific info on hover
-            so we don't need a floating tooltip overlapping the donut. */}
+        {/* Static center label: total $ and deal count. Doesn't react to
+            hover so the boxed tooltip handles per-slice context. */}
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-2">
-          {hovered ? (
-            <>
-              <div className="text-sm font-semibold text-charcoal">
-                {REGION_LABELS[hovered.region]}
-              </div>
-              <div className="text-xs text-slate-muted">
-                {hovered.dealCount} deal{hovered.dealCount === 1 ? '' : 's'} ·{' '}
-                {fmtUsdCompact(hovered.totalAmount)} ·{' '}
-                {hovered.percentageOfCount.toFixed(0)}%
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="text-xl font-semibold text-charcoal">
-                {fmtUsdCompact(totalAmount)}
-              </div>
-              <div className="text-xs text-slate-muted">
-                {totalDeals} deal{totalDeals === 1 ? '' : 's'} total
-              </div>
-            </>
-          )}
+          <div className="text-xl font-semibold text-charcoal">
+            {fmtUsdCompact(totalAmount)}
+          </div>
+          <div className="text-xs text-slate-muted">
+            {totalDeals} deal{totalDeals === 1 ? '' : 's'} total
+          </div>
         </div>
       </div>
 

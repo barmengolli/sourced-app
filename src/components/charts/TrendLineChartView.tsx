@@ -135,6 +135,20 @@ export default function TrendLineChartView({
                   strokeWidth={2}
                   dot={{ r: 3 }}
                   activeDot={{ r: 5 }}
+                  // Per-point value labels. Smaller and slate-muted to
+                  // keep multi-line charts uncluttered; zero is
+                  // suppressed so empty quarters don't show "0" stacks.
+                  label={{
+                    position: 'top',
+                    fill: CHART_COLORS.slateMuted,
+                    fontSize: 10,
+                    formatter: (v) => {
+                      const n = typeof v === 'number' ? v : Number(v);
+                      return Number.isFinite(n) && n !== 0
+                        ? n.toLocaleString()
+                        : '';
+                    },
+                  }}
                 />
               );
             })}
