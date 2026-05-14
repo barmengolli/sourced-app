@@ -30,6 +30,9 @@ function candidateToSync(c: LeadCandidate): SfdcSync {
   if (c.marketing_sourced_date !== undefined) {
     values.marketing_sourced_date = c.marketing_sourced_date;
   }
+  if (c.event_activations !== undefined) {
+    values.event_activations = c.event_activations;
+  }
   // source_channel_id is resolved by bulkSyncFromSfdc Phase 0 from
   // (parentChannelName, subChannelName); the candidate doesn't carry it.
   return {

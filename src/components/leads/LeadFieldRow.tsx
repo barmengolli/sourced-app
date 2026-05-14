@@ -11,6 +11,10 @@ import {
   REGION_LABELS,
   type RegionKey,
 } from '../../constants/regions';
+import {
+  EVENT_ACTIVATION_VALUES,
+  type EventActivation,
+} from '../../constants/eventActivations';
 import { formatDateTime } from '../../lib/dates';
 import LockIcon from '../common/LockIcon';
 
@@ -30,6 +34,9 @@ function valueToInputString(v: unknown): string {
 
 function sfdcDisplay(v: unknown): string {
   if (v === null || v === undefined || v === '') return '(empty)';
+  if (Array.isArray(v)) {
+    return v.length === 0 ? '(empty)' : v.join(', ');
+  }
   return String(v);
 }
 
@@ -183,6 +190,39 @@ export default function LeadFieldRow({
           onKeyDown={handleTextKeyDown}
           className="w-full text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal focus:outline-none focus:ring-2 focus:ring-indigo focus:border-indigo"
         />
+      );
+    }
+    if (kind === 'eventActivations') {
+      // Multi-select: 4 checkboxes inline, one per known value. Storage
+      // shape is string[], so commit a fresh sorted array on every
+      // toggle (sorted in EVENT_ACTIVATION_VALUES order so diff
+      // comparisons against re-imports stay stable).
+      const current = (rawValue as string[] | null) ?? [];
+      const currentSet = new Set(current);
+      const toggle = (val: EventActivation) => {
+        const next = new Set(currentSet);
+        if (next.has(val)) next.delete(val);
+        else next.add(val);
+        const sorted = EVENT_ACTIVATION_VALUES.filter((v) => next.has(v));
+        void commit(sorted);
+      };
+      return (
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {EVENT_ACTIVATION_VALUES.map((v) => (
+            <label
+              key={v}
+              className="inline-flex items-center gap-1.5 text-sm text-charcoal cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={currentSet.has(v)}
+                onChange={() => toggle(v)}
+                className="accent-indigo"
+              />
+              <span>{v}</span>
+            </label>
+          ))}
+        </div>
       );
     }
     if (kind === 'longText') {

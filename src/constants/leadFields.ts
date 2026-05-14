@@ -12,7 +12,8 @@ export type EditableLeadField =
   | 'current_stage'
   | 'marketing_sourced_date'
   | 'source_channel_id'
-  | 'notes';
+  | 'notes'
+  | 'event_activations';
 
 export const EDITABLE_LEAD_FIELDS: EditableLeadField[] = [
   'first_name',
@@ -26,6 +27,7 @@ export const EDITABLE_LEAD_FIELDS: EditableLeadField[] = [
   'current_stage',
   'marketing_sourced_date',
   'source_channel_id',
+  'event_activations',
   'notes',
 ];
 
@@ -39,7 +41,8 @@ export type LeadFieldKind =
   | 'stage'
   | 'channel'
   | 'region'
-  | 'longText';
+  | 'longText'
+  | 'eventActivations';
 
 export const LEAD_FIELD_LABELS: Record<EditableLeadField, string> = {
   first_name: 'First name',
@@ -54,6 +57,7 @@ export const LEAD_FIELD_LABELS: Record<EditableLeadField, string> = {
   marketing_sourced_date: 'Marketing sourced date',
   source_channel_id: 'Source channel',
   notes: 'Notes',
+  event_activations: 'Event Activation',
 };
 
 export const LEAD_FIELD_KIND: Record<EditableLeadField, LeadFieldKind> = {
@@ -69,6 +73,7 @@ export const LEAD_FIELD_KIND: Record<EditableLeadField, LeadFieldKind> = {
   marketing_sourced_date: 'date',
   source_channel_id: 'channel',
   notes: 'longText',
+  event_activations: 'eventActivations',
 };
 
 export function isEditableLeadField(k: string): k is EditableLeadField {

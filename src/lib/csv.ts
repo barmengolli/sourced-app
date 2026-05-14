@@ -5,6 +5,10 @@ import {
   regionForCountry,
   type RegionKey,
 } from '../constants/regions';
+import {
+  parseEventActivations,
+  type EventActivation,
+} from '../constants/eventActivations';
 
 export interface ParsedCsv {
   headers: string[];
@@ -28,6 +32,12 @@ export interface LeadCandidate {
   sfdc_contact_id?: string;
   parent_campaign?: string;
   sub_campaign?: string;
+  // Parsed from the SFDC "Event Activation" column (semicolon-
+  // separated). Always set: empty array when the cell is empty or
+  // contains only unknown values. Letting this be `undefined` would
+  // make field_locks behave inconsistently between leads with a
+  // mapped-but-empty column and leads from a CSV that didn't map it.
+  event_activations?: EventActivation[];
 }
 
 export type MappingValue = string | { primary: string; fallback?: string };
@@ -55,6 +65,7 @@ export const MAPPABLE_FIELDS = [
   'sfdc_contact_id',
   'parent_campaign',
   'sub_campaign',
+  'event_activations',
 ] as const;
 
 export type MappableField = (typeof MAPPABLE_FIELDS)[number];
@@ -166,6 +177,16 @@ export function coalesceRows(
       stageRaw !== undefined ? mapLifecycleStage(stageRaw) : undefined;
 
     const country = readMapped(row, mapping.country);
+    // Event activations: only set when the column is mapped (so a CSV
+    // without the column doesn't clobber existing values on
+    // re-import). Empty cell → empty array, which is semantically
+    // "no activations" and will overwrite stored values for unlocked
+    // leads (intended; that's how the lock contract works elsewhere).
+    let eventActivations: EventActivation[] | undefined;
+    if (mapping.event_activations) {
+      const raw = readMapped(row, mapping.event_activations) ?? '';
+      eventActivations = parseEventActivations(raw);
+    }
     const candidate: LeadCandidate = {
       email,
       first_name: readMapped(row, mapping.first_name),
@@ -185,6 +206,7 @@ export function coalesceRows(
       sfdc_contact_id: readMapped(row, mapping.sfdc_contact_id),
       parent_campaign: readMapped(row, mapping.parent_campaign),
       sub_campaign: readMapped(row, mapping.sub_campaign),
+      event_activations: eventActivations,
     };
 
     byEmail.set(email, candidate);
@@ -237,6 +259,7 @@ const HEADER_ALIASES: Record<MappableField, string[]> = {
   sfdc_contact_id: ['contactcontactid', 'contactid'],
   parent_campaign: ['parentcampaigncampaignname', 'parentcampaign'],
   sub_campaign: ['campaignname', 'campaign'],
+  event_activations: ['eventactivation', 'eventactivations'],
 };
 
 const CONTACT_PREFIX = 'contact';
@@ -282,6 +305,7 @@ export function suggestMapping(headers: string[]): ColumnMapping {
     'marketing_sourced_date',
     'parent_campaign',
     'sub_campaign',
+    'event_activations',
   ] as MappableField[]) {
     const found = findExact(headers, HEADER_ALIASES[f]);
     if (found) out[f] = found;

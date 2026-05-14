@@ -8,6 +8,7 @@ import FunnelImportPage from './pages/FunnelImportPage';
 import FunnelDataEntryPage from './pages/FunnelDataEntryPage';
 import FunnelDashboardPage from './pages/FunnelDashboardPage';
 import FunnelComparePage from './pages/FunnelComparePage';
+import FunnelEventsPage from './pages/FunnelEventsPage';
 import FunnelVelocityPage from './pages/FunnelVelocityPage';
 import OutreachDataPage from './pages/OutreachDataPage';
 import OutreachDashboardPage from './pages/OutreachDashboardPage';
@@ -23,6 +24,7 @@ import { REGIONS, type RegionKey } from './constants/regions';
 export type PageKey =
   | 'funnel-data'
   | 'funnel-dashboard'
+  | 'funnel-events'
   | 'funnel-velocity'
   | 'funnel-compare'
   | 'outreach-data'
@@ -100,6 +102,8 @@ function PageBody({
       return <FunnelDataEntryPage {...funnelProps} />;
     case 'funnel-dashboard':
       return <FunnelDashboardPage {...funnelProps} />;
+    case 'funnel-events':
+      return <FunnelEventsPage {...funnelProps} />;
     case 'funnel-velocity':
       return <FunnelVelocityPage {...funnelProps} />;
     case 'funnel-compare':

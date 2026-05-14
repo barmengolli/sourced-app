@@ -14,6 +14,10 @@ import {
 } from '../constants/funnelStages';
 import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
 import { VELOCITY_THRESHOLDS } from '../constants/velocityThresholds';
+import {
+  EVENT_ACTIVATION_VALUES,
+  type EventActivation,
+} from '../constants/eventActivations';
 
 export type PeriodFilter = 'year' | 'Q1' | 'Q2' | 'Q3' | 'Q4';
 
@@ -1378,4 +1382,128 @@ export function computeChannelDistribution(
   channelsOut.sort((a, b) => b.dealCount - a.dealCount);
 
   return { channels: channelsOut, totalDeals, totalAmount };
+}
+
+// ---------- Event activations (Events sub-tab) ----------
+//
+// Per-event aggregation of contacts and their SFDC event_activations
+// values. "Events" here are the sub-channels under the year's parent
+// "2026 - Events" channel (e.g. ITC Japan, Limra L&A, Semana del
+// Seguro). We pick descendants by walking parent_channel_id, not by
+// name pattern, so renaming an individual event channel doesn't break
+// the report.
+//
+// Counts are unique contacts (one row in leads per email), bucketed
+// by source_channel_id = an Events descendant and
+// marketing_sourced_date in the selected period. Region filter
+// applies. Empty events (no contacts in the period) are dropped.
+
+export interface EventActivationCounts {
+  channelId: string;
+  channelName: string;
+  totalContacts: number;        // unique contacts at this event in period
+  withAnyActivation: number;    // contacts with >= 1 activation
+  perType: Record<EventActivation, number>;
+  preAndPost: number;           // contacts with both Pre-Event and Post-Event
+  multiActivation: number;      // contacts with >= 2 activations
+}
+
+export interface ComputeEventActivationsInput {
+  leads: Lead[];
+  channels: Channel[];
+  parentChannelName: string;    // e.g. "2026 - Events"
+  year: number;
+  filter: PeriodFilter;
+  regions: Set<RegionKey>;
+}
+
+export function computeEventActivations(
+  input: ComputeEventActivationsInput,
+): EventActivationCounts[] {
+  const { leads, channels, parentChannelName, year, filter, regions } = input;
+
+  // Resolve the parent channel by name. If absent, return empty.
+  const parent = channels.find((c) => c.name === parentChannelName);
+  if (!parent) return [];
+
+  // Walk the parent's subtree via parent_channel_id. The Events parent
+  // typically has direct children (one per event); future shapes
+  // (sub-events under an event) would still flow correctly because
+  // this is a recursive descendant collector.
+  const childrenByParent = new Map<string, string[]>();
+  for (const c of channels) {
+    if (!c.parent_channel_id) continue;
+    const arr = childrenByParent.get(c.parent_channel_id) ?? [];
+    arr.push(c.id);
+    childrenByParent.set(c.parent_channel_id, arr);
+  }
+  const eventChannelIds = new Set<string>();
+  const visit = (nodeId: string): void => {
+    for (const childId of childrenByParent.get(nodeId) ?? []) {
+      eventChannelIds.add(childId);
+      visit(childId);
+    }
+  };
+  visit(parent.id);
+  if (eventChannelIds.size === 0) return [];
+
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // Tally per event channel.
+  interface Tally {
+    channelId: string;
+    channelName: string;
+    totalContacts: number;
+    withAnyActivation: number;
+    perType: Record<EventActivation, number>;
+    preAndPost: number;
+    multiActivation: number;
+  }
+  const tally = new Map<string, Tally>();
+  const blankPerType = (): Record<EventActivation, number> => {
+    const out = {} as Record<EventActivation, number>;
+    for (const v of EVENT_ACTIVATION_VALUES) out[v] = 0;
+    return out;
+  };
+
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    if (!eventChannelIds.has(lead.source_channel_id)) continue;
+    if (!regionMatches(lead.region, regions)) continue;
+    const bucket = quarterOfIsoDate(lead.marketing_sourced_date);
+    if (!bucket || !matchesPeriod(bucket, year, filter)) continue;
+
+    const ch = channelById.get(lead.source_channel_id);
+    let t = tally.get(lead.source_channel_id);
+    if (!t) {
+      t = {
+        channelId: lead.source_channel_id,
+        channelName: ch?.name ?? 'Unknown',
+        totalContacts: 0,
+        withAnyActivation: 0,
+        perType: blankPerType(),
+        preAndPost: 0,
+        multiActivation: 0,
+      };
+      tally.set(lead.source_channel_id, t);
+    }
+    t.totalContacts += 1;
+
+    const activations = (lead.event_activations ?? []).filter((v) =>
+      (EVENT_ACTIVATION_VALUES as readonly string[]).includes(v),
+    ) as EventActivation[];
+    const set = new Set<EventActivation>(activations);
+    if (set.size >= 1) t.withAnyActivation += 1;
+    if (set.size >= 2) t.multiActivation += 1;
+    if (set.has('Pre-Event Meeting') && set.has('Post-Event Meeting')) {
+      t.preAndPost += 1;
+    }
+    for (const v of set) {
+      t.perType[v] += 1;
+    }
+  }
+
+  return [...tally.values()]
+    .filter((t) => t.totalContacts > 0)
+    .sort((a, b) => b.totalContacts - a.totalContacts);
 }

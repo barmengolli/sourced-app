@@ -37,6 +37,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
       // change. The labels reflect the user-facing content split:
       // lead/MQL-side analytics vs deal-side analytics.
       { key: 'funnel-dashboard', label: 'Leads & MQLs' },
+      { key: 'funnel-events', label: 'Events' },
       { key: 'funnel-velocity', label: 'Opportunities' },
       { key: 'funnel-compare', label: 'Compare' },
     ],
