@@ -839,6 +839,7 @@ function RollingThreeView({
   );
 }
 
+
 // Light teal → saturated indigo. Pure white at intensity 0 so empty cells
 // stay clean. Mid range is a teal hue; high end pulls toward indigo to
 // match the brand palette.

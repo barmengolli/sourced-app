@@ -815,6 +815,90 @@ export function shiftMonth(m: MonthBucket, delta: number): MonthBucket {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
 }
 
+// ---------- Monthly leads-for-year (Compare tab year charts) ----------
+//
+// Powers the two bar charts at the bottom of the Compare tab. Always
+// spans all 12 months of the input year; the per-month comparison
+// selector at the top of the page is intentionally not an input.
+// Region filter still applies.
+//
+// Each lead rolls up to its top-level (root) channel via the
+// parent_channel_id chain so the stacked-bar chart's legend stays
+// short and stable. Leads without a source_channel_id are dropped
+// (they can't be attributed to a channel).
+
+export interface MonthlyChannelLeads {
+  channelId: string;
+  channelName: string;
+  perMonth: number[];   // length 12, index 0 = Jan, 11 = Dec
+}
+
+export interface MonthlyLeadsForYear {
+  // One entry per top-level channel with >= 1 lead in the year.
+  // Sorted by year total descending so legend order is stable.
+  byChannel: MonthlyChannelLeads[];
+  // Length 12. Sum across all channels (including the unsorted set,
+  // which by construction equals the sum of byChannel rows since
+  // unattributed leads are excluded upstream).
+  monthTotals: number[];
+}
+
+export interface ComputeMonthlyLeadsForYearInput {
+  leads: Lead[];
+  channels: Channel[];
+  year: number;
+  regions: Set<RegionKey>;
+}
+
+export function computeMonthlyLeadsForYear(
+  input: ComputeMonthlyLeadsForYearInput,
+): MonthlyLeadsForYear {
+  const { leads, channels, year, regions } = input;
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // Accumulator: top-level channel id → 12-element month array. We
+  // also need a quick lookup for channel name when materializing.
+  const perChannel = new Map<string, number[]>();
+  const monthTotals = new Array<number>(12).fill(0);
+
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    if (!regionMatches(lead.region, regions)) continue;
+    const leadMonth = monthOfIsoDate(lead.marketing_sourced_date);
+    if (!leadMonth || leadMonth.year !== year) continue;
+    const topId = resolveTopLevelChannelId(
+      lead.source_channel_id,
+      channelById,
+    );
+    let row = perChannel.get(topId);
+    if (!row) {
+      row = new Array<number>(12).fill(0);
+      perChannel.set(topId, row);
+    }
+    const idx = leadMonth.month - 1;
+    row[idx] += 1;
+    monthTotals[idx] += 1;
+  }
+
+  const byChannel: MonthlyChannelLeads[] = [];
+  for (const [channelId, perMonth] of perChannel) {
+    const total = perMonth.reduce((s, n) => s + n, 0);
+    if (total <= 0) continue;
+    byChannel.push({
+      channelId,
+      channelName: channelById.get(channelId)?.name ?? 'Unknown',
+      perMonth,
+    });
+  }
+  byChannel.sort((a, b) => {
+    const aTot = a.perMonth.reduce((s, n) => s + n, 0);
+    const bTot = b.perMonth.reduce((s, n) => s + n, 0);
+    return bTot - aTot;
+  });
+
+  return { byChannel, monthTotals };
+}
+
 // ---------- Funnel Flow Sankey (Channel Influence chart) ----------
 //
 // Produces a 7-column Sankey: Channels → Leads → MQL → HPP → Opp → Pursuit
