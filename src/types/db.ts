@@ -157,3 +157,18 @@ export interface OutreachSnapshot {
   linkedin_tasks_completed: number;
   created_at: string;
 }
+
+// Date-range budget per channel. Multiple rows per channel are
+// allowed: each contract / line item gets its own row. The Spend
+// report pro-rates each row to the selected period based on the
+// overlap of [start_date, end_date] with the period.
+export interface CampaignCost {
+  id: string;
+  channel_id: string;
+  amount: number;
+  start_date: string;        // ISO date (YYYY-MM-DD), inclusive
+  end_date: string;          // ISO date (YYYY-MM-DD), inclusive
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}

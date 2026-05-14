@@ -1,6 +1,8 @@
 import type {
   Attribution,
   AttributionStageKey,
+  AttributionTouch,
+  CampaignCost,
   Channel,
   FunnelActual,
   FunnelProjection,
@@ -1821,4 +1823,410 @@ export function computeEventActivations(
   return [...tally.values()]
     .filter((t) => t.totalContacts > 0)
     .sort((a, b) => b.totalContacts - a.totalContacts);
+}
+
+// ---------- Channel spend (Spend sub-tab) ----------
+//
+// Joins campaign_costs (date-range budgets) with leads, attributions,
+// and touches to compute pro-rated cost, lead/MQL counts, first-touch
+// pipeline, and ROI per channel. Pro-rating uses inclusive day
+// overlap of the budget's [start_date, end_date] with the selected
+// period window. A budget that fully encloses the period contributes
+// its full proportional share (overlapDays / totalBudgetDays *
+// amount).
+//
+// Region filter applies to leads and to attributions (so a child of
+// a Content Syndication-style parent splits cost based on its
+// REGION-FILTERED lead share). Cost itself is NOT region-scoped:
+// budgets are sunk and the same dollar amount shows regardless of
+// region toggles.
+//
+// First-touch: each deal's first touch is the touch with the
+// smallest touched_at (nulls last) and on tie the smallest
+// touch_order. The first touch's channel_id is the deal's
+// first-touch channel for ROI accounting.
+
+export interface ChannelSpendBreakdown {
+  channelId: string;
+  channelName: string;
+  isParent: boolean;
+  parentId: string | null;
+  depth: number;
+
+  // Pro-rated direct cost on this channel's own campaign_cost rows.
+  cost: number;
+
+  // For sub-channels of a parent-only-cost channel: this is the
+  // proportional slice of the parent's cost based on this row's
+  // share of leads in the period. Equals `cost` for channels that
+  // carry their own direct cost (no allocation).
+  allocatedCost: number;
+
+  leads: number;
+  mqls: number;
+  firstTouchOpps: number;
+  pipelineAmount: number;
+  wonAmount: number;
+
+  costPerLead: number | null;     // null when leads = 0
+  costPerMql: number | null;      // null when mqls = 0
+  roi: number | null;              // pipelineAmount / allocatedCost, null when cost = 0
+}
+
+export interface ComputeChannelSpendInput {
+  campaignCosts: CampaignCost[];
+  channels: Channel[];
+  leads: Lead[];
+  attributions: Attribution[];
+  attributionTouches: AttributionTouch[];
+  year: number;
+  filter: PeriodFilter;
+  regions: Set<RegionKey>;
+}
+
+interface PeriodBounds {
+  start: string;     // ISO date inclusive
+  end: string;       // ISO date inclusive
+}
+
+function periodBoundsFor(year: number, filter: PeriodFilter): PeriodBounds {
+  // Inclusive day endpoints, stringly typed so date math stays a
+  // simple lexicographic compare against the cost rows.
+  if (filter === 'year') {
+    return { start: `${year}-01-01`, end: `${year}-12-31` };
+  }
+  const q = parseInt(filter.slice(1), 10);
+  const startMonth = (q - 1) * 3; // 0-indexed month for Date.UTC
+  const endMonth = startMonth + 2;
+  const lastDayUtc = new Date(Date.UTC(year, endMonth + 1, 0));
+  const m = String(startMonth + 1).padStart(2, '0');
+  const lastDay = String(lastDayUtc.getUTCDate()).padStart(2, '0');
+  const lastMonth = String(endMonth + 1).padStart(2, '0');
+  return {
+    start: `${year}-${m}-01`,
+    end: `${year}-${lastMonth}-${lastDay}`,
+  };
+}
+
+// Inclusive day count between two ISO dates (a <= b). Local-day math
+// via UTC midnight so DST shifts don't poke a hole in the result.
+function daysInclusive(aIso: string, bIso: string): number {
+  const a = Date.parse(`${aIso}T00:00:00Z`);
+  const b = Date.parse(`${bIso}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+  return Math.round((b - a) / 86_400_000) + 1;
+}
+
+// Overlap of two inclusive ISO ranges. Returns 0 when disjoint.
+function overlapDays(
+  aStart: string,
+  aEnd: string,
+  bStart: string,
+  bEnd: string,
+): number {
+  const start = aStart > bStart ? aStart : bStart;
+  const end = aEnd < bEnd ? aEnd : bEnd;
+  if (end < start) return 0;
+  return daysInclusive(start, end);
+}
+
+// Earliest stage_entered_at among hpp/opp/pursuit/closeWon/closeLost
+// rows for a deal. Used as the deal's "cohort date" so a deal whose
+// HPP happened in Q1 doesn't pollute Q2 pipeline figures even if its
+// later stages live in Q2.
+function dealCohortDate(rows: Attribution[]): string | null {
+  let best: string | null = null;
+  for (const r of rows) {
+    if (!r.stage_entered_at) continue;
+    if (best === null || r.stage_entered_at < best) best = r.stage_entered_at;
+  }
+  return best;
+}
+
+// Highest amount on a deal's attribution chain — used as the deal's
+// representative pipeline amount. amounts can vary across stages
+// (rare); taking max keeps the reading conservative without
+// double-counting.
+function dealAmount(rows: Attribution[]): number {
+  let best = 0;
+  for (const r of rows) {
+    const a = r.amount ?? 0;
+    if (a > best) best = a;
+  }
+  return best;
+}
+
+export function computeChannelSpend(
+  input: ComputeChannelSpendInput,
+): ChannelSpendBreakdown[] {
+  const {
+    campaignCosts,
+    channels,
+    leads,
+    attributions,
+    attributionTouches,
+    year,
+    filter,
+    regions,
+  } = input;
+
+  const period = periodBoundsFor(year, filter);
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // children index for the parent-cost-allocation walk below.
+  const childrenByParent = new Map<string, string[]>();
+  for (const c of channels) {
+    if (!c.parent_channel_id) continue;
+    const arr = childrenByParent.get(c.parent_channel_id) ?? [];
+    arr.push(c.id);
+    childrenByParent.set(c.parent_channel_id, arr);
+  }
+
+  // --- 1. Pro-rated direct cost per channel.
+  const directCost = new Map<string, number>();
+  for (const cc of campaignCosts) {
+    const total = daysInclusive(cc.start_date, cc.end_date);
+    if (total <= 0) continue;
+    const overlap = overlapDays(
+      cc.start_date,
+      cc.end_date,
+      period.start,
+      period.end,
+    );
+    if (overlap <= 0) continue;
+    const prorated = cc.amount * (overlap / total);
+    directCost.set(
+      cc.channel_id,
+      (directCost.get(cc.channel_id) ?? 0) + prorated,
+    );
+  }
+
+  // --- 2. Leads per channel (region-filtered, period-bound by
+  //        marketing_sourced_date). MQLs per channel via the
+  //        earliest stage_history MQL entered_at.
+  const leadsByChannel = new Map<string, number>();
+  const mqlsByChannel = new Map<string, number>();
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    if (!regionMatches(lead.region, regions)) continue;
+    const d = lead.marketing_sourced_date;
+    if (d && d >= period.start && d <= period.end) {
+      leadsByChannel.set(
+        lead.source_channel_id,
+        (leadsByChannel.get(lead.source_channel_id) ?? 0) + 1,
+      );
+    }
+    const mqlIso = firstMqlDate(lead);
+    if (mqlIso && mqlIso >= period.start && mqlIso <= period.end) {
+      mqlsByChannel.set(
+        lead.source_channel_id,
+        (mqlsByChannel.get(lead.source_channel_id) ?? 0) + 1,
+      );
+    }
+  }
+
+  // --- 3. Group attributions by deal_id. Skip rows without a
+  //        deal_id (can't form a chain).
+  const rowsByDeal = new Map<string, Attribution[]>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    const arr = rowsByDeal.get(a.deal_id) ?? [];
+    arr.push(a);
+    rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // --- 4. Group touches by attribution_id for fast lookup.
+  const touchesByAttribution = new Map<string, AttributionTouch[]>();
+  for (const t of attributionTouches) {
+    const arr = touchesByAttribution.get(t.attribution_id) ?? [];
+    arr.push(t);
+    touchesByAttribution.set(t.attribution_id, arr);
+  }
+
+  // --- 5. For each deal, determine its first-touch channel.
+  //        First touch = earliest touched_at across all touches on
+  //        ALL of the deal's attribution rows (nulls last); on tie,
+  //        smallest touch_order. Fall back to the deal's HPP row's
+  //        channel_id when no touches exist (manual entry, no
+  //        touches added).
+  const firstTouchByDeal = new Map<string, string | null>();
+  for (const [dealId, rows] of rowsByDeal) {
+    let best: AttributionTouch | null = null;
+    for (const r of rows) {
+      for (const t of touchesByAttribution.get(r.id) ?? []) {
+        if (!t.channel_id) continue;
+        if (best === null) {
+          best = t;
+          continue;
+        }
+        // touched_at nulls sort LAST. Otherwise lexicographic ISO
+        // string compare. On equal touched_at, smaller touch_order
+        // wins.
+        const aNull = !t.touched_at;
+        const bNull = !best.touched_at;
+        if (aNull && !bNull) continue;
+        if (!aNull && bNull) {
+          best = t;
+          continue;
+        }
+        if (!aNull && !bNull) {
+          if (t.touched_at! < best.touched_at!) {
+            best = t;
+            continue;
+          }
+          if (t.touched_at! > best.touched_at!) continue;
+        }
+        if (t.touch_order < best.touch_order) best = t;
+      }
+    }
+    if (best) {
+      firstTouchByDeal.set(dealId, best.channel_id ?? null);
+      continue;
+    }
+    // No touches: fall back to the HPP row's channel.
+    const hpp = rows.find((r) => r.stage_key === 'hpp');
+    firstTouchByDeal.set(dealId, hpp?.channel_id ?? null);
+  }
+
+  // --- 6. Aggregate first-touch pipeline / won amounts and counts
+  //        per channel, scoped to deals whose cohort date (earliest
+  //        stage_entered_at) is in the period and whose HPP region
+  //        passes the region filter.
+  const firstTouchOpps = new Map<string, number>();
+  const pipelineByChannel = new Map<string, number>();
+  const wonByChannel = new Map<string, number>();
+  for (const [dealId, rows] of rowsByDeal) {
+    const ftChannel = firstTouchByDeal.get(dealId) ?? null;
+    if (!ftChannel) continue;
+    // Region: use the HPP row's region as the deal's region, falling
+    // back to the earliest row when no HPP row exists.
+    const hpp = rows.find((r) => r.stage_key === 'hpp');
+    const dealRegion =
+      hpp?.region ??
+      [...rows].sort((a, b) =>
+        a.stage_entered_at.localeCompare(b.stage_entered_at),
+      )[0]?.region ??
+      null;
+    if (!regionMatches(dealRegion, regions)) continue;
+
+    const cohort = dealCohortDate(rows);
+    if (!cohort || cohort < period.start || cohort > period.end) continue;
+
+    const hasLost = rows.some((r) => r.stage_key === 'closeLost');
+    const wonRow = rows.find((r) => r.stage_key === 'closeWon');
+
+    // firstTouchOpps + pipeline: deal reached HPP and isn't lost.
+    if (rows.some((r) => r.stage_key === 'hpp') && !hasLost) {
+      firstTouchOpps.set(
+        ftChannel,
+        (firstTouchOpps.get(ftChannel) ?? 0) + 1,
+      );
+      pipelineByChannel.set(
+        ftChannel,
+        (pipelineByChannel.get(ftChannel) ?? 0) + dealAmount(rows),
+      );
+    }
+    // Won: separate, only when there's a closeWon row.
+    if (wonRow) {
+      wonByChannel.set(
+        ftChannel,
+        (wonByChannel.get(ftChannel) ?? 0) + (wonRow.amount ?? 0),
+      );
+    }
+  }
+
+  // --- 7. Build per-channel rows. allocatedCost handles the
+  //        parent-cost-only case: when a parent has direct cost and
+  //        its direct child has none, each child gets a proportional
+  //        slice of the parent's cost based on the child's region-
+  //        filtered lead share. We compute that per parent and fan
+  //        out to children.
+  const allocatedCost = new Map<string, number>();
+  for (const channel of channels) {
+    allocatedCost.set(channel.id, directCost.get(channel.id) ?? 0);
+  }
+  for (const channel of channels) {
+    const parentCost = directCost.get(channel.id) ?? 0;
+    if (parentCost <= 0) continue;
+    const childIds = childrenByParent.get(channel.id) ?? [];
+    if (childIds.length === 0) continue;
+    // Only allocate when at least one direct child has zero direct
+    // cost (the Content Syndication shape). Otherwise the parent's
+    // cost reads as a separate aggregate and doesn't flow down.
+    const anyChildDirect = childIds.some(
+      (cid) => (directCost.get(cid) ?? 0) > 0,
+    );
+    if (anyChildDirect) continue;
+    // Sum descendant leads, not just direct-child leads, so a
+    // grandchild's leads still pull their share. childrenByParent
+    // walk via BFS.
+    const descendants = new Set<string>();
+    let frontier = [...childIds];
+    while (frontier.length) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        if (descendants.has(id)) continue;
+        descendants.add(id);
+        for (const k of childrenByParent.get(id) ?? []) next.push(k);
+      }
+      frontier = next;
+    }
+    let totalLeads = 0;
+    for (const id of descendants) totalLeads += leadsByChannel.get(id) ?? 0;
+    if (totalLeads === 0) continue;
+    for (const id of descendants) {
+      const share = (leadsByChannel.get(id) ?? 0) / totalLeads;
+      allocatedCost.set(
+        id,
+        (allocatedCost.get(id) ?? 0) + parentCost * share,
+      );
+    }
+  }
+
+  // --- 8. Materialize rows.
+  // Depth is the channel's distance from the root (1 = top-level).
+  const depthCache = new Map<string, number>();
+  const depthOf = (id: string): number => {
+    const cached = depthCache.get(id);
+    if (cached !== undefined) return cached;
+    const ch = channelById.get(id);
+    if (!ch) return 1;
+    const d = ch.parent_channel_id
+      ? depthOf(ch.parent_channel_id) + 1
+      : 1;
+    depthCache.set(id, d);
+    return d;
+  };
+
+  const out: ChannelSpendBreakdown[] = [];
+  for (const channel of channels) {
+    const c = directCost.get(channel.id) ?? 0;
+    const ac = allocatedCost.get(channel.id) ?? 0;
+    const leadsCount = leadsByChannel.get(channel.id) ?? 0;
+    const mqlsCount = mqlsByChannel.get(channel.id) ?? 0;
+    const opps = firstTouchOpps.get(channel.id) ?? 0;
+    const pipeline = pipelineByChannel.get(channel.id) ?? 0;
+    const won = wonByChannel.get(channel.id) ?? 0;
+    const cpl = leadsCount > 0 ? ac / leadsCount : null;
+    const cpmql = mqlsCount > 0 ? ac / mqlsCount : null;
+    const roi = ac > 0 ? pipeline / ac : null;
+    out.push({
+      channelId: channel.id,
+      channelName: channel.name,
+      isParent: (childrenByParent.get(channel.id) ?? []).length > 0,
+      parentId: channel.parent_channel_id ?? null,
+      depth: depthOf(channel.id),
+      cost: c,
+      allocatedCost: ac,
+      leads: leadsCount,
+      mqls: mqlsCount,
+      firstTouchOpps: opps,
+      pipelineAmount: pipeline,
+      wonAmount: won,
+      costPerLead: cpl,
+      costPerMql: cpmql,
+      roi,
+    });
+  }
+  return out;
 }
