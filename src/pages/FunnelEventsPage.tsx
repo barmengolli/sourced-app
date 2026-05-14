@@ -113,20 +113,20 @@ export default function FunnelEventsPage({
   const periodLabel =
     filter === 'year' ? `${year}` : `${filter} ${year}`;
 
-  // Per-activation-type bar chart data. One series per type; events
-  // with a zero count for that type are filtered out so the bar chart
-  // doesn't render empty rows. Sort descending so the leader sits on
-  // top. Suppress the whole chart card when no event has a value for
-  // this type, keeping the grid layout clean on quiet quarters.
+  // Per-activation-type bar chart data. One series per type; every
+  // event appears as a bar (zero-value events sort to the bottom but
+  // stay visible so the user can see "we tracked 0 here, 80 there").
+  // Always emits all 4 entries; the card renders an empty-state
+  // placeholder when hasAnyData is false.
   const chartsToRender = useMemo(
     () =>
       EVENT_ACTIVATION_VALUES.map((type) => {
         const data = rows
           .map((e) => ({ name: e.channelName, value: e.perType[type] }))
-          .filter((d) => d.value > 0)
           .sort((a, b) => b.value - a.value);
-        return { type, data };
-      }).filter((c) => c.data.length > 0),
+        const hasAnyData = data.some((d) => d.value > 0);
+        return { type, data, hasAnyData };
+      }),
     [rows],
   );
 
@@ -194,57 +194,72 @@ export default function FunnelEventsPage({
                     (preAndPost, multiActivation) so a future chart
                     can pick them up. */}
                 <th className="px-3 py-2 text-right font-medium tabular-nums">
+                  Total Contacts
+                </th>
+                <th className="px-3 py-2 text-right font-medium tabular-nums">
                   Active Contacts
                 </th>
                 <th className="px-3 py-2 text-right font-medium tabular-nums">
-                  Total Contacts
+                  % Active
                 </th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
-                <tr
-                  key={r.channelId}
-                  className={
-                    (i % 2 === 0 ? 'bg-bg' : 'bg-muted/40') +
-                    ' hover:bg-indigo/5'
-                  }
-                >
-                  <td className="px-3 py-2 text-charcoal">{r.channelName}</td>
-                  {EVENT_ACTIVATION_VALUES.map((v) => (
-                    <td
-                      key={v}
-                      className="px-3 py-2 text-right text-charcoal tabular-nums"
-                    >
-                      {r.perType[v]}
+              {rows.map((r, i) => {
+                // Share of event contacts with at least one tracked
+                // activation. "—" when no contacts to avoid a
+                // division-by-zero result like NaN%.
+                const pctActive =
+                  r.totalContacts > 0
+                    ? `${((r.withAnyActivation / r.totalContacts) * 100).toFixed(1)}%`
+                    : '—';
+                return (
+                  <tr
+                    key={r.channelId}
+                    className={
+                      (i % 2 === 0 ? 'bg-bg' : 'bg-muted/40') +
+                      ' hover:bg-indigo/5'
+                    }
+                  >
+                    <td className="px-3 py-2 text-charcoal">{r.channelName}</td>
+                    {EVENT_ACTIVATION_VALUES.map((v) => (
+                      <td
+                        key={v}
+                        className="px-3 py-2 text-right text-charcoal tabular-nums"
+                      >
+                        {r.perType[v]}
+                      </td>
+                    ))}
+                    <td className="px-3 py-2 text-right text-charcoal tabular-nums font-medium">
+                      {r.totalContacts}
                     </td>
-                  ))}
-                  <td className="px-3 py-2 text-right text-charcoal tabular-nums">
-                    {r.withAnyActivation}
-                  </td>
-                  <td className="px-3 py-2 text-right text-charcoal tabular-nums font-medium">
-                    {r.totalContacts}
-                  </td>
-                </tr>
-              ))}
+                    <td className="px-3 py-2 text-right text-charcoal tabular-nums">
+                      {r.withAnyActivation}
+                    </td>
+                    <td className="px-3 py-2 text-right text-charcoal tabular-nums">
+                      {pctActive}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
 
       {/* Per-activation-type bar charts. 2x2 grid on lg+, single
-          column below. Each chart is suppressed when no event has a
-          value for its activation type, so quiet quarters render
-          fewer cards rather than empty ones. */}
-      {chartsToRender.length > 0 && (
-        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {chartsToRender.map(({ type, data }) => {
-            // Height scales with event count so long rosters don't
-            // squeeze the bars together. 40px per row plus a 60px
-            // floor for the axis, clamped to 280px minimum.
-            const height = Math.max(280, data.length * 40 + 60);
-            return (
-              <ChartCard key={type} title={`${type} per Event`}>
+          column below. All 4 cards always render; an activation
+          type with no data across events shows an empty-state
+          placeholder inside the card. */}
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {chartsToRender.map(({ type, data, hasAnyData }) => {
+          // Height scales with event count so long rosters don't
+          // squeeze the bars together. 40px per row plus a 60px
+          // floor for the axis, clamped to 280px minimum.
+          const height = Math.max(280, data.length * 40 + 60);
+          return (
+            <ChartCard key={type} title={`${type} per Event`}>
+              {hasAnyData ? (
                 <ResponsiveContainer width="100%" height={height}>
                   <BarChart
                     layout="vertical"
@@ -315,11 +330,15 @@ export default function FunnelEventsPage({
                     />
                   </BarChart>
                 </ResponsiveContainer>
-              </ChartCard>
-            );
-          })}
-        </section>
-      )}
+              ) : (
+                <p className="text-xs text-slate-muted italic h-[200px] flex items-center justify-center">
+                  No data yet for {type}.
+                </p>
+              )}
+            </ChartCard>
+          );
+        })}
+      </section>
     </div>
   );
 }
