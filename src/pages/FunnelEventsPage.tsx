@@ -11,6 +11,15 @@
 // EVENTS_PARENT_CHANNEL_NAME in constants/eventActivations.ts.
 
 import { useMemo } from 'react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { useLeads } from '../hooks/useLeads';
 import { useChannels } from '../hooks/useChannels';
 import {
@@ -21,8 +30,8 @@ import {
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
+import { CHART_COLORS } from '../constants/chartColors';
 import {
-  EVENT_ACTIVATION_SHORT_LABELS,
   EVENT_ACTIVATION_VALUES,
   EVENTS_PARENT_CHANNEL_NAME,
   type EventActivation,
@@ -104,6 +113,23 @@ export default function FunnelEventsPage({
   const periodLabel =
     filter === 'year' ? `${year}` : `${filter} ${year}`;
 
+  // Per-activation-type bar chart data. One series per type; events
+  // with a zero count for that type are filtered out so the bar chart
+  // doesn't render empty rows. Sort descending so the leader sits on
+  // top. Suppress the whole chart card when no event has a value for
+  // this type, keeping the grid layout clean on quiet quarters.
+  const chartsToRender = useMemo(
+    () =>
+      EVENT_ACTIVATION_VALUES.map((type) => {
+        const data = rows
+          .map((e) => ({ name: e.channelName, value: e.perType[type] }))
+          .filter((d) => d.value > 0)
+          .sort((a, b) => b.value - a.value);
+        return { type, data };
+      }).filter((c) => c.data.length > 0),
+    [rows],
+  );
+
   return (
     <div className="p-8 space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -160,7 +186,7 @@ export default function FunnelEventsPage({
                     key={v}
                     className="px-3 py-2 text-right font-medium tabular-nums"
                   >
-                    {EVENT_ACTIVATION_SHORT_LABELS[v]}
+                    {v}
                   </th>
                 ))}
                 {/* Pre+Post and 2+ Activations columns removed from
@@ -204,6 +230,95 @@ export default function FunnelEventsPage({
             </tbody>
           </table>
         </div>
+      )}
+
+      {/* Per-activation-type bar charts. 2x2 grid on lg+, single
+          column below. Each chart is suppressed when no event has a
+          value for its activation type, so quiet quarters render
+          fewer cards rather than empty ones. */}
+      {chartsToRender.length > 0 && (
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {chartsToRender.map(({ type, data }) => {
+            // Height scales with event count so long rosters don't
+            // squeeze the bars together. 40px per row plus a 60px
+            // floor for the axis, clamped to 280px minimum.
+            const height = Math.max(280, data.length * 40 + 60);
+            return (
+              <ChartCard key={type} title={`${type} per Event`}>
+                <ResponsiveContainer width="100%" height={height}>
+                  <BarChart
+                    layout="vertical"
+                    data={data}
+                    margin={{ top: 8, right: 48, left: 8, bottom: 0 }}
+                  >
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke={CHART_COLORS.border}
+                      horizontal={false}
+                    />
+                    <XAxis
+                      type="number"
+                      tick={{
+                        fontSize: 11,
+                        fill: CHART_COLORS.slateMuted,
+                      }}
+                      axisLine={{ stroke: CHART_COLORS.border }}
+                      tickLine={{ stroke: CHART_COLORS.border }}
+                      allowDecimals={false}
+                    />
+                    <YAxis
+                      type="category"
+                      dataKey="name"
+                      width={140}
+                      tick={{
+                        fontSize: 11,
+                        fill: CHART_COLORS.charcoal,
+                      }}
+                      axisLine={{ stroke: CHART_COLORS.border }}
+                      tickLine={{ stroke: CHART_COLORS.border }}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        fontSize: 11,
+                        border: `1px solid ${CHART_COLORS.border}`,
+                        borderRadius: 6,
+                      }}
+                      labelStyle={{
+                        color: CHART_COLORS.charcoal,
+                        fontWeight: 600,
+                      }}
+                      formatter={(v) => {
+                        const n =
+                          typeof v === 'number' ? v : Number(v);
+                        return Number.isFinite(n)
+                          ? n.toLocaleString()
+                          : String(v);
+                      }}
+                    />
+                    <Bar
+                      dataKey="value"
+                      name={type}
+                      fill={CHART_COLORS.indigo}
+                      radius={[0, 3, 3, 0]}
+                      label={{
+                        position: 'right',
+                        fill: CHART_COLORS.charcoal,
+                        fontSize: 11,
+                        formatter: (v) => {
+                          const n =
+                            typeof v === 'number' ? v : Number(v);
+                          return Number.isFinite(n) && n !== 0
+                            ? n.toLocaleString()
+                            : '';
+                        },
+                      }}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </ChartCard>
+            );
+          })}
+        </section>
       )}
     </div>
   );
