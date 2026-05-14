@@ -20,12 +20,24 @@ import {
 } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
+import ChartCard from '../components/charts/ChartCard';
 import {
   EVENT_ACTIVATION_SHORT_LABELS,
   EVENT_ACTIVATION_VALUES,
   EVENTS_PARENT_CHANNEL_NAME,
+  type EventActivation,
 } from '../constants/eventActivations';
 import type { RegionKey } from '../constants/regions';
+
+// Pluralized labels for the KPI tiles. The compute layer keys on the
+// singular SFDC names, but at the top of the page we're showing a sum
+// of contacts, so plural reads more naturally.
+const KPI_TILE_LABELS: Record<EventActivation, string> = {
+  'Pre-Event Meeting': 'Pre-Event Meetings',
+  'Booth Meeting': 'Booth Meetings',
+  'Session Attendee': 'Session Attendees',
+  'Post-Event Meeting': 'Post-Event Meetings',
+};
 
 interface FunnelEventsPageProps {
   year: number;
@@ -69,6 +81,29 @@ export default function FunnelEventsPage({
     [leads, channels, year, filter, regions],
   );
 
+  // KPI tile totals: sum each activation type across every event in
+  // the current view. Column totals in the table equal these by
+  // construction (same source rows).
+  const totals = useMemo(() => {
+    const sum: Record<EventActivation, number> = {
+      'Pre-Event Meeting': 0,
+      'Booth Meeting': 0,
+      'Session Attendee': 0,
+      'Post-Event Meeting': 0,
+    };
+    for (const e of rows) {
+      for (const type of EVENT_ACTIVATION_VALUES) {
+        sum[type] += e.perType[type];
+      }
+    }
+    return sum;
+  }, [rows]);
+
+  // Period label for the tile subtitles: "Q2 2026" when a quarter is
+  // selected, just "2026" when the user picked the Year view.
+  const periodLabel =
+    filter === 'year' ? `${year}` : `${filter} ${year}`;
+
   return (
     <div className="p-8 space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -92,6 +127,24 @@ export default function FunnelEventsPage({
         />
       </header>
 
+      {/* KPI tiles: total contacts by activation type across all
+          events in the current period and region. Always render so
+          the user sees "0 across all events" rather than a blank
+          card on empty periods. */}
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {EVENT_ACTIVATION_VALUES.map((v) => (
+          <ChartCard
+            key={v}
+            title={KPI_TILE_LABELS[v]}
+            subtitle={`Across all events in ${periodLabel}`}
+          >
+            <div className="text-3xl font-semibold text-charcoal tabular-nums">
+              {totals[v].toLocaleString()}
+            </div>
+          </ChartCard>
+        ))}
+      </section>
+
       {rows.length === 0 ? (
         <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
           No events with contacts in the selected period.
@@ -110,12 +163,10 @@ export default function FunnelEventsPage({
                     {EVENT_ACTIVATION_SHORT_LABELS[v]}
                   </th>
                 ))}
-                <th className="px-3 py-2 text-right font-medium tabular-nums">
-                  Pre+Post
-                </th>
-                <th className="px-3 py-2 text-right font-medium tabular-nums">
-                  2+ Activations
-                </th>
+                {/* Pre+Post and 2+ Activations columns removed from
+                    the table; the compute helper still returns them
+                    (preAndPost, multiActivation) so a future chart
+                    can pick them up. */}
                 <th className="px-3 py-2 text-right font-medium tabular-nums">
                   Active Contacts
                 </th>
@@ -142,12 +193,6 @@ export default function FunnelEventsPage({
                       {r.perType[v]}
                     </td>
                   ))}
-                  <td className="px-3 py-2 text-right text-charcoal tabular-nums">
-                    {r.preAndPost}
-                  </td>
-                  <td className="px-3 py-2 text-right text-charcoal tabular-nums">
-                    {r.multiActivation}
-                  </td>
                   <td className="px-3 py-2 text-right text-charcoal tabular-nums">
                     {r.withAnyActivation}
                   </td>
