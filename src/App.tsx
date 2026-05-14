@@ -8,6 +8,7 @@ import FunnelImportPage from './pages/FunnelImportPage';
 import FunnelDataEntryPage from './pages/FunnelDataEntryPage';
 import FunnelDashboardPage from './pages/FunnelDashboardPage';
 import FunnelComparePage from './pages/FunnelComparePage';
+import FunnelEventsPage from './pages/FunnelEventsPage';
 import FunnelVelocityPage from './pages/FunnelVelocityPage';
 import OutreachDataPage from './pages/OutreachDataPage';
 import OutreachDashboardPage from './pages/OutreachDashboardPage';
@@ -23,6 +24,7 @@ import { REGIONS, type RegionKey } from './constants/regions';
 export type PageKey =
   | 'funnel-data'
   | 'funnel-dashboard'
+  | 'funnel-events'
   | 'funnel-velocity'
   | 'funnel-compare'
   | 'outreach-data'
@@ -44,7 +46,7 @@ function initialPage(): PageKey {
   return funnel.defaultChild;
 }
 
-export type CompareView = 'single' | 'rolling4';
+export type CompareView = 'single' | 'rolling3';
 
 interface FunnelSubPageProps {
   year: number;
@@ -54,9 +56,9 @@ interface FunnelSubPageProps {
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
   // Compare-tab state. Lifted alongside year/filter so a user bouncing
-  // between Compare and Data Entry doesn't lose their week selection.
-  compareWeek: number;
-  onCompareWeekChange: (w: number) => void;
+  // between Compare and Data Entry doesn't lose their month selection.
+  compareMonth: number;          // 1..12, calendar month
+  onCompareMonthChange: (m: number) => void;
   compareView: CompareView;
   onCompareViewChange: (v: CompareView) => void;
 }
@@ -100,6 +102,8 @@ function PageBody({
       return <FunnelDataEntryPage {...funnelProps} />;
     case 'funnel-dashboard':
       return <FunnelDashboardPage {...funnelProps} />;
+    case 'funnel-events':
+      return <FunnelEventsPage {...funnelProps} />;
     case 'funnel-velocity':
       return <FunnelVelocityPage {...funnelProps} />;
     case 'funnel-compare':
@@ -138,9 +142,9 @@ export default function App() {
   const [regions, setRegions] = useState<Set<RegionKey>>(
     () => new Set<RegionKey>(REGIONS),
   );
-  // Compare tab: default to the current ISO week, single-week view.
-  const [compareWeek, setCompareWeek] = useState<number>(
-    () => currentIsoWeek().week,
+  // Compare tab: default to the current calendar month, single-month view.
+  const [compareMonth, setCompareMonth] = useState<number>(
+    () => new Date().getMonth() + 1,
   );
   const [compareView, setCompareView] = useState<CompareView>('single');
 
@@ -228,8 +232,8 @@ export default function App() {
     onFilterChange: setFilter,
     regions,
     onRegionsChange: setRegions,
-    compareWeek,
-    onCompareWeekChange: setCompareWeek,
+    compareMonth,
+    onCompareMonthChange: setCompareMonth,
     compareView,
     onCompareViewChange: setCompareView,
   };

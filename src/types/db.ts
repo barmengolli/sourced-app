@@ -40,6 +40,12 @@ export interface Lead {
   field_locks: Record<string, boolean>;
   source_sfdc: Record<string, unknown>;
   notes?: string | null;
+  // Closed set of event-marketing engagement values from SFDC's
+  // "Event Activation" field (Pre-Event Meeting, Booth Meeting,
+  // Session Attendee, Post-Event Meeting). DB column is TEXT[] NOT
+  // NULL with a '{}' default, so an empty array (never undefined) is
+  // the canonical "no activations" representation.
+  event_activations: string[];
   created_at: string;
   updated_at: string;
   last_synced_at?: string | null;

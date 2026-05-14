@@ -78,6 +78,12 @@ CREATE TABLE leads (
 
   notes TEXT,
 
+  -- Event-marketing engagement signals from SFDC's "Event Activation"
+  -- field. Closed set: Pre-Event Meeting, Booth Meeting, Session
+  -- Attendee, Post-Event Meeting. No CHECK so the taxonomy can grow;
+  -- the importer and edit UI validate.
+  event_activations TEXT[] NOT NULL DEFAULT '{}',
+
   -- Bookkeeping
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -94,6 +100,7 @@ CREATE INDEX idx_leads_country ON leads(country);
 CREATE INDEX idx_leads_owner ON leads(owner);
 CREATE INDEX idx_leads_region ON leads(region);
 CREATE INDEX idx_leads_stage_history ON leads USING GIN(stage_history);
+CREATE INDEX idx_leads_event_activations ON leads USING GIN(event_activations);
 
 -- =============================================================
 -- Attributions (deal-level multi-touch journey)

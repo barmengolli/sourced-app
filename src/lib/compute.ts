@@ -14,6 +14,10 @@ import {
 } from '../constants/funnelStages';
 import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
 import { VELOCITY_THRESHOLDS } from '../constants/velocityThresholds';
+import {
+  EVENT_ACTIVATION_VALUES,
+  type EventActivation,
+} from '../constants/eventActivations';
 
 export type PeriodFilter = 'year' | 'Q1' | 'Q2' | 'Q3' | 'Q4';
 
@@ -578,6 +582,321 @@ export function computeWeekly(input: ComputeWeeklyInput): WeeklyGrid {
   }
 
   return { weeks, rows: orderedRows, totals, unassignedLeadCount };
+}
+
+// ---------- Monthly compute (Compare tab) ----------
+//
+// Same shape as computeWeekly but bucketed by calendar month. Two
+// changes from the weekly version: lead/MQL/attribution dates use
+// month-of-year + year for bucketing (not ISO weeks), and the HPP /
+// Opp / Pursuit / CloseWon / CloseLost stages bucket by
+// stage_entered_at (the day the deal actually entered that stage),
+// not created_at. stage_entered_at is the right field for a
+// month-over-month view because it answers "how many deals
+// progressed to this stage in this month?" rather than "how many
+// rows were typed into Sourced this month?".
+
+export interface MonthBucket {
+  year: number;
+  month: number; // 1..12
+}
+
+export interface MonthlyCellValues {
+  // counts[i] is the actual for the month at months[i].
+  counts: number[];
+}
+
+export interface MonthlyRow {
+  channelId: string;
+  hasChildren: boolean;
+  parentId: string | null;
+  depth: number;
+  ancestors: string[];
+  cells: Record<FunnelStageKey, MonthlyCellValues>;
+}
+
+export interface MonthlyGrid {
+  months: MonthBucket[];
+  rows: MonthlyRow[];
+  totals: Record<FunnelStageKey, MonthlyCellValues>;
+  unassignedLeadCount: number;
+}
+
+export interface ComputeMonthlyInput {
+  leads: Lead[];
+  channels: Channel[];
+  attributions?: Attribution[];
+  months: MonthBucket[];
+  regions?: Set<RegionKey>;
+}
+
+function monthKey(m: MonthBucket): string {
+  return `${m.year}-${m.month}`;
+}
+
+// Pulls (year, month) from an ISO date string. Local-month semantics
+// match quarterOfIsoDate: parse Y/M/D from the leading digits so a
+// UTC-shifted Date() doesn't kick a March 31 into April for negative
+// timezones.
+function monthOfIsoDate(
+  iso: string | null | undefined,
+): MonthBucket | null {
+  if (!iso) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return null;
+  const year = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  if (month < 1 || month > 12) return null;
+  return { year, month };
+}
+
+function emptyMonthlyCells(
+  numMonths: number,
+): Record<FunnelStageKey, MonthlyCellValues> {
+  const out = {} as Record<FunnelStageKey, MonthlyCellValues>;
+  for (const s of FUNNEL_STAGES) {
+    out[s] = { counts: new Array<number>(numMonths).fill(0) };
+  }
+  return out;
+}
+
+export function computeMonthly(input: ComputeMonthlyInput): MonthlyGrid {
+  const { leads, channels, attributions = [], months, regions } = input;
+  const numMonths = months.length;
+  const monthIndex = new Map<string, number>();
+  months.forEach((m, i) => monthIndex.set(monthKey(m), i));
+
+  // 1. Initialize rows.
+  const rowMap = new Map<string, MonthlyRow>();
+  for (const c of channels) {
+    rowMap.set(c.id, {
+      channelId: c.id,
+      hasChildren: false,
+      parentId: c.parent_channel_id ?? null,
+      depth: 1,
+      ancestors: [],
+      cells: emptyMonthlyCells(numMonths),
+    });
+  }
+
+  // 2. Lead pass. Lead bucket = marketing_sourced_date's month. MQL
+  //    bucket = earliest stage_history entry with stage='mql'.
+  let unassignedLeadCount = 0;
+  for (const l of leads) {
+    if (!regionMatches(l.region, regions)) continue;
+    const leadMonth = monthOfIsoDate(l.marketing_sourced_date);
+    if (leadMonth) {
+      const idx = monthIndex.get(monthKey(leadMonth));
+      if (idx !== undefined) {
+        if (!l.source_channel_id) {
+          unassignedLeadCount += 1;
+        } else {
+          const row = rowMap.get(l.source_channel_id);
+          if (row) row.cells.lead.counts[idx] += 1;
+        }
+      }
+    }
+    const mqlIso = firstMqlDate(l);
+    if (mqlIso) {
+      const mqlMonth = monthOfIsoDate(mqlIso);
+      if (mqlMonth) {
+        const idx = monthIndex.get(monthKey(mqlMonth));
+        if (idx !== undefined && l.source_channel_id) {
+          const row = rowMap.get(l.source_channel_id);
+          if (row) row.cells.mql.counts[idx] += 1;
+        }
+      }
+    }
+  }
+
+  // 3. Attribution pass: bucket by stage_entered_at month, not
+  //    created_at. This is the only semantic difference from
+  //    computeWeekly's attribution loop.
+  for (const a of attributions) {
+    if (!a.channel_id) continue;
+    if (!regionMatches(a.region, regions)) continue;
+    const aMonth = monthOfIsoDate(a.stage_entered_at);
+    if (!aMonth) continue;
+    const idx = monthIndex.get(monthKey(aMonth));
+    if (idx === undefined) continue;
+    const row = rowMap.get(a.channel_id);
+    if (!row) continue;
+    row.cells[a.stage_key].counts[idx] += 1;
+  }
+
+  // 4. Tree rollup. Mirrors computeWeekly.
+  const childrenByParent = new Map<string, string[]>();
+  for (const c of channels) {
+    if (!c.parent_channel_id) continue;
+    const arr = childrenByParent.get(c.parent_channel_id) ?? [];
+    arr.push(c.id);
+    childrenByParent.set(c.parent_channel_id, arr);
+  }
+  const rolledUp = new Set<string>();
+  const rollup = (nodeId: string): void => {
+    if (rolledUp.has(nodeId)) return;
+    rolledUp.add(nodeId);
+    const node = rowMap.get(nodeId);
+    if (!node) return;
+    for (const cid of childrenByParent.get(nodeId) ?? []) {
+      rollup(cid);
+      const childRow = rowMap.get(cid);
+      if (!childRow) continue;
+      for (const stage of FUNNEL_STAGES) {
+        for (let i = 0; i < numMonths; i++) {
+          node.cells[stage].counts[i] += childRow.cells[stage].counts[i];
+        }
+      }
+    }
+  };
+  for (const c of channels) {
+    if (!c.parent_channel_id) rollup(c.id);
+  }
+
+  // 5. DFS ordering.
+  const sortKey = (c: Channel): [number, string] => [c.display_order, c.name];
+  const cmp = (a: Channel, b: Channel) => {
+    const [ao, an] = sortKey(a);
+    const [bo, bn] = sortKey(b);
+    if (ao !== bo) return ao - bo;
+    return an.localeCompare(bn);
+  };
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+  const sortedChildren = (parentId: string | null): Channel[] => {
+    const ids =
+      parentId === null
+        ? channels.filter((c) => !c.parent_channel_id).map((c) => c.id)
+        : (childrenByParent.get(parentId) ?? []);
+    return ids
+      .map((id) => channelById.get(id))
+      .filter((c): c is Channel => Boolean(c))
+      .slice()
+      .sort(cmp);
+  };
+  const orderedRows: MonthlyRow[] = [];
+  const visit = (nodeId: string, depth: number, ancestors: string[]): void => {
+    const channel = channelById.get(nodeId);
+    if (!channel) return;
+    const row = rowMap.get(nodeId);
+    if (!row) return;
+    row.depth = depth;
+    row.ancestors = ancestors;
+    row.hasChildren = (childrenByParent.get(nodeId)?.length ?? 0) > 0;
+    orderedRows.push(row);
+    for (const child of sortedChildren(nodeId)) {
+      visit(child.id, depth + 1, [...ancestors, nodeId]);
+    }
+  };
+  for (const root of sortedChildren(null)) {
+    visit(root.id, 1, []);
+  }
+
+  // 6. Totals: sum across roots.
+  const totals = emptyMonthlyCells(numMonths);
+  for (const c of channels) {
+    if (c.parent_channel_id) continue;
+    const r = rowMap.get(c.id);
+    if (!r) continue;
+    for (const stage of FUNNEL_STAGES) {
+      for (let i = 0; i < numMonths; i++) {
+        totals[stage].counts[i] += r.cells[stage].counts[i];
+      }
+    }
+  }
+
+  return { months, rows: orderedRows, totals, unassignedLeadCount };
+}
+
+// Shift a MonthBucket by `delta` months (positive = forward, negative =
+// backward). Wraps year correctly via Date arithmetic.
+export function shiftMonth(m: MonthBucket, delta: number): MonthBucket {
+  // Use day-1 so the Date doesn't roll over for variable month lengths.
+  const d = new Date(Date.UTC(m.year, m.month - 1 + delta, 1));
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
+}
+
+// ---------- Monthly leads-for-year (Compare tab year charts) ----------
+//
+// Powers the two bar charts at the bottom of the Compare tab. Always
+// spans all 12 months of the input year; the per-month comparison
+// selector at the top of the page is intentionally not an input.
+// Region filter still applies.
+//
+// Each lead rolls up to its top-level (root) channel via the
+// parent_channel_id chain so the stacked-bar chart's legend stays
+// short and stable. Leads without a source_channel_id are dropped
+// (they can't be attributed to a channel).
+
+export interface MonthlyChannelLeads {
+  channelId: string;
+  channelName: string;
+  perMonth: number[];   // length 12, index 0 = Jan, 11 = Dec
+}
+
+export interface MonthlyLeadsForYear {
+  // One entry per top-level channel with >= 1 lead in the year.
+  // Sorted by year total descending so legend order is stable.
+  byChannel: MonthlyChannelLeads[];
+  // Length 12. Sum across all channels (including the unsorted set,
+  // which by construction equals the sum of byChannel rows since
+  // unattributed leads are excluded upstream).
+  monthTotals: number[];
+}
+
+export interface ComputeMonthlyLeadsForYearInput {
+  leads: Lead[];
+  channels: Channel[];
+  year: number;
+  regions: Set<RegionKey>;
+}
+
+export function computeMonthlyLeadsForYear(
+  input: ComputeMonthlyLeadsForYearInput,
+): MonthlyLeadsForYear {
+  const { leads, channels, year, regions } = input;
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // Accumulator: top-level channel id → 12-element month array. We
+  // also need a quick lookup for channel name when materializing.
+  const perChannel = new Map<string, number[]>();
+  const monthTotals = new Array<number>(12).fill(0);
+
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    if (!regionMatches(lead.region, regions)) continue;
+    const leadMonth = monthOfIsoDate(lead.marketing_sourced_date);
+    if (!leadMonth || leadMonth.year !== year) continue;
+    const topId = resolveTopLevelChannelId(
+      lead.source_channel_id,
+      channelById,
+    );
+    let row = perChannel.get(topId);
+    if (!row) {
+      row = new Array<number>(12).fill(0);
+      perChannel.set(topId, row);
+    }
+    const idx = leadMonth.month - 1;
+    row[idx] += 1;
+    monthTotals[idx] += 1;
+  }
+
+  const byChannel: MonthlyChannelLeads[] = [];
+  for (const [channelId, perMonth] of perChannel) {
+    const total = perMonth.reduce((s, n) => s + n, 0);
+    if (total <= 0) continue;
+    byChannel.push({
+      channelId,
+      channelName: channelById.get(channelId)?.name ?? 'Unknown',
+      perMonth,
+    });
+  }
+  byChannel.sort((a, b) => {
+    const aTot = a.perMonth.reduce((s, n) => s + n, 0);
+    const bTot = b.perMonth.reduce((s, n) => s + n, 0);
+    return bTot - aTot;
+  });
+
+  return { byChannel, monthTotals };
 }
 
 // ---------- Funnel Flow Sankey (Channel Influence chart) ----------
@@ -1378,4 +1697,128 @@ export function computeChannelDistribution(
   channelsOut.sort((a, b) => b.dealCount - a.dealCount);
 
   return { channels: channelsOut, totalDeals, totalAmount };
+}
+
+// ---------- Event activations (Events sub-tab) ----------
+//
+// Per-event aggregation of contacts and their SFDC event_activations
+// values. "Events" here are the sub-channels under the year's parent
+// "2026 - Events" channel (e.g. ITC Japan, Limra L&A, Semana del
+// Seguro). We pick descendants by walking parent_channel_id, not by
+// name pattern, so renaming an individual event channel doesn't break
+// the report.
+//
+// Counts are unique contacts (one row in leads per email), bucketed
+// by source_channel_id = an Events descendant and
+// marketing_sourced_date in the selected period. Region filter
+// applies. Empty events (no contacts in the period) are dropped.
+
+export interface EventActivationCounts {
+  channelId: string;
+  channelName: string;
+  totalContacts: number;        // unique contacts at this event in period
+  withAnyActivation: number;    // contacts with >= 1 activation
+  perType: Record<EventActivation, number>;
+  preAndPost: number;           // contacts with both Pre-Event and Post-Event
+  multiActivation: number;      // contacts with >= 2 activations
+}
+
+export interface ComputeEventActivationsInput {
+  leads: Lead[];
+  channels: Channel[];
+  parentChannelName: string;    // e.g. "2026 - Events"
+  year: number;
+  filter: PeriodFilter;
+  regions: Set<RegionKey>;
+}
+
+export function computeEventActivations(
+  input: ComputeEventActivationsInput,
+): EventActivationCounts[] {
+  const { leads, channels, parentChannelName, year, filter, regions } = input;
+
+  // Resolve the parent channel by name. If absent, return empty.
+  const parent = channels.find((c) => c.name === parentChannelName);
+  if (!parent) return [];
+
+  // Walk the parent's subtree via parent_channel_id. The Events parent
+  // typically has direct children (one per event); future shapes
+  // (sub-events under an event) would still flow correctly because
+  // this is a recursive descendant collector.
+  const childrenByParent = new Map<string, string[]>();
+  for (const c of channels) {
+    if (!c.parent_channel_id) continue;
+    const arr = childrenByParent.get(c.parent_channel_id) ?? [];
+    arr.push(c.id);
+    childrenByParent.set(c.parent_channel_id, arr);
+  }
+  const eventChannelIds = new Set<string>();
+  const visit = (nodeId: string): void => {
+    for (const childId of childrenByParent.get(nodeId) ?? []) {
+      eventChannelIds.add(childId);
+      visit(childId);
+    }
+  };
+  visit(parent.id);
+  if (eventChannelIds.size === 0) return [];
+
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // Tally per event channel.
+  interface Tally {
+    channelId: string;
+    channelName: string;
+    totalContacts: number;
+    withAnyActivation: number;
+    perType: Record<EventActivation, number>;
+    preAndPost: number;
+    multiActivation: number;
+  }
+  const tally = new Map<string, Tally>();
+  const blankPerType = (): Record<EventActivation, number> => {
+    const out = {} as Record<EventActivation, number>;
+    for (const v of EVENT_ACTIVATION_VALUES) out[v] = 0;
+    return out;
+  };
+
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    if (!eventChannelIds.has(lead.source_channel_id)) continue;
+    if (!regionMatches(lead.region, regions)) continue;
+    const bucket = quarterOfIsoDate(lead.marketing_sourced_date);
+    if (!bucket || !matchesPeriod(bucket, year, filter)) continue;
+
+    const ch = channelById.get(lead.source_channel_id);
+    let t = tally.get(lead.source_channel_id);
+    if (!t) {
+      t = {
+        channelId: lead.source_channel_id,
+        channelName: ch?.name ?? 'Unknown',
+        totalContacts: 0,
+        withAnyActivation: 0,
+        perType: blankPerType(),
+        preAndPost: 0,
+        multiActivation: 0,
+      };
+      tally.set(lead.source_channel_id, t);
+    }
+    t.totalContacts += 1;
+
+    const activations = (lead.event_activations ?? []).filter((v) =>
+      (EVENT_ACTIVATION_VALUES as readonly string[]).includes(v),
+    ) as EventActivation[];
+    const set = new Set<EventActivation>(activations);
+    if (set.size >= 1) t.withAnyActivation += 1;
+    if (set.size >= 2) t.multiActivation += 1;
+    if (set.has('Pre-Event Meeting') && set.has('Post-Event Meeting')) {
+      t.preAndPost += 1;
+    }
+    for (const v of set) {
+      t.perType[v] += 1;
+    }
+  }
+
+  return [...tally.values()]
+    .filter((t) => t.totalContacts > 0)
+    .sort((a, b) => b.totalContacts - a.totalContacts);
 }

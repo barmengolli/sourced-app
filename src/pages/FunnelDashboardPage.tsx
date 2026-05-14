@@ -4,7 +4,11 @@ import { useChannels } from '../hooks/useChannels';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
-import { computeGrid, type PeriodFilter } from '../lib/compute';
+import {
+  computeGrid,
+  computeMonthlyLeadsForYear,
+  type PeriodFilter,
+} from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
@@ -13,6 +17,7 @@ import DonutChartView from '../components/charts/DonutChartView';
 import FunnelChartView from '../components/charts/FunnelChartView';
 import TrendLineChartView from '../components/charts/TrendLineChartView';
 import FunnelSankeyView from '../components/charts/FunnelSankeyView';
+import YearLeadCharts from '../components/charts/YearLeadCharts';
 import type { RegionKey } from '../constants/regions';
 
 interface FunnelDashboardPageProps {
@@ -75,6 +80,21 @@ export default function FunnelDashboardPage({
     ],
   );
 
+  // Year-wide leads-by-channel + per-month totals for the two bar
+  // charts at the top. Intentionally ignores the quarter selector
+  // (the charts always show all 12 months); year and regions still
+  // apply.
+  const yearLeads = useMemo(
+    () =>
+      computeMonthlyLeadsForYear({
+        leads,
+        channels,
+        year,
+        regions,
+      }),
+    [leads, channels, year, regions],
+  );
+
   // Per-quarter totals across the selected year, for the trend chart. Always
   // computed on this page since charts ARE the surface.
   const quarterly = useMemo(() => {
@@ -133,6 +153,10 @@ export default function FunnelDashboardPage({
       )}
 
       <section className="space-y-4">
+        {/* Year-wide bar charts sit at the top so the user lands on
+            the portfolio shape before drilling into per-period
+            details. These two ignore the quarter selector. */}
+        <YearLeadCharts data={yearLeads} year={year} />
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <ChartCard title="Actuals vs Projections">
             <BarChartView

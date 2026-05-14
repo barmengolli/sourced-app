@@ -1,31 +1,33 @@
-// FunnelComparePage — week-over-week comparison view. Modeled on DataVis 1's
-// Outreach Sequences "Compare" / "Data" tab. Two modes:
+// FunnelComparePage — month-over-month comparison view. Two modes:
 //
 //   - "single"   → channel × stage table, one ACT column per stage with a
-//                  small ▲/▼ delta vs the prior ISO week. Six summary cards
-//                  on top mirror the same metric layout.
-//   - "rolling4" → channel × stage table, four ACT columns per stage (the
-//                  selected week and the three preceding it), no deltas. A
-//                  sub-channel × week heatmap below shows lead intensity.
+//                  small ▲/▼ delta vs the prior calendar month. Six summary
+//                  cards on top mirror the same metric layout.
+//   - "rolling3" → channel × stage table, three ACT columns per stage
+//                  (the selected month and the two preceding it), no
+//                  deltas. A sub-channel × month heatmap below shows lead
+//                  intensity across the rolling window.
 //
 // Empty-state copy spells out the "vs zero baseline" caveat when the
-// comparison week itself has no data, so deltas like "▲237" don't mislead
-// the reader.
+// comparison month itself has no data, so deltas like "▲237" don't
+// mislead the reader.
 //
-// Computation lives in lib/compute.ts (computeWeekly). Week math uses ISO
-// 8601 (Mon-Sun, week 1 contains Jan 4); see lib/dates.ts.
+// Computation lives in lib/compute.ts (computeMonthly). Counts bucket by
+// calendar month + year. Lead-stage uses marketing_sourced_date, MQL uses
+// the earliest stage_history entry's entered_at, and attribution stages
+// (HPP / Opp / Pursuit / Closed Won / Closed Lost) use stage_entered_at.
 
 import { useMemo } from 'react';
 import { useLeads } from '../hooks/useLeads';
 import { useChannels } from '../hooks/useChannels';
 import { useAttributions } from '../hooks/useAttributions';
 import { useCollapsedChannels } from '../hooks/useCollapsedChannels';
-import { computeWeekly, type PeriodFilter } from '../lib/compute';
 import {
-  isoWeekStart,
-  weeksInQuarter,
-  type IsoWeek,
-} from '../lib/dates';
+  computeMonthly,
+  shiftMonth,
+  type MonthBucket,
+  type PeriodFilter,
+} from '../lib/compute';
 import {
   FUNNEL_STAGES,
   FUNNEL_STAGE_LABELS,
@@ -44,38 +46,59 @@ interface FunnelComparePageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
-  compareWeek: number;
-  onCompareWeekChange: (w: number) => void;
+  compareMonth: number;          // 1..12
+  onCompareMonthChange: (m: number) => void;
   compareView: CompareView;
   onCompareViewChange: (v: CompareView) => void;
 }
 
-const QUARTER_VALUES = ['Q1', 'Q2', 'Q3', 'Q4'] as const;
+const MONTH_NUMBERS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
-function isoLabel(w: IsoWeek): string {
-  return `W${w.week}`;
+const MONTH_SHORT: Record<number, string> = {
+  1: 'Jan',
+  2: 'Feb',
+  3: 'Mar',
+  4: 'Apr',
+  5: 'May',
+  6: 'Jun',
+  7: 'Jul',
+  8: 'Aug',
+  9: 'Sep',
+  10: 'Oct',
+  11: 'Nov',
+  12: 'Dec',
+};
+
+const MONTH_LONG: Record<number, string> = {
+  1: 'January',
+  2: 'February',
+  3: 'March',
+  4: 'April',
+  5: 'May',
+  6: 'June',
+  7: 'July',
+  8: 'August',
+  9: 'September',
+  10: 'October',
+  11: 'November',
+  12: 'December',
+};
+
+function monthLabel(m: MonthBucket): string {
+  return MONTH_SHORT[m.month];
 }
 
-function fmtDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function weekRangeLabel(w: IsoWeek): string {
-  const mon = isoWeekStart(w.year, w.week);
-  const sun = new Date(mon);
-  sun.setUTCDate(mon.getUTCDate() + 6);
-  return `${fmtDate(mon)} – ${fmtDate(sun)}`;
+function monthLongLabel(m: MonthBucket): string {
+  return MONTH_LONG[m.month];
 }
 
 export default function FunnelComparePage({
   year,
-  filter,
   onYearChange,
-  onFilterChange,
   regions,
   onRegionsChange,
-  compareWeek,
-  onCompareWeekChange,
+  compareMonth,
+  onCompareMonthChange,
   compareView,
   onCompareViewChange,
 }: FunnelComparePageProps) {
@@ -84,23 +107,8 @@ export default function FunnelComparePage({
   const attributionsHook = useAttributions();
   // Collapse state shared with Funnel Data Entry via the same localStorage
   // key prefix. One hook instance per page render so both modes (single
-  // and rolling4) read/write the same set without re-syncing.
+  // and rolling3) read/write the same set without re-syncing.
   const collapse = useCollapsedChannels(channels);
-
-  // Quarter chip state lives in the existing PeriodFilter prop. Compare only
-  // makes sense within a single quarter, so 'year' filter coerces to the
-  // current calendar quarter for chip-active feedback.
-  const activeQuarter = useMemo<1 | 2 | 3 | 4>(() => {
-    if (filter !== 'year') {
-      return parseInt(filter.replace('Q', ''), 10) as 1 | 2 | 3 | 4;
-    }
-    return (Math.floor(new Date().getMonth() / 3) + 1) as 1 | 2 | 3 | 4;
-  }, [filter]);
-
-  const quarterWeeks = useMemo(
-    () => weeksInQuarter(year, activeQuarter),
-    [year, activeQuarter],
-  );
 
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -111,52 +119,52 @@ export default function FunnelComparePage({
         if (m) years.add(parseInt(m[1], 10));
       }
     }
-    return [...years].sort((a, b) => a - b);
-  }, [leads]);
-
-  // Selected week within the active quarter. If the saved compareWeek is no
-  // longer in range (after a quarter switch), fall back to the first week.
-  const selectedWeek: IsoWeek = useMemo(() => {
-    const match = quarterWeeks.find((w) => w.week === compareWeek);
-    return match ?? quarterWeeks[0] ?? { year, week: 1 };
-  }, [quarterWeeks, compareWeek, year]);
-
-  // Comparison set: in single mode it's [prev, selected]; in rolling4 it's
-  // the four weeks ending at the selected week.
-  const compareWeeks: IsoWeek[] = useMemo(() => {
-    if (compareView === 'rolling4') {
-      const idx = quarterWeeks.findIndex((w) => w.week === selectedWeek.week);
-      if (idx < 0) return quarterWeeks.slice(0, 4);
-      const start = Math.max(0, idx - 3);
-      // If we're early in the quarter we'll have fewer than 4 weeks; the
-      // table renders fewer columns gracefully.
-      return quarterWeeks.slice(start, idx + 1);
+    for (const a of attributionsHook.attributions) {
+      const m = /^(\d{4})/.exec(a.stage_entered_at);
+      if (m) years.add(parseInt(m[1], 10));
     }
-    const idx = quarterWeeks.findIndex((w) => w.week === selectedWeek.week);
-    if (idx <= 0) return [selectedWeek];
-    return [quarterWeeks[idx - 1], selectedWeek];
-  }, [compareView, quarterWeeks, selectedWeek]);
+    return [...years].sort((a, b) => a - b);
+  }, [leads, attributionsHook.attributions]);
+
+  // The selected month is the "current" month for the comparison. The
+  // selected year drives which year that month belongs to; year-boundary
+  // wrap (e.g. January's previous = December of prior year) is handled
+  // by shiftMonth().
+  const selectedMonth: MonthBucket = useMemo(
+    () => ({ year, month: compareMonth }),
+    [year, compareMonth],
+  );
+
+  // Comparison set:
+  // - single mode: [prev, selected]
+  // - rolling3 mode: the three months ending at selected (prev-2, prev-1, selected)
+  const compareMonths: MonthBucket[] = useMemo(() => {
+    if (compareView === 'rolling3') {
+      return [shiftMonth(selectedMonth, -2), shiftMonth(selectedMonth, -1), selectedMonth];
+    }
+    return [shiftMonth(selectedMonth, -1), selectedMonth];
+  }, [compareView, selectedMonth]);
 
   const grid = useMemo(
     () =>
-      computeWeekly({
+      computeMonthly({
         leads,
         channels,
         attributions: attributionsHook.attributions,
-        weeks: compareWeeks,
+        months: compareMonths,
         regions,
       }),
-    [leads, channels, attributionsHook.attributions, compareWeeks, regions],
+    [leads, channels, attributionsHook.attributions, compareMonths, regions],
   );
 
-  // Single-mode: did the comparison week have any data? If not, deltas
+  // Single-mode: did the comparison month have any data? If not, deltas
   // read like "▲237" against a zero baseline; the disclaimer below says so.
   const compareIsZero = useMemo(() => {
     if (compareView !== 'single') return false;
-    if (compareWeeks.length < 2) return true;
+    if (compareMonths.length < 2) return true;
     const totals = grid.totals;
     return FUNNEL_STAGES.every((s) => (totals[s].counts[0] ?? 0) === 0);
-  }, [compareView, compareWeeks, grid]);
+  }, [compareView, compareMonths, grid]);
 
   const allRegionsOn = regions.size === REGIONS.length;
   const toggleRegion = (r: RegionKey) => {
@@ -174,8 +182,8 @@ export default function FunnelComparePage({
             Marketing Funnel: Compare
           </h1>
           <p className="mt-1 text-sm text-slate-muted">
-            Week over week comparison. ISO weeks (Mon-Sun). HPP and below
-            count by week of attribution creation, not stage transition.
+            Month over month comparison. Calendar months. HPP and below
+            count by stage_entered_at month, not by data-entry date.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -193,42 +201,21 @@ export default function FunnelComparePage({
               ))}
             </select>
           </label>
-          <div className="flex items-center gap-1">
-            {QUARTER_VALUES.map((q) => {
-              const active = filter === q;
-              return (
-                <button
-                  key={q}
-                  type="button"
-                  onClick={() => onFilterChange(q)}
-                  className={
-                    'text-xs px-2 py-1 rounded border transition-colors ' +
-                    (active
-                      ? 'bg-indigo text-white border-indigo'
-                      : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                  }
-                >
-                  {q}
-                </button>
-              );
-            })}
-          </div>
           <ViewToggle view={compareView} onChange={onCompareViewChange} />
         </div>
       </header>
 
-      {/* Week chips + region group */}
+      {/* Month chips + region group */}
       <section className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-xs text-slate-muted mr-1">Week</span>
-          {quarterWeeks.map((w) => {
-            const active = w.week === selectedWeek.week;
+          <span className="text-xs text-slate-muted mr-1">Month</span>
+          {MONTH_NUMBERS.map((m) => {
+            const active = m === selectedMonth.month;
             return (
               <button
-                key={`${w.year}-${w.week}`}
+                key={m}
                 type="button"
-                title={weekRangeLabel(w)}
-                onClick={() => onCompareWeekChange(w.week)}
+                onClick={() => onCompareMonthChange(m)}
                 className={
                   'text-xs px-2 py-1 rounded border transition-colors ' +
                   (active
@@ -236,13 +223,13 @@ export default function FunnelComparePage({
                     : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
                 }
               >
-                {isoLabel(w)}
+                {MONTH_SHORT[m]}
               </button>
             );
           })}
-          {compareView === 'single' && compareWeeks.length === 2 && (
+          {compareView === 'single' && compareMonths.length === 2 && (
             <span className="text-xs text-slate-muted ml-2">
-              vs {isoLabel(compareWeeks[0])}
+              vs {monthLongLabel(compareMonths[0])}
             </span>
           )}
         </div>
@@ -280,19 +267,19 @@ export default function FunnelComparePage({
       </section>
 
       {compareView === 'single' ? (
-        <SingleWeekView
+        <SingleMonthView
           grid={grid}
           channels={channels}
-          weeks={compareWeeks}
-          selectedWeek={selectedWeek}
+          months={compareMonths}
+          selectedMonth={selectedMonth}
           compareIsZero={compareIsZero}
           collapse={collapse}
         />
       ) : (
-        <RollingFourView
+        <RollingThreeView
           grid={grid}
           channels={channels}
-          weeks={compareWeeks}
+          months={compareMonths}
           collapse={collapse}
         />
       )}
@@ -308,8 +295,8 @@ function ViewToggle({
   onChange: (v: CompareView) => void;
 }) {
   const options: { value: CompareView; label: string }[] = [
-    { value: 'single', label: 'This week' },
-    { value: 'rolling4', label: 'Rolling 4 weeks' },
+    { value: 'single', label: 'This month' },
+    { value: 'rolling3', label: 'Rolling 3 months' },
   ];
   return (
     <div className="flex items-center gap-1">
@@ -335,22 +322,22 @@ function ViewToggle({
   );
 }
 
-// ---------- Single-week view ----------
+// ---------- Single-month view ----------
 
 interface SingleViewProps {
-  grid: ReturnType<typeof computeWeekly>;
+  grid: ReturnType<typeof computeMonthly>;
   channels: ReturnType<typeof useChannels>;
-  weeks: IsoWeek[]; // [prev, selected] or [selected]
-  selectedWeek: IsoWeek;
+  months: MonthBucket[]; // [prev, selected] or [selected]
+  selectedMonth: MonthBucket;
   compareIsZero: boolean;
   collapse: ReturnType<typeof useCollapsedChannels>;
 }
 
-function SingleWeekView({
+function SingleMonthView({
   grid,
   channels,
-  weeks,
-  selectedWeek,
+  months,
+  selectedMonth,
   compareIsZero,
   collapse,
 }: SingleViewProps) {
@@ -358,11 +345,12 @@ function SingleWeekView({
     () => new Map(channels.map((c) => [c.id, c] as const)),
     [channels],
   );
-  const selIdx = weeks.length - 1;
-  const prevIdx = weeks.length === 2 ? 0 : -1;
+  const selIdx = months.length - 1;
+  const prevIdx = months.length === 2 ? 0 : -1;
 
-  const prevLabel = prevIdx >= 0 ? `W${weeks[prevIdx].week}` : 'baseline';
-  const selLabel = `W${selectedWeek.week}`;
+  const prevLabel =
+    prevIdx >= 0 ? monthLongLabel(months[prevIdx]) : 'baseline';
+  const selLabel = monthLongLabel(selectedMonth);
 
   return (
     <div className="space-y-4">
@@ -432,6 +420,16 @@ function SingleWeekView({
                             {isCollapsed ? '▶' : '▼'}
                           </span>
                         </button>
+                      ) : row.depth === 1 ? (
+                        // Top-level rows without children (e.g. Sales)
+                        // reserve the same chevron-sized space so their
+                        // names align with sibling parents that do have
+                        // a chevron. Deeper rows already align via
+                        // paddingLeft.
+                        <span
+                          className="inline-block w-5 h-5 mr-1 align-middle"
+                          aria-hidden="true"
+                        />
                       ) : null}
                       {channel?.name ?? '(unknown)'}
                     </td>
@@ -486,8 +484,7 @@ function SingleWeekView({
 
       {prevIdx < 0 && (
         <p className="text-xs text-slate-muted italic">
-          {selLabel} is the first week of this quarter; deltas are vs zero
-          baseline.
+          {selLabel} has no prior month available; deltas are vs zero baseline.
         </p>
       )}
       {prevIdx >= 0 && compareIsZero && (
@@ -501,7 +498,7 @@ function SingleWeekView({
           (s) => (grid.totals[s].counts[selIdx] ?? 0) === 0,
         ) && (
           <p className="text-xs text-slate-muted italic">
-            No leads in {selLabel}. Try a different week.
+            No leads in {selLabel}. Try a different month.
           </p>
         )}
     </div>
@@ -552,7 +549,7 @@ function SummaryCards({
   prevLabel,
   selLabel,
 }: {
-  totals: ReturnType<typeof computeWeekly>['totals'];
+  totals: ReturnType<typeof computeMonthly>['totals'];
   selIdx: number;
   prevIdx: number;
   prevLabel: string;
@@ -610,19 +607,19 @@ function SummaryCards({
   );
 }
 
-// ---------- Rolling-4 view ----------
+// ---------- Rolling-3 view ----------
 
 interface RollingViewProps {
-  grid: ReturnType<typeof computeWeekly>;
+  grid: ReturnType<typeof computeMonthly>;
   channels: ReturnType<typeof useChannels>;
-  weeks: IsoWeek[];
+  months: MonthBucket[];
   collapse: ReturnType<typeof useCollapsedChannels>;
 }
 
-function RollingFourView({
+function RollingThreeView({
   grid,
   channels,
-  weeks,
+  months,
   collapse,
 }: RollingViewProps) {
   const channelById = useMemo(
@@ -666,7 +663,7 @@ function RollingFourView({
                   <th
                     key={s}
                     className="text-center px-3 py-2 font-medium border-l border-border"
-                    colSpan={weeks.length}
+                    colSpan={months.length}
                   >
                     {FUNNEL_STAGE_LABELS[s]}
                   </th>
@@ -674,12 +671,12 @@ function RollingFourView({
               </tr>
               <tr>
                 {FUNNEL_STAGES.map((s) =>
-                  weeks.map((w) => (
+                  months.map((m) => (
                     <th
-                      key={`${s}-${w.year}-${w.week}`}
+                      key={`${s}-${m.year}-${m.month}`}
                       className="text-right px-2 py-1 text-[10px] font-normal text-slate-muted whitespace-nowrap"
                     >
-                      W{w.week}
+                      {monthLabel(m)}
                     </th>
                   )),
                 )}
@@ -723,11 +720,16 @@ function RollingFourView({
                             {isCollapsed ? '▶' : '▼'}
                           </span>
                         </button>
+                      ) : row.depth === 1 ? (
+                        <span
+                          className="inline-block w-5 h-5 mr-1 align-middle"
+                          aria-hidden="true"
+                        />
                       ) : null}
                       {channel?.name ?? '(unknown)'}
                     </td>
                     {FUNNEL_STAGES.map((s) =>
-                      weeks.map((_w, i) => (
+                      months.map((_m, i) => (
                         <td
                           key={`${row.channelId}-${s}-${i}`}
                           className="px-2 py-1.5 text-right tabular-nums text-charcoal"
@@ -744,7 +746,7 @@ function RollingFourView({
               <tr className="border-t border-border bg-muted/60 font-medium">
                 <td className="px-3 py-2 text-charcoal">Totals</td>
                 {FUNNEL_STAGES.map((s) =>
-                  weeks.map((_w, i) => (
+                  months.map((_m, i) => (
                     <td
                       key={`tot-${s}-${i}`}
                       className="px-2 py-2 text-right tabular-nums"
@@ -767,8 +769,8 @@ function RollingFourView({
             Activity heatmap
           </h3>
           <p className="text-xs text-slate-muted mt-0.5">
-            Lead counts per sub-channel across the selected weeks. Darker =
-            higher.
+            Lead counts per sub-channel across the selected months. Darker
+            = higher.
           </p>
         </header>
         {heatRows.length === 0 ? (
@@ -783,13 +785,13 @@ function RollingFourView({
                   <th className="text-left px-2 py-1 font-medium text-slate-muted">
                     Sub-channel
                   </th>
-                  {weeks.map((w) => (
+                  {months.map((m) => (
                     <th
-                      key={`${w.year}-${w.week}`}
+                      key={`${m.year}-${m.month}`}
                       className="text-center px-2 py-1 font-medium text-slate-muted"
-                      title={weekRangeLabel(w)}
+                      title={`${monthLongLabel(m)} ${m.year}`}
                     >
-                      W{w.week}
+                      {monthLabel(m)}
                     </th>
                   ))}
                 </tr>
@@ -819,7 +821,7 @@ function RollingFourView({
                               color: text,
                               minWidth: 48,
                             }}
-                            title={`W${weeks[i].week}: ${c} leads`}
+                            title={`${monthLongLabel(months[i])}: ${c} leads`}
                           >
                             {c || ''}
                           </td>
@@ -836,6 +838,7 @@ function RollingFourView({
     </div>
   );
 }
+
 
 // Light teal → saturated indigo. Pure white at intensity 0 so empty cells
 // stay clean. Mid range is a teal hue; high end pulls toward indigo to
