@@ -73,16 +73,13 @@ export function ChannelSelect({
         flat.push({ id: node.id, name: node.name, depth });
         for (const k of kids) visit(k, depth + 1);
       };
-      // Top-level itself is the group label, not a flat entry. Walk its
-      // subtree; if the top has no children, expose it as the only entry.
-      const kids = (childrenByParent.get(top.id) ?? []).slice();
-      if (kids.length === 0) {
-        flat.push({ id: top.id, name: top.name, depth: 0 });
-      } else {
-        for (const k of kids.sort((a, b) => a.name.localeCompare(b.name))) {
-          visit(k, 0);
-        }
-      }
+      // Top-level is BOTH the optgroup label and the first selectable
+      // entry inside the group, so users can attribute an HPP directly
+      // to the parent campaign (e.g. "2026 - Events" without picking a
+      // specific sub-event). visit() handles the recursive descent
+      // with children at depth + 1; pushing the parent at depth 0
+      // mirrors what happens for non-leaf mid-level nodes.
+      visit(top, 0);
       return { topName: top.name, options: flat };
     });
   }, [channels]);
