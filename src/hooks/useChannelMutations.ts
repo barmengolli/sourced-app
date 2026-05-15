@@ -13,6 +13,12 @@ export interface UseChannelMutationsResult {
   // Delete a non-leaf with no direct leads, promoting its children up to its
   // own parent. Returns the number of children promoted.
   deleteAndPromoteChildren: (id: string) => Promise<{ promoted: number }>;
+  // Create a new channel at the bottom of its sibling group. Returns
+  // the new row's id so the caller can focus it or scroll to it.
+  create: (
+    name: string,
+    parentChannelId: string | null,
+  ) => Promise<{ id: string }>;
 }
 
 const ORDER_GAP = 10;
@@ -373,6 +379,63 @@ export function useChannelMutations(channels: Channel[]): UseChannelMutationsRes
     if (delErr) throw delErr;
   }
 
+  const create = useCallback(
+    async (
+      name: string,
+      parentChannelId: string | null,
+    ): Promise<{ id: string }> => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error('Name cannot be empty');
+
+      if (parentChannelId !== null) {
+        const parent = channelsRef.current.find(
+          (c) => c.id === parentChannelId,
+        );
+        if (!parent) throw new Error('Parent channel not found');
+      }
+
+      // Pre-check the DB's UNIQUE(name, parent_channel_id) so a duplicate
+      // shows up as a friendly message instead of a Postgres constraint
+      // code surfacing through the supabase-js error.
+      const collision = channelsRef.current.some(
+        (c) =>
+          (c.parent_channel_id ?? null) === (parentChannelId ?? null) &&
+          c.name === trimmed,
+      );
+      if (collision) {
+        throw new Error(
+          `A channel named "${trimmed}" already exists at that level.`,
+        );
+      }
+
+      // Place new channel at the bottom of its sibling group. siblings()
+      // returns the group sorted ascending; reading the last entry's
+      // display_order gives us a stable max even when the group is
+      // un-normalized (some entries at 0).
+      const group = siblings(channelsRef.current, parentChannelId);
+      const maxOrder = group.reduce(
+        (m, c) => (c.display_order > m ? c.display_order : m),
+        0,
+      );
+      const display_order = maxOrder + ORDER_GAP;
+
+      const { data, error } = await supabase
+        .from('channels')
+        .insert({
+          name: trimmed,
+          parent_channel_id: parentChannelId,
+          display_order,
+          hidden: false,
+        })
+        .select('id')
+        .single();
+      if (error) throw error;
+      const row = data as { id: string };
+      return { id: row.id };
+    },
+    [],
+  );
+
   return {
     rename,
     setHidden,
@@ -382,5 +445,6 @@ export function useChannelMutations(channels: Channel[]): UseChannelMutationsRes
     merge,
     reparent,
     deleteAndPromoteChildren,
+    create,
   };
 }
