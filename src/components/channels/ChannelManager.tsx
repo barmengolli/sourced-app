@@ -480,6 +480,150 @@ function ChannelRow({
   );
 }
 
+// CreateChannelForm — inline form rendered above the channel list
+// when the user clicks "+ New channel" (or always-visible on the
+// empty-state card). The parent dropdown lists every channel in DFS
+// order so the user can see the hierarchy when picking; hidden
+// channels are still selectable but marked "(hidden)" so the choice
+// is intentional.
+//
+// When `keepOpen` is true (empty-state case), the form stays mounted
+// after a successful create — the caller has no toggle state to flip
+// off and the user often wants to create several in a row.
+function CreateChannelForm({
+  channels,
+  mutations,
+  onClose,
+  keepOpen = false,
+}: {
+  channels: Channel[];
+  mutations: UseChannelMutationsResult;
+  onClose: () => void;
+  keepOpen?: boolean;
+}) {
+  const [name, setName] = useState('');
+  const [parentId, setParentId] = useState<string>('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  // DFS-ordered channel list for the parent dropdown. Reuses the
+  // same recursive walk that powers the main table so the dropdown
+  // visually mirrors the tree the user sees below.
+  const dropdownOptions = useMemo(() => {
+    const out: { id: string; label: string }[] = [];
+    const childrenByParent = new Map<string, Channel[]>();
+    for (const c of channels) {
+      if (!c.parent_channel_id) continue;
+      const arr = childrenByParent.get(c.parent_channel_id) ?? [];
+      arr.push(c);
+      childrenByParent.set(c.parent_channel_id, arr);
+    }
+    const sortGroup = (group: Channel[]) =>
+      group.slice().sort((a, b) => {
+        if (a.display_order !== b.display_order) {
+          return a.display_order - b.display_order;
+        }
+        return a.name.localeCompare(b.name);
+      });
+    const visit = (group: Channel[], depth: number) => {
+      for (const c of sortGroup(group)) {
+        out.push({
+          id: c.id,
+          label:
+            ' '.repeat(depth) +
+            c.name +
+            (c.hidden ? ' (hidden)' : ''),
+        });
+        const kids = childrenByParent.get(c.id) ?? [];
+        if (kids.length > 0) visit(kids, depth + 1);
+      }
+    };
+    visit(channels.filter((c) => !c.parent_channel_id), 0);
+    return out;
+  }, [channels]);
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await mutations.create(trimmed, parentId === '' ? null : parentId);
+      setName('');
+      // Keep parentId so the user can rapid-fire create siblings.
+      if (!keepOpen) onClose();
+      // Refocus for the next create when keepOpen.
+      if (keepOpen) inputRef.current?.focus();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Create failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="p-3 border border-border rounded-md bg-muted/40 space-y-2">
+      <p className="text-xs font-medium text-charcoal text-left">
+        New channel
+      </p>
+      <div className="flex flex-wrap gap-2 items-center">
+        <input
+          ref={inputRef}
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              void submit();
+            } else if (e.key === 'Escape') {
+              onClose();
+            }
+          }}
+          disabled={busy}
+          placeholder="Channel name"
+          className="flex-1 min-w-[12rem] text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal focus:outline-none focus:ring-2 focus:ring-indigo focus:border-indigo"
+        />
+        <select
+          value={parentId}
+          onChange={(e) => setParentId(e.target.value)}
+          disabled={busy}
+          className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
+        >
+          <option value="">Top level (no parent)</option>
+          {dropdownOptions.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy || name.trim() === ''}
+          className="text-xs px-3 py-1 rounded bg-indigo text-white disabled:opacity-40"
+        >
+          {busy ? 'Creating' : 'Create'}
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={busy}
+          className="text-xs px-2 py-1 text-slate-muted hover:text-charcoal"
+        >
+          Cancel
+        </button>
+      </div>
+      {err && <p className="text-xs text-danger">{err}</p>}
+    </div>
+  );
+}
+
 interface IconButtonProps {
   label: string;
   onClick: () => void;
@@ -531,6 +675,7 @@ export default function ChannelManager({
   const [mergeOpenFor, setMergeOpenFor] = useState<string | null>(null);
   const [moveOpenFor, setMoveOpenFor] = useState<string | null>(null);
   const [budgetOpenFor, setBudgetOpenFor] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const rows = useMemo(
     () => buildOrderedRows(channels, leadCounts),
@@ -560,22 +705,58 @@ export default function ChannelManager({
 
   if (channels.length === 0) {
     return (
-      <div className="border border-border rounded-lg bg-bg p-12 text-center">
-        <p className="text-charcoal font-medium">No channels yet.</p>
-        <p className="mt-1 text-sm text-slate-muted">
-          Run the CSV importer to seed the channel tree from SFDC.
-        </p>
+      <div className="space-y-3">
+        <div className="border border-border rounded-lg bg-bg p-8 text-center space-y-3">
+          <div>
+            <p className="text-charcoal font-medium">No channels yet.</p>
+            <p className="mt-1 text-sm text-slate-muted">
+              Run the CSV importer to seed the channel tree from SFDC, or
+              create one manually below.
+            </p>
+          </div>
+          {/* Empty-state always exposes the form (no toggle) so the
+              user can bootstrap a channel without running the
+              importer first. */}
+          <CreateChannelForm
+            channels={channels}
+            mutations={mutations}
+            onClose={() => undefined}
+            keepOpen
+          />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
-      <div className="text-xs text-slate-muted">
-        {summary.parents} parent{summary.parents === 1 ? '' : 's'},{' '}
-        {summary.subs} sub-channel{summary.subs === 1 ? '' : 's'},{' '}
-        {summary.totalSorted} lead{summary.totalSorted === 1 ? '' : 's'} sorted.
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs text-slate-muted">
+          {summary.parents} parent{summary.parents === 1 ? '' : 's'},{' '}
+          {summary.subs} sub-channel{summary.subs === 1 ? '' : 's'},{' '}
+          {summary.totalSorted} lead{summary.totalSorted === 1 ? '' : 's'} sorted.
+        </div>
+        <button
+          type="button"
+          onClick={() => setCreating((v) => !v)}
+          className={
+            'text-xs px-2 py-1 rounded border transition-colors ' +
+            (creating
+              ? 'bg-indigo/10 text-indigo border-indigo'
+              : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+          }
+        >
+          {creating ? 'Cancel' : '+ New channel'}
+        </button>
       </div>
+
+      {creating && (
+        <CreateChannelForm
+          channels={channels}
+          mutations={mutations}
+          onClose={() => setCreating(false)}
+        />
+      )}
 
       <div className="border border-border rounded-lg bg-bg overflow-hidden">
         {rows.map((meta) => (
