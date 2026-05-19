@@ -39,6 +39,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
       { key: 'funnel-dashboard', label: 'Leads & MQLs' },
       { key: 'funnel-events', label: 'Events' },
       { key: 'funnel-velocity', label: 'Opportunities' },
+      { key: 'funnel-spend', label: 'Spend' },
       { key: 'funnel-compare', label: 'Compare' },
     ],
   },

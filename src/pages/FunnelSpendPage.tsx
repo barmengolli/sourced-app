@@ -1,0 +1,393 @@
+// FunnelSpendPage — Marketing Funnel: Spend sub-tab.
+//
+// Joins date-range campaign_costs with leads / MQLs / first-touch
+// attributions to produce a per-channel table with cost-per-lead,
+// cost-per-MQL, pipeline, won amounts, and ROI. Budgets prorate to
+// the selected period (Q1-Q4 or Year). Region filter applies to
+// leads and attributions; cost is NOT region-scoped (the budget is
+// a sunk cost regardless of which region the user is filtering to).
+//
+// Sub-channels of a parent-only-cost channel (Content Syndication
+// style) inherit a proportional slice of the parent's cost based on
+// their lead share; sub-channels of a leaf-cost structure (Events)
+// keep their own cost.
+
+import { useMemo } from 'react';
+import { useLeads } from '../hooks/useLeads';
+import { useChannels } from '../hooks/useChannels';
+import { useAttributions } from '../hooks/useAttributions';
+import { useAttributionTouches } from '../hooks/useAttributionTouches';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
+import { useCollapsedChannels } from '../hooks/useCollapsedChannels';
+import {
+  computeChannelSpend,
+  type ChannelSpendBreakdown,
+  type PeriodFilter,
+} from '../lib/compute';
+import { quarterOfIsoDate } from '../lib/dates';
+import PeriodSelector from '../components/funnel/PeriodSelector';
+import ChartCard from '../components/charts/ChartCard';
+import type { RegionKey } from '../constants/regions';
+
+interface FunnelSpendPageProps {
+  year: number;
+  filter: PeriodFilter;
+  onYearChange: (y: number) => void;
+  onFilterChange: (f: PeriodFilter) => void;
+  regions: Set<RegionKey>;
+  onRegionsChange: (next: Set<RegionKey>) => void;
+}
+
+function fmtUsd(n: number): string {
+  return n.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  });
+}
+
+// Compact dollar formatting for tight columns ("$1.2K", "$45K", "$2.1M").
+function fmtUsdCompact(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '$0';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `$${Math.round(n / 1_000)}K`;
+  return `$${Math.round(n)}`;
+}
+
+function fmtPct1(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+export default function FunnelSpendPage({
+  year,
+  filter,
+  onYearChange,
+  onFilterChange,
+  regions,
+  onRegionsChange,
+}: FunnelSpendPageProps) {
+  const { leads } = useLeads();
+  const channels = useChannels();
+  const attributionsHook = useAttributions();
+  const touchesHook = useAttributionTouches();
+  const costsHook = useCampaignCosts();
+  const collapse = useCollapsedChannels(channels);
+
+  const yearOptions = useMemo(() => {
+    const years = new Set<number>([new Date().getFullYear()]);
+    for (const l of leads) {
+      const sourced = quarterOfIsoDate(l.marketing_sourced_date);
+      if (sourced) years.add(sourced.year);
+    }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
+    }
+    return [...years].sort((a, b) => a - b);
+  }, [leads, attributionsHook.attributions, costsHook.costs]);
+
+  const breakdown: ChannelSpendBreakdown[] = useMemo(
+    () =>
+      computeChannelSpend({
+        campaignCosts: costsHook.costs,
+        channels,
+        leads,
+        attributions: attributionsHook.attributions,
+        attributionTouches: touchesHook.touches,
+        year,
+        filter,
+        regions,
+      }),
+    [
+      costsHook.costs,
+      channels,
+      leads,
+      attributionsHook.attributions,
+      touchesHook.touches,
+      year,
+      filter,
+      regions,
+    ],
+  );
+
+  // Build a quick lookup so the table render loop can pull a row by
+  // channelId, and a parent → children index for the depth-first
+  // visit order. We render in tree-order (parents first, then their
+  // direct children in lead-count descending) so sub-channels sit
+  // under their parent visually.
+  const byId = useMemo(() => {
+    const m = new Map<string, ChannelSpendBreakdown>();
+    for (const r of breakdown) m.set(r.channelId, r);
+    return m;
+  }, [breakdown]);
+
+  const childrenByParent = useMemo(() => {
+    const m = new Map<string | null, ChannelSpendBreakdown[]>();
+    for (const r of breakdown) {
+      const key = r.parentId;
+      const arr = m.get(key) ?? [];
+      arr.push(r);
+      m.set(key, arr);
+    }
+    // Sort each sibling group by pipelineAmount descending — the spec
+    // default. Pipeline = 0 rows fall to the bottom; tiebreak by name
+    // so the order is stable.
+    for (const arr of m.values()) {
+      arr.sort((a, b) => {
+        if (b.pipelineAmount !== a.pipelineAmount) {
+          return b.pipelineAmount - a.pipelineAmount;
+        }
+        return a.channelName.localeCompare(b.channelName);
+      });
+    }
+    return m;
+  }, [breakdown]);
+
+  // DFS to materialize the render order, attaching depth + ancestor
+  // ids so the collapse hook can hide whole subtrees with one check.
+  interface OrderedRow {
+    row: ChannelSpendBreakdown;
+    ancestors: string[];
+  }
+  const orderedRows: OrderedRow[] = useMemo(() => {
+    const out: OrderedRow[] = [];
+    const visit = (parentId: string | null, ancestors: string[]) => {
+      const kids = childrenByParent.get(parentId) ?? [];
+      for (const r of kids) {
+        out.push({ row: r, ancestors });
+        visit(r.channelId, [...ancestors, r.channelId]);
+      }
+    };
+    visit(null, []);
+    return out;
+  }, [childrenByParent]);
+
+  // Summary KPIs across all rows in scope. Note that summing every
+  // row's allocatedCost would double-count when a parent's cost has
+  // been pushed down to its children; instead, sum each row's
+  // `cost` (direct only) which is double-count-free.
+  const totals = useMemo(() => {
+    let totalCost = 0;
+    let totalLeads = 0;
+    let totalMqls = 0;
+    let totalPipeline = 0;
+    let totalWon = 0;
+    for (const r of breakdown) {
+      totalCost += r.cost;
+      totalLeads += r.leads;
+      totalMqls += r.mqls;
+      totalPipeline += r.pipelineAmount;
+      totalWon += r.wonAmount;
+    }
+    // Avoid double-counting leads: the breakdown emits one row per
+    // channel including parents, and a parent's leads field is only
+    // its OWN directly-assigned leads (no rollup), so the sum above
+    // is already correct. Same for MQLs.
+    void byId;
+    return {
+      totalCost,
+      totalLeads,
+      totalMqls,
+      totalPipeline,
+      totalWon,
+      avgCpl: totalLeads > 0 ? totalCost / totalLeads : null,
+      avgCpmql: totalMqls > 0 ? totalCost / totalMqls : null,
+      overallRoi: totalCost > 0 ? totalPipeline / totalCost : null,
+    };
+  }, [breakdown, byId]);
+
+  return (
+    <div className="p-8 space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold text-charcoal">
+            Marketing Funnel: Spend
+          </h1>
+          <p className="mt-1 text-sm text-slate-muted">
+            Cost per lead, cost per MQL, and first-touch ROI by channel.
+            Date-range budgets are prorated to the selected period.
+          </p>
+        </div>
+        <PeriodSelector
+          year={year}
+          filter={filter}
+          yearOptions={yearOptions}
+          onYearChange={onYearChange}
+          onFilterChange={onFilterChange}
+          regions={regions}
+          onRegionsChange={onRegionsChange}
+        />
+      </header>
+
+      {/* Summary KPI tiles. ROI tile uses the overall ratio of
+          pipeline-to-spend; CPL and CPMQL use the period's total
+          spend divided by total leads / total MQLs. */}
+      <section className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        <KpiCard label="Total Spend" value={fmtUsd(totals.totalCost)} />
+        <KpiCard
+          label="Total Leads"
+          value={totals.totalLeads.toLocaleString()}
+        />
+        <KpiCard
+          label="Avg CPL"
+          value={totals.avgCpl === null ? '—' : fmtUsd(totals.avgCpl)}
+        />
+        <KpiCard
+          label="Avg CPMQL"
+          value={totals.avgCpmql === null ? '—' : fmtUsd(totals.avgCpmql)}
+        />
+        <KpiCard label="Total Pipeline" value={fmtUsd(totals.totalPipeline)} />
+        <KpiCard label="Total Won" value={fmtUsd(totals.totalWon)} />
+        <KpiCard
+          label="Overall ROI"
+          value={
+            totals.overallRoi === null ? '—' : fmtPct1(totals.overallRoi)
+          }
+        />
+      </section>
+
+      <div className="overflow-x-auto border border-border rounded-lg bg-bg">
+        <table className="min-w-full text-sm">
+          <thead className="bg-muted/40 text-charcoal">
+            <tr>
+              <th className="text-left px-3 py-2 font-medium">Channel</th>
+              <th className="text-right px-3 py-2 font-medium">Cost</th>
+              <th className="text-right px-3 py-2 font-medium">Leads</th>
+              <th className="text-right px-3 py-2 font-medium">CPL</th>
+              <th className="text-right px-3 py-2 font-medium">MQLs</th>
+              <th className="text-right px-3 py-2 font-medium">CPMQL</th>
+              <th className="text-right px-3 py-2 font-medium">First-Touch Opps</th>
+              <th className="text-right px-3 py-2 font-medium">Pipeline $</th>
+              <th className="text-right px-3 py-2 font-medium">Won $</th>
+              <th className="text-right px-3 py-2 font-medium">ROI</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orderedRows.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={10}
+                  className="px-3 py-6 text-sm text-slate-muted italic text-center"
+                >
+                  No channels configured.
+                </td>
+              </tr>
+            ) : (
+              orderedRows.map(({ row, ancestors }) => {
+                if (collapse.isHiddenByAncestors(ancestors)) return null;
+                const isCollapsed =
+                  row.isParent && collapse.isCollapsed(row.channelId);
+                const paddingLeft = 4 + (row.depth - 1) * 24;
+                const bg =
+                  row.depth === 1
+                    ? 'bg-bg'
+                    : row.depth === 2
+                      ? 'bg-muted/30'
+                      : 'bg-muted/50';
+                return (
+                  <tr
+                    key={row.channelId}
+                    className={`${bg} border-t border-border`}
+                  >
+                    <td
+                      className={
+                        'px-3 py-1.5 whitespace-nowrap ' +
+                        (row.depth === 1
+                          ? 'font-medium text-charcoal'
+                          : 'text-charcoal')
+                      }
+                      style={{ paddingLeft }}
+                    >
+                      {row.isParent ? (
+                        <button
+                          type="button"
+                          onClick={() => collapse.toggle(row.channelId)}
+                          aria-label={isCollapsed ? 'Expand' : 'Collapse'}
+                          className="inline-flex items-center justify-center w-5 h-5 mr-1 text-slate-muted hover:text-charcoal align-middle"
+                        >
+                          <span className="text-[10px]">
+                            {isCollapsed ? '▶' : '▼'}
+                          </span>
+                        </button>
+                      ) : row.depth === 1 ? (
+                        // Top-level leaves (e.g. Sales) reserve the
+                        // chevron-sized space so their names align
+                        // with sibling parents.
+                        <span
+                          className="inline-block w-5 h-5 mr-1 align-middle"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      {row.channelName}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {fmtUsdCompact(row.allocatedCost)}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {row.leads}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-slate-muted">
+                      {row.costPerLead === null
+                        ? '—'
+                        : fmtUsd(row.costPerLead)}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {row.mqls}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-slate-muted">
+                      {row.costPerMql === null
+                        ? '—'
+                        : fmtUsd(row.costPerMql)}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {row.firstTouchOpps}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {fmtUsdCompact(row.pipelineAmount)}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">
+                      {fmtUsdCompact(row.wonAmount)}
+                    </td>
+                    <td
+                      className={
+                        'px-3 py-1.5 text-right tabular-nums ' +
+                        (row.roi !== null && row.roi >= 1
+                          ? 'text-success'
+                          : row.roi !== null && row.roi < 1
+                            ? 'text-danger'
+                            : 'text-slate-muted')
+                      }
+                    >
+                      {row.roi === null ? '—' : fmtPct1(row.roi)}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="text-xs text-slate-muted italic">
+        Costs prorate by inclusive day overlap of the budget date range with
+        the selected period. Sub-channels under a parent-cost channel
+        inherit a proportional slice of the parent's cost based on their
+        lead share. Edit budgets on the Channels page.
+      </p>
+    </div>
+  );
+}
+
+function KpiCard({ label, value }: { label: string; value: string }) {
+  return (
+    <ChartCard title={label}>
+      <div className="text-2xl font-semibold text-charcoal tabular-nums">
+        {value}
+      </div>
+    </ChartCard>
+  );
+}

@@ -165,6 +165,28 @@ CREATE INDEX idx_touches_attribution ON attribution_touches(attribution_id);
 CREATE INDEX idx_touches_channel ON attribution_touches(channel_id);
 
 -- =============================================================
+-- Campaign costs (date-range budgets per channel)
+-- =============================================================
+-- One row per contract / budget allocation. Cost is pro-rated to the
+-- selected period at read time so contracts spanning quarter
+-- boundaries split correctly. Multiple rows per channel are allowed.
+
+CREATE TABLE campaign_costs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel_id UUID NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount >= 0),
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CHECK (end_date >= start_date)
+);
+
+CREATE INDEX idx_campaign_costs_channel ON campaign_costs (channel_id);
+CREATE INDEX idx_campaign_costs_dates ON campaign_costs (start_date, end_date);
+
+-- =============================================================
 -- Funnel projections (manually entered, not computed)
 -- =============================================================
 
@@ -301,6 +323,9 @@ CREATE TRIGGER set_timestamp_leads BEFORE UPDATE ON leads
 CREATE TRIGGER set_timestamp_attributions BEFORE UPDATE ON attributions
   FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
+CREATE TRIGGER set_timestamp_campaign_costs BEFORE UPDATE ON campaign_costs
+  FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
 -- =============================================================
 -- Row Level Security
 -- =============================================================
@@ -311,6 +336,7 @@ ALTER TABLE channels                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE leads                   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attributions            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attribution_touches     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE campaign_costs          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE funnel_projections      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE funnel_actuals          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cell_comments           ENABLE ROW LEVEL SECURITY;
@@ -322,7 +348,7 @@ DECLARE
   t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY[
-    'channels','leads','attributions','attribution_touches',
+    'channels','leads','attributions','attribution_touches','campaign_costs',
     'funnel_projections','funnel_actuals','cell_comments','cell_links',
     'outreach_snapshots'
   ]
@@ -342,6 +368,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE leads;
 ALTER PUBLICATION supabase_realtime ADD TABLE channels;
 ALTER PUBLICATION supabase_realtime ADD TABLE attributions;
 ALTER PUBLICATION supabase_realtime ADD TABLE attribution_touches;
+ALTER PUBLICATION supabase_realtime ADD TABLE campaign_costs;
 ALTER PUBLICATION supabase_realtime ADD TABLE funnel_projections;
 ALTER PUBLICATION supabase_realtime ADD TABLE funnel_actuals;
 ALTER PUBLICATION supabase_realtime ADD TABLE outreach_snapshots;

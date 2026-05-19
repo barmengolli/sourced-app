@@ -1,16 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Channel } from '../../types/db';
+import type { CampaignCost, Channel } from '../../types/db';
 import {
   descendantIds,
   type UseChannelMutationsResult,
 } from '../../hooks/useChannelMutations';
+import type { UseCampaignCostsResult } from '../../hooks/useCampaignCosts';
 import MergePicker from './MergePicker';
 import MovePicker from './MovePicker';
+import BudgetEditor from './BudgetEditor';
 
 interface ChannelManagerProps {
   channels: Channel[];
   leadCounts: Map<string, number>;
   mutations: UseChannelMutationsResult;
+  // Budget editing extras. costs is the full list; the row component
+  // filters to its own channel_id. costsHook is the same handle so
+  // BudgetEditor can call insert / update / deleteCost.
+  costs: CampaignCost[];
+  costsHook: UseCampaignCostsResult;
+  budgetYear: number;
 }
 
 interface RowMeta {
@@ -94,6 +102,11 @@ interface ChannelRowProps {
   moveOpen: boolean;
   onOpenMove: () => void;
   onCloseMove: () => void;
+  budgetOpen: boolean;
+  onToggleBudget: () => void;
+  costsForChannel: CampaignCost[];
+  costsHook: UseCampaignCostsResult;
+  budgetYear: number;
 }
 
 function ChannelRow({
@@ -106,6 +119,11 @@ function ChannelRow({
   moveOpen,
   onOpenMove,
   onCloseMove,
+  budgetOpen,
+  onToggleBudget,
+  costsForChannel,
+  costsHook,
+  budgetYear,
 }: ChannelRowProps) {
   const {
     channel,
@@ -315,6 +333,14 @@ function ChannelRow({
             ✎
           </IconButton>
           <IconButton
+            label={budgetOpen ? 'Hide budgets' : 'Edit budgets'}
+            disabled={busy}
+            onClick={onToggleBudget}
+            active={budgetOpen}
+          >
+            $
+          </IconButton>
+          <IconButton
             label={mergeDisabledReason ?? 'Merge into another channel'}
             disabled={Boolean(mergeDisabledReason) || busy}
             onClick={mergeOpen ? onCloseMerge : onOpenMerge}
@@ -377,6 +403,27 @@ function ChannelRow({
           }}
           onCancel={onCloseMove}
         />
+      )}
+
+      {budgetOpen && (
+        <div
+          className="mt-1 mb-2 mr-3 p-3 border border-border rounded-md bg-bg space-y-2"
+          style={{ marginLeft: 12 + (meta.depth - 1) * 24 }}
+        >
+          <p className="text-xs text-slate-muted">
+            Budgets for{' '}
+            <span className="font-medium text-charcoal">
+              {meta.channel.name}
+            </span>
+          </p>
+          <BudgetEditor
+            channelId={meta.channel.id}
+            channelName={meta.channel.name}
+            costs={costsForChannel}
+            hook={costsHook}
+            defaultYear={budgetYear}
+          />
+        </div>
       )}
 
       {confirmingPromote && (
@@ -477,14 +524,31 @@ export default function ChannelManager({
   channels,
   leadCounts,
   mutations,
+  costs,
+  costsHook,
+  budgetYear,
 }: ChannelManagerProps) {
   const [mergeOpenFor, setMergeOpenFor] = useState<string | null>(null);
   const [moveOpenFor, setMoveOpenFor] = useState<string | null>(null);
+  const [budgetOpenFor, setBudgetOpenFor] = useState<string | null>(null);
 
   const rows = useMemo(
     () => buildOrderedRows(channels, leadCounts),
     [channels, leadCounts],
   );
+
+  // Pre-bucket costs by channel_id so each row only re-derives its
+  // own slice. Realtime echoes recompute the whole map; fine at N
+  // budgets (small).
+  const costsByChannel = useMemo(() => {
+    const m = new Map<string, CampaignCost[]>();
+    for (const c of costs) {
+      const arr = m.get(c.channel_id) ?? [];
+      arr.push(c);
+      m.set(c.channel_id, arr);
+    }
+    return m;
+  }, [costs]);
 
   const summary = useMemo(() => {
     const parents = channels.filter((c) => !c.parent_channel_id).length;
@@ -532,6 +596,15 @@ export default function ChannelManager({
               setMergeOpenFor(null);
             }}
             onCloseMove={() => setMoveOpenFor(null)}
+            budgetOpen={budgetOpenFor === meta.channel.id}
+            onToggleBudget={() =>
+              setBudgetOpenFor((prev) =>
+                prev === meta.channel.id ? null : meta.channel.id,
+              )
+            }
+            costsForChannel={costsByChannel.get(meta.channel.id) ?? []}
+            costsHook={costsHook}
+            budgetYear={budgetYear}
           />
         ))}
       </div>
