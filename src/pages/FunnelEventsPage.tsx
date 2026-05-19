@@ -22,6 +22,8 @@ import {
 } from 'recharts';
 import { useLeads } from '../hooks/useLeads';
 import { useChannels } from '../hooks/useChannels';
+import { useAttributions } from '../hooks/useAttributions';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import {
   computeEventActivations,
   type EventActivationCounts,
@@ -67,15 +69,33 @@ export default function FunnelEventsPage({
 }: FunnelEventsPageProps) {
   const { leads } = useLeads();
   const channels = useChannels();
+  // Only consumed by the year-selector derivation below; this page's
+  // table doesn't read attributions or budgets.
+  const attributionsHook = useAttributions();
+  const costsHook = useCampaignCosts();
 
   const yearOptions = useMemo(() => {
+    // Unified derivation: any year touched by a lead, attribution, or
+    // budget surfaces here. See FunnelSpendPage for the reference
+    // pattern.
     const years = new Set<number>([new Date().getFullYear()]);
     for (const l of leads) {
       const sourced = quarterOfIsoDate(l.marketing_sourced_date);
       if (sourced) years.add(sourced.year);
+      for (const h of l.stage_history ?? []) {
+        const q = quarterOfIsoDate(h.entered_at);
+        if (q) years.add(q.year);
+      }
+    }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
     }
     return [...years].sort((a, b) => a - b);
-  }, [leads]);
+  }, [leads, attributionsHook.attributions, costsHook.costs]);
 
   const rows: EventActivationCounts[] = useMemo(
     () =>
