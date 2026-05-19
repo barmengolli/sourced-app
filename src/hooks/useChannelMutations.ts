@@ -15,9 +15,12 @@ export interface UseChannelMutationsResult {
   deleteAndPromoteChildren: (id: string) => Promise<{ promoted: number }>;
   // Create a new channel at the bottom of its sibling group. Returns
   // the new row's id so the caller can focus it or scroll to it.
+  // `year` drives the attribution-modal year filter: pass null for
+  // evergreen channels that should appear in every year's dropdown.
   create: (
     name: string,
     parentChannelId: string | null,
+    year: number | null,
   ) => Promise<{ id: string }>;
 }
 
@@ -383,6 +386,7 @@ export function useChannelMutations(channels: Channel[]): UseChannelMutationsRes
     async (
       name: string,
       parentChannelId: string | null,
+      year: number | null,
     ): Promise<{ id: string }> => {
       const trimmed = name.trim();
       if (!trimmed) throw new Error('Name cannot be empty');
@@ -424,6 +428,7 @@ export function useChannelMutations(channels: Channel[]): UseChannelMutationsRes
         .insert({
           name: trimmed,
           parent_channel_id: parentChannelId,
+          year,
           display_order,
           hidden: false,
         })

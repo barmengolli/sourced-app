@@ -39,27 +39,45 @@ export function ChannelSelect({
   onChange,
   disabled,
   placeholder,
+  filterYear,
 }: {
   channels: Channel[];
   value: string;
   onChange: (id: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  // When provided, the dropdown lists only channels whose own `year`
+  // matches OR is NULL (evergreen). Empty filter results fall back to
+  // the full list with a small warning note above the select.
+  filterYear?: number | null;
 }) {
-  const groups = useMemo(() => {
-    const tops = channels
-      .filter((c) => !c.parent_channel_id)
+  const { groups, fellBack } = useMemo(() => {
+    // Filter set: a channel passes when its year is null (evergreen)
+    // or matches the filterYear. When filterYear is undefined/null,
+    // every channel passes.
+    const allowed =
+      typeof filterYear === 'number'
+        ? channels.filter((c) => c.year == null || c.year === filterYear)
+        : channels;
+    const idSet = new Set(allowed.map((c) => c.id));
+    // Top-level for the filtered view = no parent OR parent isn't in
+    // the filtered set (orphan promotion: a 2025 sub-channel under a
+    // filtered-out 2026 parent surfaces as its own root so it stays
+    // reachable).
+    const tops = allowed
+      .filter((c) => !c.parent_channel_id || !idSet.has(c.parent_channel_id))
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name));
     const childrenByParent = new Map<string, Channel[]>();
-    for (const c of channels) {
+    for (const c of allowed) {
       if (!c.parent_channel_id) continue;
+      if (!idSet.has(c.parent_channel_id)) continue;
       const arr = childrenByParent.get(c.parent_channel_id) ?? [];
       arr.push(c);
       childrenByParent.set(c.parent_channel_id, arr);
     }
 
-    return tops.map((top) => {
+    const builtGroups = tops.map((top) => {
       const flat: { id: string; name: string; depth: number }[] = [];
       const visit = (node: Channel, depth: number) => {
         const kids = (childrenByParent.get(node.id) ?? [])
@@ -82,15 +100,59 @@ export function ChannelSelect({
       visit(top, 0);
       return { topName: top.name, options: flat };
     });
-  }, [channels]);
+
+    // Year filter active but yielded nothing? Re-run the whole build
+    // against the full channel set so the dropdown stays usable, and
+    // flag fellBack so the wrapper can surface a helper note.
+    const hasAny = builtGroups.some((g) => g.options.length > 0);
+    if (typeof filterYear === 'number' && !hasAny) {
+      const allTops = channels
+        .filter((c) => !c.parent_channel_id)
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const allChildrenByParent = new Map<string, Channel[]>();
+      for (const c of channels) {
+        if (!c.parent_channel_id) continue;
+        const arr = allChildrenByParent.get(c.parent_channel_id) ?? [];
+        arr.push(c);
+        allChildrenByParent.set(c.parent_channel_id, arr);
+      }
+      const fallbackGroups = allTops.map((top) => {
+        const flat: { id: string; name: string; depth: number }[] = [];
+        const visit = (node: Channel, depth: number) => {
+          const kids = (allChildrenByParent.get(node.id) ?? [])
+            .slice()
+            .sort((a, b) => a.name.localeCompare(b.name));
+          if (kids.length === 0) {
+            flat.push({ id: node.id, name: node.name, depth });
+            return;
+          }
+          flat.push({ id: node.id, name: node.name, depth });
+          for (const k of kids) visit(k, depth + 1);
+        };
+        visit(top, 0);
+        return { topName: top.name, options: flat };
+      });
+      return { groups: fallbackGroups, fellBack: true };
+    }
+
+    return { groups: builtGroups, fellBack: false };
+  }, [channels, filterYear]);
 
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      disabled={disabled}
-      className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
-    >
+    <div className="space-y-1">
+      {fellBack && (
+        <p className="text-xs text-warning">
+          No channels for {filterYear}. Showing all channels. (Tip:
+          create one on the Channels page.)
+        </p>
+      )}
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+      >
       <option value="">{placeholder ?? 'Select a channel'}</option>
       {groups.map((g) => (
         <optgroup key={g.topName} label={g.topName}>
@@ -102,7 +164,8 @@ export function ChannelSelect({
           ))}
         </optgroup>
       ))}
-    </select>
+      </select>
+    </div>
   );
 }
 
@@ -145,6 +208,13 @@ export default function CreateHPPModal({
   const [err, setErr] = useState<string | null>(null);
 
   const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
+  // Drive the channel dropdown's year filter from the stage date. Each
+  // touch sits at the same year as the HPP, so all ChannelSelects in
+  // this modal share the same filter.
+  const filterYear = useMemo<number | undefined>(() => {
+    const y = parseInt(stageEnteredAt.slice(0, 4), 10);
+    return Number.isFinite(y) ? y : undefined;
+  }, [stageEnteredAt]);
 
   const valid =
     label.trim().length > 0 &&
@@ -293,6 +363,7 @@ export default function CreateHPPModal({
                 value={firstChannelId}
                 onChange={setFirstChannelId}
                 disabled={busy}
+                filterYear={filterYear}
               />
             </Field>
             <Field label="HPP entered on (required)">
@@ -355,6 +426,7 @@ export default function CreateHPPModal({
                           )
                         }
                         disabled={busy}
+                        filterYear={filterYear}
                       />
                       <button
                         type="button"

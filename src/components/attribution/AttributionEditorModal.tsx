@@ -103,6 +103,13 @@ export default function AttributionEditorModal({
   }, [existingTouches]);
 
   const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
+  // Drive every ChannelSelect in this modal (main row + per-touch)
+  // from the stage's entered-on date so a 2025 attribution doesn't
+  // see 2026-only channels.
+  const filterYear = useMemo<number | undefined>(() => {
+    const y = parseInt(stageEnteredAt.slice(0, 4), 10);
+    return Number.isFinite(y) ? y : undefined;
+  }, [stageEnteredAt]);
 
   if (!attribution) {
     return (
@@ -261,6 +268,7 @@ export default function AttributionEditorModal({
                 value={channelId}
                 onChange={setChannelId}
                 disabled={busy}
+                filterYear={filterYear}
               />
             </Field>
             <Field label="Stage">
@@ -341,6 +349,7 @@ export default function AttributionEditorModal({
                           )
                         }
                         disabled={busy}
+                        filterYear={filterYear}
                       />
                       <button
                         type="button"

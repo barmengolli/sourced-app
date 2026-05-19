@@ -283,6 +283,17 @@ function ChannelRow({
               {channel.name}
             </button>
           )}
+          {/* Year pill, evergreen channels (null year) show nothing.
+              Edit-via-pill is out of scope; users can rename to a
+              prefixed name or run SQL if they need to change it. */}
+          {channel.year != null && (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded bg-muted text-slate-muted tabular-nums"
+              title="Year — drives the attribution-modal channel filter"
+            >
+              {channel.year}
+            </span>
+          )}
         </div>
 
         <div className="text-xs text-slate-muted w-20 text-right tabular-nums">
@@ -503,9 +514,20 @@ function CreateChannelForm({
 }) {
   const [name, setName] = useState('');
   const [parentId, setParentId] = useState<string>('');
+  // Year picker: '' = evergreen (year column stays NULL), else the
+  // numeric year as a string. Default to current calendar year since
+  // that's overwhelmingly the common case.
+  const [year, setYear] = useState<string>(() =>
+    String(new Date().getFullYear()),
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const yearOptions = useMemo(() => {
+    const y = new Date().getFullYear();
+    return [y - 1, y, y + 1];
+  }, []);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -553,7 +575,12 @@ function CreateChannelForm({
     setBusy(true);
     setErr(null);
     try {
-      await mutations.create(trimmed, parentId === '' ? null : parentId);
+      const yearArg = year === '' ? null : parseInt(year, 10);
+      await mutations.create(
+        trimmed,
+        parentId === '' ? null : parentId,
+        Number.isFinite(yearArg) ? yearArg : null,
+      );
       setName('');
       // Keep parentId so the user can rapid-fire create siblings.
       if (!keepOpen) onClose();
@@ -599,6 +626,20 @@ function CreateChannelForm({
           {dropdownOptions.map((o) => (
             <option key={o.id} value={o.id}>
               {o.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={year}
+          onChange={(e) => setYear(e.target.value)}
+          disabled={busy}
+          title="Year — controls which year's attribution dropdowns this channel appears in"
+          className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
+        >
+          <option value="">Evergreen (no year)</option>
+          {yearOptions.map((y) => (
+            <option key={y} value={y}>
+              {y}
             </option>
           ))}
         </select>

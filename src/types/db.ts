@@ -56,6 +56,10 @@ export interface Channel {
   id: string;
   name: string;
   parent_channel_id?: string | null;
+  // NULL = evergreen (not tied to a specific year). Attribution
+  // modals filter their channel dropdown by this column so a 2025
+  // deal can pick from 2025 channels + evergreens.
+  year?: number | null;
   display_order: number;
   hidden: boolean;
   created_at: string;

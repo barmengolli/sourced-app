@@ -18,6 +18,10 @@ CREATE TABLE channels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   parent_channel_id UUID REFERENCES channels(id) ON DELETE SET NULL,
+  -- NULL = evergreen (not tied to a specific year). Drives the
+  -- attribution modals' channel filter so a 2025 deal can pick from
+  -- 2025 channels + evergreens.
+  year INTEGER,
   display_order INTEGER DEFAULT 0,
   hidden BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -25,6 +29,7 @@ CREATE TABLE channels (
 );
 
 CREATE INDEX idx_channels_parent ON channels(parent_channel_id);
+CREATE INDEX idx_channels_year ON channels (year);
 
 -- No base seed. SFDC's Parent Campaign / Campaign Name columns populate the
 -- channel tree on first import.
