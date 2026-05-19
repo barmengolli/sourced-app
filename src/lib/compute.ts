@@ -138,10 +138,23 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     });
   }
 
+  // Shared dedupe-key shape for the "compute pass wins, funnel_actuals
+  // is fallback" pattern below. Used by both the leads pass (lead/mql)
+  // and the attribution pass (hpp/opp/pursuit/closeWon/closeLost).
+  const attribKey = (cid: string, y: number, p: number, s: string): string =>
+    `${cid}\x1f${y}\x1f${p}\x1f${s}`;
+
   // 2. Lead pass: bucket each lead's lead-stage and (optional) mql-stage
   //    into its source channel's own counts. Region filter is applied at
   //    the top of each iteration so a filtered-out lead doesn't contribute
   //    to grid totals OR to the unassigned count.
+  //
+  //    Cells covered here populate handledByLeads so the manualActuals
+  //    fallback below knows not to also add a funnel_actuals lead/mql
+  //    row for the same (channel, year, period, stage) — without the
+  //    dedupe, 2025-style fallback rows would stack on top of real lead
+  //    counts in years where both exist.
+  const handledByLeads = new Set<string>();
   let unassignedLeadCount = 0;
   for (const l of leads) {
     if (!regionMatches(l.region, regions)) continue;
@@ -155,6 +168,9 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
         if (row) {
           const cell = row.cells.lead;
           cell.actual = (cell.actual ?? 0) + 1;
+          handledByLeads.add(
+            attribKey(l.source_channel_id, leadBucket.year, leadBucket.quarter, 'lead'),
+          );
         }
       }
     }
@@ -168,25 +184,25 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
           if (row) {
             const cell = row.cells.mql;
             cell.actual = (cell.actual ?? 0) + 1;
+            handledByLeads.add(
+              attribKey(l.source_channel_id, mqlBucket.year, mqlBucket.quarter, 'mql'),
+            );
           }
         }
       }
     }
   }
 
-  // 3. Attribution-stage actuals (HPP / Opp / Pursuit / CloseWon).
+  // 3. Attribution-stage actuals (HPP / Opp / Pursuit / CloseWon / CloseLost).
   //
-  //    Prefer count(attributions where channel_id, year, period_index,
-  //    stage_key match) over funnel_actuals when one or more attribution
-  //    rows exist for that exact cell. Fall back to funnel_actuals only
-  //    when no attribution covers the cell — this keeps the old cell-edit
-  //    path working through the migration window.
-  //
-  //    M8 cleanup note: once teams commit to attribution-only data entry,
-  //    drop the manualActuals fallback (and useFunnelActuals + the
-  //    funnel_actuals table itself can be retired).
-  const attribKey = (cid: string, y: number, p: number, s: string): string =>
-    `${cid}\x1f${y}\x1f${p}\x1f${s}`;
+  //    Two dedupe patterns flow into the manualActuals fallback below:
+  //    - For HPP+ stages, the attribution pass wins; funnel_actuals
+  //      rows for the same cell are skipped.
+  //    - For lead/mql stages, the leads pass above wins; funnel_actuals
+  //      rows for the same cell are skipped. Historical-year backfills
+  //      (e.g. 2025 pre-Sourced) typically have funnel_actuals lead/mql
+  //      rows AND no leads, so the dedupe is a no-op in that case and
+  //      the fallback row supplies the count.
 
   // Count attributions per (channel, year, period, stage). One attribution row
   // contributes 1 to its leaf channel's stage cell. Channel rollup to parents
@@ -206,17 +222,17 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     );
   }
 
-  // Manual fallback: only contribute when no attribution covers this exact
-  // (channel, year, period, stage) cell.
+  // Manual fallback: only contribute when no compute pass already covers
+  // this exact (channel, year, period, stage) cell. For HPP+ that means
+  // attributions win; for lead/mql that means the leads pass wins.
   for (const m of manualActuals) {
     if (m.actual === null || m.actual === undefined) continue;
     const bucket = { year: m.year, quarter: m.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
-    if (
-      handledByAttribution.has(
-        attribKey(m.channel_id, m.year, m.period_index, m.stage_key),
-      )
-    ) {
+    const key = attribKey(m.channel_id, m.year, m.period_index, m.stage_key);
+    if (m.stage_key === 'lead' || m.stage_key === 'mql') {
+      if (handledByLeads.has(key)) continue;
+    } else if (handledByAttribution.has(key)) {
       continue;
     }
     const row = rowMap.get(m.channel_id);

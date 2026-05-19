@@ -77,7 +77,12 @@ export interface FunnelActual {
   channel_id: string;
   year: number;
   period_index: PeriodIndex;
-  stage_key: AttributionStageKey;
+  // Matches the relaxed DB CHECK: HPP+ remains the primary case, but
+  // 'lead' and 'mql' rows are valid as historical-year fallbacks
+  // (e.g. 2025 pre-Sourced). The compute layer treats lead/mql
+  // funnel_actuals as a fallback used only when no leads cover the
+  // same (channel, year, period) cell.
+  stage_key: StageKey | AttributionStageKey;
   actual: number | null;
   edited_at: string;
   edited_by?: string | null;
