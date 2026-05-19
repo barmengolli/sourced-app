@@ -4,6 +4,7 @@ import { useChannels } from '../hooks/useChannels';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import {
   computeGrid,
   computeMonthlyLeadsForYear,
@@ -42,8 +43,14 @@ export default function FunnelDashboardPage({
   const projectionsHook = useFunnelProjections();
   const actualsHook = useFunnelActuals();
   const attributionsHook = useAttributions();
+  // Only consumed by the year-selector derivation below; this page's
+  // charts don't read budgets directly.
+  const costsHook = useCampaignCosts();
 
   const yearOptions = useMemo(() => {
+    // Unified derivation: any year touched by a lead, attribution, or
+    // budget surfaces here. See FunnelSpendPage for the reference
+    // pattern.
     const years = new Set<number>([new Date().getFullYear()]);
     for (const l of leads) {
       const sourced = quarterOfIsoDate(l.marketing_sourced_date);
@@ -53,8 +60,15 @@ export default function FunnelDashboardPage({
         if (q) years.add(q.year);
       }
     }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
+    }
     return [...years].sort((a, b) => a - b);
-  }, [leads]);
+  }, [leads, attributionsHook.attributions, costsHook.costs]);
 
   const grid = useMemo(
     () =>
