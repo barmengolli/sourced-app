@@ -10,6 +10,8 @@ import type {
 } from '../../types/db';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type { UseAttributionTouchesResult } from '../../hooks/useAttributionTouches';
+import { STAGE_RANK } from '../../hooks/useAttributions';
+import { formatDate } from '../../lib/dates';
 import {
   FUNNEL_STAGE_LABELS,
   LOSS_ELIGIBLE_STAGES,
@@ -299,37 +301,83 @@ export default function OpportunitiesListModal({
                     />
                   )}
 
-                  {isConfirmingDelete && (
-                    <div className="ml-4 p-3 border border-border rounded-md bg-muted space-y-2">
-                      <p className="text-xs text-charcoal">
-                        Delete <span className="font-medium">{a.label}</span>?
-                        Touches will be removed too. This is irreversible.
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void wrap(a.id, async () => {
-                              await attributionsHook.deleteAttribution(a.id);
-                              setConfirmDeleteFor(null);
-                            })
-                          }
-                          disabled={isBusy}
-                          className="text-xs px-3 py-1 rounded bg-danger text-white"
-                        >
-                          {isBusy ? 'Deleting' : 'Confirm delete'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteFor(null)}
-                          disabled={isBusy}
-                          className="text-xs px-2 py-1 text-slate-muted hover:text-charcoal"
-                        >
-                          Cancel
-                        </button>
+                  {isConfirmingDelete && (() => {
+                    // Strictly-downstream rows that the cascade will
+                    // sweep alongside `a`. Empty when `a` has no
+                    // deal_id (cascade falls back to a single-row
+                    // delete) or when the current row is already
+                    // terminal.
+                    const downstreamRows =
+                      a.deal_id == null || a.deal_id === ''
+                        ? []
+                        : allAttributions
+                            .filter(
+                              (other) =>
+                                other.id !== a.id &&
+                                other.deal_id === a.deal_id &&
+                                STAGE_RANK[other.stage_key] >
+                                  STAGE_RANK[a.stage_key],
+                            )
+                            .sort(
+                              (x, y) =>
+                                STAGE_RANK[x.stage_key] -
+                                STAGE_RANK[y.stage_key],
+                            );
+                    return (
+                      <div className="ml-4 p-3 border border-border rounded-md bg-muted space-y-2">
+                        <p className="text-xs text-charcoal">
+                          Delete the{' '}
+                          <span className="font-medium">
+                            {FUNNEL_STAGE_LABELS[a.stage_key]}
+                          </span>{' '}
+                          stage of{' '}
+                          <span className="font-medium">
+                            {a.label || '(unnamed deal)'}
+                          </span>
+                          ?
+                          {downstreamRows.length > 0 && (
+                            <>
+                              {' '}This will also remove:{' '}
+                              {downstreamRows
+                                .map(
+                                  (r) =>
+                                    `${FUNNEL_STAGE_LABELS[r.stage_key]} (${
+                                      formatDate(r.stage_entered_at) ||
+                                      r.stage_entered_at
+                                    })`,
+                                )
+                                .join(', ')}
+                              .
+                            </>
+                          )}{' '}
+                          This is irreversible.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void wrap(a.id, async () => {
+                                await attributionsHook.deleteWithCascade(a.id);
+                                setConfirmDeleteFor(null);
+                              })
+                            }
+                            disabled={isBusy}
+                            className="text-xs px-3 py-1 rounded bg-danger text-white"
+                          >
+                            {isBusy ? 'Deleting' : 'Confirm delete'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteFor(null)}
+                            disabled={isBusy}
+                            className="text-xs px-2 py-1 text-slate-muted hover:text-charcoal"
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </li>
               );
             })
