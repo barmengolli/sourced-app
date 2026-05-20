@@ -33,6 +33,7 @@ import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
 import ChannelDistributionDonut from '../components/charts/ChannelDistributionDonut';
 import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
+import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
 import {
   VELOCITY_THRESHOLDS,
   type VelocityThreshold,
@@ -206,6 +207,17 @@ export default function FunnelVelocityPage({
   const [sortCol, setSortCol] = useState<SortColumn>('daysInCurrentStage');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
+  // Active deals table's inline Edit button opens AttributionEditorModal
+  // against the deal's current-stage row. Auto-replace semantics: a
+  // second Edit click while the modal is open swaps to the new deal
+  // (the same single-modal pattern Data Entry uses).
+  const [editingAttributionId, setEditingAttributionId] = useState<
+    string | null
+  >(null);
+  const onEditDeal = (currentAttributionId: string) => {
+    setEditingAttributionId(currentAttributionId);
+  };
+
   const sortedDeals = useMemo(() => {
     const copy = activeDeals.slice();
     const dir = sortDir === 'asc' ? 1 : -1;
@@ -333,7 +345,37 @@ export default function FunnelVelocityPage({
                     key={d.dealId}
                     className={i % 2 === 0 ? 'bg-bg' : 'bg-muted/40'}
                   >
-                    <td className="px-3 py-2 text-charcoal">{d.label}</td>
+                    <td className="px-3 py-2 text-charcoal">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => onEditDeal(d.currentAttributionId)}
+                          title="Edit deal"
+                          aria-label="Edit deal"
+                          className="inline-flex items-center justify-center w-6 h-6 rounded text-slate-muted hover:bg-muted hover:text-charcoal flex-shrink-0"
+                        >
+                          <span className="text-sm">✎</span>
+                        </button>
+                        {d.sfLink ? (
+                          <a
+                            href={d.sfLink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-indigo hover:underline truncate"
+                            title="Open in Salesforce"
+                          >
+                            {d.label}
+                          </a>
+                        ) : (
+                          <span
+                            className="text-charcoal truncate"
+                            title="No Salesforce link"
+                          >
+                            {d.label}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-3 py-2 text-slate-muted">
                       {d.account ?? '—'}
                     </td>
@@ -384,6 +426,16 @@ export default function FunnelVelocityPage({
           filter={filter}
         />
       </ChartCard>
+
+      {editingAttributionId && (
+        <AttributionEditorModal
+          attributionId={editingAttributionId}
+          channels={channels}
+          attributionsHook={attributionsHook}
+          touchesHook={touchesHook}
+          onClose={() => setEditingAttributionId(null)}
+        />
+      )}
     </div>
   );
 }
