@@ -20,7 +20,8 @@ import {
   FUNNEL_STAGE_LABELS,
   MANUAL_ACTUAL_STAGES,
 } from '../../constants/funnelStages';
-import { describePeriodFromIso } from '../../lib/dates';
+import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
+import { validateDealStageDates } from '../../lib/dealStageValidation';
 
 interface AttributionEditorModalProps {
   attributionId: string;
@@ -65,6 +66,18 @@ export default function AttributionEditorModal({
   const [stageEnteredAt, setStageEnteredAt] = useState<string>('');
   const [touches, setTouches] = useState<TouchDraft[]>([]);
 
+  // Other stage dates: one per non-primary stage. Pre-populated from
+  // the deal's existing attribution rows (if any) so the user sees
+  // the full chain in one modal. Edits across stages save in one
+  // submit: CREATE, UPDATE, or DELETE per stage based on whether the
+  // input has a value AND a row already exists for that stage.
+  const [otherHpp, setOtherHpp] = useState<string>('');
+  const [otherOpp, setOtherOpp] = useState<string>('');
+  const [otherPursuit, setOtherPursuit] = useState<string>('');
+  const [otherCloseWon, setOtherCloseWon] = useState<string>('');
+  const [otherCloseLost, setOtherCloseLost] = useState<string>('');
+  const [showOtherStages, setShowOtherStages] = useState(false);
+
   const maxDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const minDate = useMemo(() => {
     const d = new Date();
@@ -92,6 +105,43 @@ export default function AttributionEditorModal({
     setStageEnteredAt(attribution.stage_entered_at);
   }, [attribution]);
 
+  // The full set of attribution rows that share this deal_id, keyed
+  // by stage_key. Used both to pre-populate the "Other stage dates"
+  // inputs and to drive the CREATE/UPDATE/DELETE branching in submit.
+  // Singleton deals (no deal_id) get an empty map and the section
+  // suppresses itself.
+  const dealRowsByStage = useMemo(() => {
+    const map = new Map<AttributionStageKey, Attribution>();
+    if (!attribution || !attribution.deal_id) return map;
+    for (const r of attributionsHook.attributions) {
+      if (r.deal_id !== attribution.deal_id) continue;
+      map.set(r.stage_key, r);
+    }
+    return map;
+  }, [attribution, attributionsHook.attributions]);
+
+  const hasDealChain = Boolean(attribution?.deal_id);
+
+  // Pre-populate the other-stage inputs from any existing rows on the
+  // deal. Re-runs when the deal chain changes (e.g. another tab
+  // added a stage row via realtime).
+  useEffect(() => {
+    if (!attribution) return;
+    const dateFor = (k: AttributionStageKey): string => {
+      const row = dealRowsByStage.get(k);
+      if (!row) return '';
+      // Skip the primary row's own stage; that input lives in the
+      // primary section.
+      if (row.id === attribution.id) return '';
+      return row.stage_entered_at ?? '';
+    };
+    setOtherHpp(dateFor('hpp'));
+    setOtherOpp(dateFor('opp'));
+    setOtherPursuit(dateFor('pursuit'));
+    setOtherCloseWon(dateFor('closeWon'));
+    setOtherCloseLost(dateFor('closeLost'));
+  }, [attribution, dealRowsByStage]);
+
   useEffect(() => {
     setTouches(
       existingTouches.map((t) => ({
@@ -103,6 +153,57 @@ export default function AttributionEditorModal({
   }, [existingTouches]);
 
   const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
+
+  // Project the primary row's stage_key + date into the right slot
+  // and pull the rest from the other-stage inputs. validateDealStageDates
+  // doesn't care which input owns which slot — only that the
+  // collected dates per stage are chronological and don't double up
+  // on terminal stages.
+  const datesByStage = useMemo(() => {
+    const ds = {
+      hpp: otherHpp,
+      opp: otherOpp,
+      pursuit: otherPursuit,
+      closeWon: otherCloseWon,
+      closeLost: otherCloseLost,
+    };
+    ds[stageKey] = stageEnteredAt;
+    return ds;
+  }, [
+    stageKey,
+    stageEnteredAt,
+    otherHpp,
+    otherOpp,
+    otherPursuit,
+    otherCloseWon,
+    otherCloseLost,
+  ]);
+
+  const stageValidation = validateDealStageDates(datesByStage);
+
+  // Number of other-stage dates currently filled; powers the
+  // collapsed-section caption so state doesn't get lost behind the
+  // toggle.
+  const otherDatesFilledCount = [
+    stageKey === 'hpp' ? '' : otherHpp,
+    stageKey === 'opp' ? '' : otherOpp,
+    stageKey === 'pursuit' ? '' : otherPursuit,
+    stageKey === 'closeWon' ? '' : otherCloseWon,
+    stageKey === 'closeLost' ? '' : otherCloseLost,
+  ].filter(Boolean).length;
+
+  // Stage dropdown: a stage that already has a (different) row on
+  // this deal is disabled, because switching the primary row INTO
+  // that stage would collide with the existing one. The hint tells
+  // the user how to free up the slot.
+  const stageConflicts = useMemo(() => {
+    const s = new Set<AttributionStageKey>();
+    if (!attribution) return s;
+    for (const [k, row] of dealRowsByStage) {
+      if (row.id !== attribution.id) s.add(k);
+    }
+    return s;
+  }, [attribution, dealRowsByStage]);
 
   if (!attribution) {
     return (
@@ -127,7 +228,8 @@ export default function AttributionEditorModal({
     stageEnteredAt !== '' &&
     stageEnteredAt >= minDate &&
     stageEnteredAt <= maxDate &&
-    derivedPeriodLabel !== '';
+    derivedPeriodLabel !== '' &&
+    stageValidation.ok;
 
   const moveTouch = (idx: number, dir: -1 | 1) => {
     setTouches((prev) => {
@@ -141,6 +243,24 @@ export default function AttributionEditorModal({
 
   const submit = async () => {
     if (!valid) return;
+    // Defensive: refuse to save if every date input ended up empty.
+    // The primary `stageEnteredAt !== ''` check above already covers
+    // the common path, but if a future change loosens that, this
+    // catches "user cleared everything" with a clearer message.
+    const anyDateEntered = Boolean(
+      stageEnteredAt ||
+        otherHpp ||
+        otherOpp ||
+        otherPursuit ||
+        otherCloseWon ||
+        otherCloseLost,
+    );
+    if (!anyDateEntered) {
+      setErr(
+        'At least one stage must have a date. To remove the deal entirely, use Delete from the parent modal.',
+      );
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -168,6 +288,67 @@ export default function AttributionEditorModal({
           notes: t.notes.trim() || null,
         }));
       await touchesHook.setTouches(attributionId, newTouches);
+
+      // Other-stage rows: CREATE / UPDATE / DELETE per slot based on
+      // what was entered vs what already existed. Inherits the
+      // primary row's EDITED metadata for any new rows so a label
+      // correction made in the same Save lands consistently.
+      if (hasDealChain && attribution) {
+        const otherStages: Array<{
+          stage_key: AttributionStageKey;
+          iso: string;
+        }> = [];
+        const pushOther = (k: AttributionStageKey, iso: string) => {
+          if (k === stageKey) return; // primary row owns this slot
+          otherStages.push({ stage_key: k, iso });
+        };
+        pushOther('hpp', otherHpp);
+        pushOther('opp', otherOpp);
+        pushOther('pursuit', otherPursuit);
+        pushOther('closeWon', otherCloseWon);
+        pushOther('closeLost', otherCloseLost);
+
+        for (const { stage_key, iso } of otherStages) {
+          const existing = dealRowsByStage.get(stage_key);
+          if (iso && !existing) {
+            // CREATE: inherit primary's edited metadata.
+            const derived = quarterOfIsoDate(iso);
+            if (!derived) throw new Error(`Invalid ${stage_key} date`);
+            const newRow = await attributionsHook.create({
+              stage_key,
+              channel_id: channelId,
+              year: derived.year,
+              period_index: derived.quarter,
+              label: label.trim() || null,
+              account: account.trim() || null,
+              amount: parsedAmount,
+              sf_link: sfLink.trim() || null,
+              region,
+              deal_id: attribution.deal_id ?? null,
+              stage_entered_at: iso,
+            });
+            // Touch propagation: new downstream rows inherit the
+            // primary row's touch list (consistent with how Promote
+            // and the Create HPP bulk path work).
+            if (newTouches.length > 0) {
+              await touchesHook.setTouches(newRow.id, newTouches);
+            }
+          } else if (iso && existing) {
+            // UPDATE only when the date changed. Preserves any
+            // per-stage customization the user made earlier
+            // (channel, label, amount, region, touches).
+            if (existing.stage_entered_at !== iso) {
+              await attributionsHook.update(existing.id, {
+                stage_entered_at: iso,
+              });
+            }
+          } else if (!iso && existing) {
+            // DELETE: existing row was cleared.
+            await attributionsHook.deleteAttribution(existing.id);
+          }
+        }
+      }
+
       onClose();
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Save failed');
@@ -272,11 +453,29 @@ export default function AttributionEditorModal({
                 disabled={busy}
                 className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
               >
-                {MANUAL_ACTUAL_STAGES.map((s) => (
-                  <option key={s} value={s}>
-                    {FUNNEL_STAGE_LABELS[s]}
-                  </option>
-                ))}
+                {MANUAL_ACTUAL_STAGES.map((s) => {
+                  // Disable stages already occupied by a different
+                  // row on this deal — switching INTO that slot
+                  // would collide with the existing row. The user
+                  // can free it up by clearing the date in the
+                  // "Other stage dates" section first.
+                  const conflict = stageConflicts.has(s);
+                  return (
+                    <option
+                      key={s}
+                      value={s}
+                      disabled={conflict}
+                      title={
+                        conflict
+                          ? `Already exists on this deal. Clear the ${FUNNEL_STAGE_LABELS[s]} date below first.`
+                          : undefined
+                      }
+                    >
+                      {FUNNEL_STAGE_LABELS[s]}
+                      {conflict ? ' (occupied)' : ''}
+                    </option>
+                  );
+                })}
               </select>
             </Field>
             <Field label={`Entered ${FUNNEL_STAGE_LABELS[stageKey]} on (required)`}>
@@ -298,6 +497,98 @@ export default function AttributionEditorModal({
             </p>
           </section>
 
+          {/* Other stage dates — pre-populated from existing rows on
+              this deal. Lets the user edit/add/remove the full
+              attribution chain in one modal. Suppressed for
+              singleton attributions (no deal_id). */}
+          {hasDealChain && (
+            <section className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowOtherStages((v) => !v)}
+                className="w-full flex items-center justify-between text-left"
+                aria-expanded={showOtherStages}
+              >
+                <span className="text-xs font-medium text-slate-muted uppercase tracking-wide">
+                  Other stage dates
+                </span>
+                <span className="flex items-center gap-2 text-xs text-slate-muted">
+                  {!showOtherStages && (
+                    <span>
+                      {otherDatesFilledCount === 0
+                        ? 'Add stage dates'
+                        : `${otherDatesFilledCount} date${
+                            otherDatesFilledCount === 1 ? '' : 's'
+                          } set`}
+                    </span>
+                  )}
+                  <span className="text-[10px]">
+                    {showOtherStages ? '▼' : '▶'}
+                  </span>
+                </span>
+              </button>
+              {showOtherStages && (
+                <div className="space-y-2">
+                  {stageKey !== 'hpp' && (
+                    <OtherDateField
+                      label="HPP entered on"
+                      value={otherHpp}
+                      onChange={setOtherHpp}
+                      min={minDate}
+                      max={maxDate}
+                      disabled={busy}
+                    />
+                  )}
+                  {stageKey !== 'opp' && (
+                    <OtherDateField
+                      label="Opp entered on"
+                      value={otherOpp}
+                      onChange={setOtherOpp}
+                      min={minDate}
+                      max={maxDate}
+                      disabled={busy}
+                    />
+                  )}
+                  {stageKey !== 'pursuit' && (
+                    <OtherDateField
+                      label="Pursuit entered on"
+                      value={otherPursuit}
+                      onChange={setOtherPursuit}
+                      min={minDate}
+                      max={maxDate}
+                      disabled={busy}
+                    />
+                  )}
+                  {stageKey !== 'closeWon' && (
+                    <OtherDateField
+                      label="Close-Won entered on"
+                      value={otherCloseWon}
+                      onChange={setOtherCloseWon}
+                      min={minDate}
+                      max={maxDate}
+                      disabled={busy}
+                    />
+                  )}
+                  {stageKey !== 'closeLost' && (
+                    <OtherDateField
+                      label="Close-Lost entered on"
+                      value={otherCloseLost}
+                      onChange={setOtherCloseLost}
+                      min={minDate}
+                      max={maxDate}
+                      disabled={busy}
+                    />
+                  )}
+                  {stageValidation.error && (
+                    <p className="text-xs text-danger">
+                      {stageValidation.error}
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
           <section className="space-y-2">
             <h3 className="text-xs font-medium text-slate-muted uppercase tracking-wide flex items-center justify-between">
               <span>Touches ({touches.length})</span>
@@ -315,6 +606,10 @@ export default function AttributionEditorModal({
                 + Add touch
               </button>
             </h3>
+            <p className="text-xs text-slate-muted italic">
+              Touches apply to this stage. Other stages keep their own
+              touches.
+            </p>
             {touches.length === 0 ? (
               <p className="text-xs text-slate-muted italic">
                 No touches yet.
@@ -452,5 +747,46 @@ function Field({
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+// One row in the "Other stage dates" section: date input + an
+// inline "Will count as: Qx YYYY" hint when filled. Mirrors the
+// equivalent helper in CreateHPPModal so the two modals read the
+// same way at the field level.
+function OtherDateField({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  min: string;
+  max: string;
+  disabled?: boolean;
+}) {
+  const period = describePeriodFromIso(value);
+  return (
+    <Field label={label}>
+      <input
+        type="date"
+        value={value}
+        min={min}
+        max={max}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+      />
+      {value && (
+        <p className="text-xs text-slate-muted">
+          Will count as:{' '}
+          <span className="text-charcoal font-medium">{period || '—'}</span>
+        </p>
+      )}
+    </Field>
   );
 }
