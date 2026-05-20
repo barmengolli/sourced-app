@@ -176,10 +176,15 @@ export default function FunnelSpendPage({
     return out;
   }, [childrenByParent]);
 
-  // Summary KPIs across all rows in scope. Note that summing every
-  // row's allocatedCost would double-count when a parent's cost has
-  // been pushed down to its children; instead, sum each row's
-  // `cost` (direct only) which is double-count-free.
+  // Summary KPIs across all rows in scope. Parents now carry their
+  // subtree's rolled-up totals (see computeChannelSpend), so summing
+  // every row would double-count. Restrict the sum to leaves and read
+  // `allocatedCost` (which captures both direct cost and any
+  // parent-budget slice redistributed down to the leaf). This is
+  // correct for both shapes:
+  //   - Events shape: leaves carry their own direct costs.
+  //   - Content Syndication shape: leaves carry redistributed slices
+  //     that sum to the parent's budget.
   const totals = useMemo(() => {
     let totalCost = 0;
     let totalLeads = 0;
@@ -187,16 +192,13 @@ export default function FunnelSpendPage({
     let totalPipeline = 0;
     let totalWon = 0;
     for (const r of breakdown) {
-      totalCost += r.cost;
+      if (r.isParent) continue;
+      totalCost += r.allocatedCost;
       totalLeads += r.leads;
       totalMqls += r.mqls;
       totalPipeline += r.pipelineAmount;
       totalWon += r.wonAmount;
     }
-    // Avoid double-counting leads: the breakdown emits one row per
-    // channel including parents, and a parent's leads field is only
-    // its OWN directly-assigned leads (no rollup), so the sum above
-    // is already correct. Same for MQLs.
     void byId;
     return {
       totalCost,
@@ -206,7 +208,14 @@ export default function FunnelSpendPage({
       totalWon,
       avgCpl: totalLeads > 0 ? totalCost / totalLeads : null,
       avgCpmql: totalMqls > 0 ? totalCost / totalMqls : null,
-      overallRoi: totalCost > 0 ? totalPipeline / totalCost : null,
+      // ROI is won-based: pipeline dollars can still slip, so the
+      // conservative read is closed/won revenue ÷ spend.
+      overallRoi: totalCost > 0 ? totalWon / totalCost : null,
+      // Pipeline coverage = open pipeline ÷ spend. Surfaced as a
+      // tooltip on the ROI tile so the unrealized return is one hover
+      // away without taking up its own KPI slot.
+      pipelineCoverage:
+        totalCost > 0 ? totalPipeline / totalCost : null,
     };
   }, [breakdown, byId]);
 
@@ -256,6 +265,11 @@ export default function FunnelSpendPage({
           label="Overall ROI"
           value={
             totals.overallRoi === null ? '—' : fmtPct1(totals.overallRoi)
+          }
+          tooltip={
+            totals.pipelineCoverage === null
+              ? 'ROI = Total Won ÷ Total Spend. Pipeline coverage unavailable (no spend in scope).'
+              : `ROI = Total Won ÷ Total Spend. Pipeline coverage (Total Pipeline ÷ Total Spend) is ${fmtPct1(totals.pipelineCoverage)}.`
           }
         />
       </section>
@@ -335,7 +349,7 @@ export default function FunnelSpendPage({
                       {row.channelName}
                     </td>
                     <td className="px-3 py-1.5 text-right tabular-nums">
-                      {fmtUsdCompact(row.allocatedCost)}
+                      {fmtUsd(row.allocatedCost)}
                     </td>
                     <td className="px-3 py-1.5 text-right tabular-nums">
                       {row.leads}
@@ -392,10 +406,24 @@ export default function FunnelSpendPage({
   );
 }
 
-function KpiCard({ label, value }: { label: string; value: string }) {
+function KpiCard({
+  label,
+  value,
+  tooltip,
+}: {
+  label: string;
+  value: string;
+  tooltip?: string;
+}) {
   return (
     <ChartCard title={label}>
-      <div className="text-2xl font-semibold text-charcoal tabular-nums">
+      <div
+        className={
+          'text-2xl font-semibold text-charcoal tabular-nums' +
+          (tooltip ? ' cursor-help' : '')
+        }
+        title={tooltip}
+      >
         {value}
       </div>
     </ChartCard>

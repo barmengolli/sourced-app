@@ -1953,7 +1953,7 @@ export interface ChannelSpendBreakdown {
 
   costPerLead: number | null;     // null when leads = 0
   costPerMql: number | null;      // null when mqls = 0
-  roi: number | null;              // pipelineAmount / allocatedCost, null when cost = 0
+  roi: number | null;              // wonAmount / allocatedCost, null when cost = 0
 }
 
 export interface ComputeChannelSpendInput {
@@ -2292,7 +2292,10 @@ export function computeChannelSpend(
     const won = wonByChannel.get(channel.id) ?? 0;
     const cpl = leadsCount > 0 ? ac / leadsCount : null;
     const cpmql = mqlsCount > 0 ? ac / mqlsCount : null;
-    const roi = ac > 0 ? pipeline / ac : null;
+    // ROI is won-based, not pipeline-based: pipeline can deflate as
+    // deals fall through, and reporting unclosed dollars as "return"
+    // inflates channels that haven't actually paid back yet.
+    const roi = ac > 0 ? won / ac : null;
     out.push({
       channelId: channel.id,
       channelName: channel.name,
@@ -2311,5 +2314,64 @@ export function computeChannelSpend(
       roi,
     });
   }
+
+  // --- 9. Roll up sub-channel metrics to their parents.
+  //
+  // A parent's displayed value = sum of its direct children's (already
+  // rolled-up) values. We walk post-order so deeper subtrees aggregate
+  // before their ancestors. `cost` (direct only) is intentionally left
+  // alone so callers that sum direct cost across rows stay
+  // double-count-free; the displayed Cost column reads `allocatedCost`.
+  //
+  // Content Syndication case: parent.allocatedCost was already its
+  // directCost, and children's allocatedCost slices sum to that same
+  // directCost (because the redistribution loop above fully
+  // re-allocates the parent's budget). Overwriting parent.allocatedCost
+  // with sum-of-children yields the same number, so this is a no-op
+  // for that shape.
+  //
+  // Events case: parent.allocatedCost was 0 and children carry their
+  // own direct costs. After this pass, parent.allocatedCost equals the
+  // sum of its event children's spend, which is what the user expects
+  // when looking at the Events row.
+  const rowsById = new Map<string, ChannelSpendBreakdown>();
+  for (const r of out) rowsById.set(r.channelId, r);
+  const rolledUp = new Set<string>();
+  const rollupRow = (channelId: string): void => {
+    if (rolledUp.has(channelId)) return;
+    rolledUp.add(channelId);
+    const kids = childrenByParent.get(channelId) ?? [];
+    if (kids.length === 0) return; // leaf, nothing to do
+    for (const kid of kids) rollupRow(kid);
+    const r = rowsById.get(channelId);
+    if (!r) return;
+    let allocCost = 0;
+    let leads = 0;
+    let mqls = 0;
+    let opps = 0;
+    let pipe = 0;
+    let won = 0;
+    for (const kid of kids) {
+      const cr = rowsById.get(kid);
+      if (!cr) continue;
+      allocCost += cr.allocatedCost;
+      leads += cr.leads;
+      mqls += cr.mqls;
+      opps += cr.firstTouchOpps;
+      pipe += cr.pipelineAmount;
+      won += cr.wonAmount;
+    }
+    r.allocatedCost = allocCost;
+    r.leads = leads;
+    r.mqls = mqls;
+    r.firstTouchOpps = opps;
+    r.pipelineAmount = pipe;
+    r.wonAmount = won;
+    r.costPerLead = leads > 0 ? allocCost / leads : null;
+    r.costPerMql = mqls > 0 ? allocCost / mqls : null;
+    r.roi = allocCost > 0 ? won / allocCost : null;
+  };
+  for (const channel of channels) rollupRow(channel.id);
+
   return out;
 }
