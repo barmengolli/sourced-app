@@ -55,6 +55,12 @@ export interface UseAttributionsResult {
   create: (input: NewAttributionInput) => Promise<Attribution>;
   update: (id: string, patch: Partial<Attribution>) => Promise<void>;
   deleteAttribution: (id: string) => Promise<void>;
+  // Deletes the row AND any strictly-downstream rows on the same
+  // deal_id (e.g. deleting Opp also nukes Pursuit / Won / Lost). For
+  // rows without a deal_id, behaves identically to deleteAttribution.
+  // Touches cascade via the attribution_touches ON DELETE CASCADE
+  // foreign key, so this hook only deletes attribution rows.
+  deleteWithCascade: (id: string) => Promise<{ deletedIds: string[] }>;
   // Promote copies the source attribution into a new one at the next stage,
   // preserving deal_id and copying touches. Source is NOT deleted (history).
   // Promote takes only stage_entered_at; year + period_index are derived
@@ -79,6 +85,17 @@ const STAGE_NEXT: Record<AttributionStageKey, AttributionStageKey | null> = {
   pursuit: 'closeWon',
   closeWon: null,
   closeLost: null,
+};
+
+// Rank used by deleteWithCascade to identify "strictly-downstream"
+// rows. closeWon and closeLost share rank 4 because they're parallel
+// terminals — deleting one shouldn't sweep the other.
+export const STAGE_RANK: Record<AttributionStageKey, number> = {
+  hpp: 1,
+  opp: 2,
+  pursuit: 3,
+  closeWon: 4,
+  closeLost: 4,
 };
 
 // PostgREST default cap is 1000 rows; page until exhausted to support full set.
@@ -251,6 +268,56 @@ export function useAttributions(): UseAttributionsResult {
         console.error('Attribution delete failed', err);
         throw err;
       }
+    },
+    [],
+  );
+
+  // Delete a row plus every strictly-downstream row on the same
+  // deal_id. closeWon and closeLost share rank 4 so deleting one of
+  // them is a single-row delete (it has no downstream); deleting an
+  // upstream stage sweeps BOTH terminals if they exist.
+  //
+  // Single supabase DELETE with .in() over the collected ids so the
+  // operation is one round trip. attribution_touches cascades via
+  // its ON DELETE CASCADE foreign key, so we don't delete touches
+  // explicitly.
+  const deleteWithCascade = useCallback(
+    async (id: string): Promise<{ deletedIds: string[] }> => {
+      const before = attributionsRef.current;
+      const target = before.find((a) => a.id === id);
+      if (!target) {
+        // Already gone or wrong id — match the existing
+        // deleteAttribution behavior of throwing only on the
+        // backend error, not on a stale ref.
+        return { deletedIds: [] };
+      }
+
+      // Build the deletion set: the target row itself, plus every
+      // other row with the same deal_id and strictly-higher rank.
+      const ids = [id];
+      if (target.deal_id) {
+        const targetRank = STAGE_RANK[target.stage_key];
+        for (const a of before) {
+          if (a.id === id) continue;
+          if (a.deal_id !== target.deal_id) continue;
+          if (STAGE_RANK[a.stage_key] > targetRank) ids.push(a.id);
+        }
+      }
+
+      // Optimistic local update.
+      const idSet = new Set(ids);
+      setAttributions((prev) => prev.filter((a) => !idSet.has(a.id)));
+
+      const { error: err } = await supabase
+        .from('attributions')
+        .delete()
+        .in('id', ids);
+      if (err) {
+        setAttributions(before);
+        console.error('Attribution cascade delete failed', err);
+        throw err;
+      }
+      return { deletedIds: ids };
     },
     [],
   );
@@ -434,6 +501,7 @@ export function useAttributions(): UseAttributionsResult {
     create,
     update,
     deleteAttribution,
+    deleteWithCascade,
     promote,
     markLost,
   };
