@@ -5,6 +5,7 @@ import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
 import { useAttributionTouches } from '../hooks/useAttributionTouches';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import { computeGrid, type PeriodFilter } from '../lib/compute';
 import { currentQuarter, quarterOfIsoDate } from '../lib/dates';
 import type { AttributionStageKey, PeriodIndex } from '../types/db';
@@ -49,8 +50,15 @@ export default function FunnelDataEntryPage({
   const actualsHook = useFunnelActuals();
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
+  // Used only to widen the year selector below so a year that has a
+  // budget but no leads still shows up in the dropdown.
+  const costsHook = useCampaignCosts();
 
   const yearOptions = useMemo(() => {
+    // Unified derivation: any year touched by a lead, attribution,
+    // budget, actual, or projection surfaces in the dropdown. Lets
+    // historical-year backfills (e.g. 2025 pre-Sourced lead/MQL
+    // actuals seeded via funnel_actuals) be reachable here.
     const years = new Set<number>([new Date().getFullYear()]);
     for (const l of leads) {
       const sourced = quarterOfIsoDate(l.marketing_sourced_date);
@@ -60,8 +68,27 @@ export default function FunnelDataEntryPage({
         if (q) years.add(q.year);
       }
     }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
+    }
+    for (const a of actualsHook.actuals) {
+      years.add(a.year);
+    }
+    for (const p of projectionsHook.projections) {
+      years.add(p.year);
+    }
     return [...years].sort((a, b) => a - b);
-  }, [leads]);
+  }, [
+    leads,
+    attributionsHook.attributions,
+    costsHook.costs,
+    actualsHook.actuals,
+    projectionsHook.projections,
+  ]);
 
   const periodIndex = periodIndexFromFilter(filter);
 

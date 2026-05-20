@@ -4,6 +4,7 @@ import { useChannels } from '../hooks/useChannels';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import {
   computeGrid,
   computeMonthlyLeadsForYear,
@@ -42,8 +43,15 @@ export default function FunnelDashboardPage({
   const projectionsHook = useFunnelProjections();
   const actualsHook = useFunnelActuals();
   const attributionsHook = useAttributions();
+  // Used only to widen the year selector below; this page's charts
+  // don't read budgets directly.
+  const costsHook = useCampaignCosts();
 
   const yearOptions = useMemo(() => {
+    // Unified derivation: any year touched by a lead, attribution,
+    // budget, actual, or projection surfaces here. Includes
+    // historical-year backfills seeded into funnel_actuals /
+    // funnel_projections (e.g. 2025 pre-Sourced).
     const years = new Set<number>([new Date().getFullYear()]);
     for (const l of leads) {
       const sourced = quarterOfIsoDate(l.marketing_sourced_date);
@@ -53,8 +61,27 @@ export default function FunnelDashboardPage({
         if (q) years.add(q.year);
       }
     }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
+    }
+    for (const a of actualsHook.actuals) {
+      years.add(a.year);
+    }
+    for (const p of projectionsHook.projections) {
+      years.add(p.year);
+    }
     return [...years].sort((a, b) => a - b);
-  }, [leads]);
+  }, [
+    leads,
+    attributionsHook.attributions,
+    costsHook.costs,
+    actualsHook.actuals,
+    projectionsHook.projections,
+  ]);
 
   const grid = useMemo(
     () =>
@@ -84,6 +111,11 @@ export default function FunnelDashboardPage({
   // charts at the top. Intentionally ignores the quarter selector
   // (the charts always show all 12 months); year and regions still
   // apply.
+  //
+  // manualActuals is threaded so historical-year backfills (e.g. 2025
+  // pre-Sourced lead actuals seeded into funnel_actuals) spread into
+  // the monthly buckets. Real leads, when present, take precedence;
+  // see the dedupe comment in computeMonthlyLeadsForYear.
   const yearLeads = useMemo(
     () =>
       computeMonthlyLeadsForYear({
@@ -91,8 +123,9 @@ export default function FunnelDashboardPage({
         channels,
         year,
         regions,
+        manualActuals: actualsHook.actuals,
       }),
-    [leads, channels, year, regions],
+    [leads, channels, year, regions, actualsHook.actuals],
   );
 
   // Per-quarter totals across the selected year, for the trend chart. Always

@@ -833,17 +833,24 @@ export function shiftMonth(m: MonthBucket, delta: number): MonthBucket {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
 }
 
-// ---------- Monthly leads-for-year (Compare tab year charts) ----------
+// ---------- Monthly leads-for-year (Leads & MQLs tab year charts) ----------
 //
-// Powers the two bar charts at the bottom of the Compare tab. Always
-// spans all 12 months of the input year; the per-month comparison
-// selector at the top of the page is intentionally not an input.
-// Region filter still applies.
-//
-// Each lead rolls up to its top-level (root) channel via the
+// Powers the two year-wide bar charts on the Leads & MQLs tab. Always
+// spans all 12 months of the input year. Region filter applies. Each
+// lead rolls up to its top-level (root) channel via the
 // parent_channel_id chain so the stacked-bar chart's legend stays
 // short and stable. Leads without a source_channel_id are dropped
 // (they can't be attributed to a channel).
+//
+// Historical-year backfill: when no leads exist for the year but
+// funnel_actuals carries lead rows (e.g. 2025 pre-Sourced), spread
+// the quarterly count across the three calendar months of the
+// quarter (remainder pushed to the last month). The dedupe pattern
+// matches computeGrid: a (channel, year, month, 'lead') cell with
+// real leads suppresses the funnel_actuals fallback for that cell,
+// so a year with both kinds of data won't double-count. Only
+// stage_key='lead' rows feed this output; mql is irrelevant to the
+// charts on this surface.
 
 export interface MonthlyChannelLeads {
   channelId: string;
@@ -866,18 +873,47 @@ export interface ComputeMonthlyLeadsForYearInput {
   channels: Channel[];
   year: number;
   regions: Set<RegionKey>;
+  // Optional historical-year fallback. Quarterly lead actuals are
+  // spread across the three months of the quarter when no real leads
+  // cover the (channel, month) cell. Omitted callers get the same
+  // behavior as before (no fallback).
+  manualActuals?: FunnelActual[];
+}
+
+// Spread a quarterly integer count across its three months. The
+// spec's worked example pins the direction: 245 splits as 82/82/81
+// across Jan/Feb/Mar (front-loaded ceilings), not 81/81/83 or
+// 81/82/82. So the first `remainder` months get +1 and the rest
+// take the floor. Returns [m0, m1, m2] aligned to the quarter's
+// months.
+function spreadQuarterlyToMonths(value: number): [number, number, number] {
+  const base = Math.floor(value / 3);
+  const remainder = value - base * 3; // 0, 1, or 2
+  return [
+    remainder > 0 ? base + 1 : base,
+    remainder > 1 ? base + 1 : base,
+    base,
+  ];
 }
 
 export function computeMonthlyLeadsForYear(
   input: ComputeMonthlyLeadsForYearInput,
 ): MonthlyLeadsForYear {
-  const { leads, channels, year, regions } = input;
+  const { leads, channels, year, regions, manualActuals } = input;
   const channelById = new Map(channels.map((c) => [c.id, c] as const));
 
   // Accumulator: top-level channel id → 12-element month array. We
   // also need a quick lookup for channel name when materializing.
   const perChannel = new Map<string, number[]>();
   const monthTotals = new Array<number>(12).fill(0);
+
+  // Dedupe key shared between the leads pass and the funnel_actuals
+  // fallback. Same shape as computeGrid's attribKey, but keyed on
+  // month index (0..11) instead of period_index since this output
+  // is monthly.
+  const cellKey = (cid: string, mIdx: number): string =>
+    `${cid}\x1f${year}\x1f${mIdx}\x1f${'lead'}`;
+  const handledByLeads = new Set<string>();
 
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
@@ -896,6 +932,37 @@ export function computeMonthlyLeadsForYear(
     const idx = leadMonth.month - 1;
     row[idx] += 1;
     monthTotals[idx] += 1;
+    handledByLeads.add(cellKey(topId, idx));
+  }
+
+  // Historical-year fallback: spread quarterly funnel_actuals leads
+  // across their three months. A cell already covered by real leads
+  // is skipped so years with both data sources don't double-count.
+  for (const m of manualActuals ?? []) {
+    if (m.stage_key !== 'lead') continue;
+    if (m.year !== year) continue;
+    if (m.actual === null || m.actual === undefined) continue;
+    const value = Math.round(m.actual);
+    if (value <= 0) continue;
+    const quarter = m.period_index; // 1..4
+    const monthsForQuarter: [number, number, number] = [
+      (quarter - 1) * 3,
+      (quarter - 1) * 3 + 1,
+      (quarter - 1) * 3 + 2,
+    ];
+    const topId = resolveTopLevelChannelId(m.channel_id, channelById);
+    const spread = spreadQuarterlyToMonths(value);
+    let row = perChannel.get(topId);
+    if (!row) {
+      row = new Array<number>(12).fill(0);
+      perChannel.set(topId, row);
+    }
+    for (let i = 0; i < 3; i++) {
+      const monthIdx = monthsForQuarter[i];
+      if (handledByLeads.has(cellKey(topId, monthIdx))) continue;
+      row[monthIdx] += spread[i];
+      monthTotals[monthIdx] += spread[i];
+    }
   }
 
   const byChannel: MonthlyChannelLeads[] = [];
