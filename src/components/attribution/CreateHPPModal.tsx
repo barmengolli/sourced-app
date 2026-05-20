@@ -4,7 +4,11 @@
 // attribution row at stage_key='hpp' plus the touches via setTouches.
 
 import { useMemo, useState } from 'react';
-import type { Channel, PeriodIndex } from '../../types/db';
+import type {
+  AttributionStageKey,
+  Channel,
+  PeriodIndex,
+} from '../../types/db';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type { UseAttributionTouchesResult, NewTouchInput } from '../../hooks/useAttributionTouches';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
@@ -142,6 +146,17 @@ export default function CreateHPPModal({
     return d.toISOString().slice(0, 10);
   }, []);
 
+  // Optional downstream stage dates for bulk historical entry. When
+  // any of these are set, the submit handler creates additional
+  // attribution rows (one per filled date) all sharing the HPP row's
+  // deal_id, channel, label, account, amount, region, and SF link.
+  // Touches stay on the HPP row only.
+  const [oppEnteredAt, setOppEnteredAt] = useState<string>('');
+  const [pursuitEnteredAt, setPursuitEnteredAt] = useState<string>('');
+  const [closeWonEnteredAt, setCloseWonEnteredAt] = useState<string>('');
+  const [closeLostEnteredAt, setCloseLostEnteredAt] = useState<string>('');
+  const [showDownstream, setShowDownstream] = useState(false);
+
   const [additional, setAdditional] = useState<TouchDraft[]>([]);
 
   const [busy, setBusy] = useState(false);
@@ -149,12 +164,64 @@ export default function CreateHPPModal({
 
   const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
 
+  // Dynamic min bounds for each downstream input: each date must be
+  // on or after the latest prior entered date in the chain. Empty
+  // strings sort lexicographically before any real ISO date, so
+  // filter them out before max-ing.
+  const oppMin = stageEnteredAt || minDate;
+  const pursuitMin = [stageEnteredAt, oppEnteredAt]
+    .filter(Boolean)
+    .reduce((a, b) => (a > b ? a : b), minDate);
+  const closeMin = [stageEnteredAt, oppEnteredAt, pursuitEnteredAt]
+    .filter(Boolean)
+    .reduce((a, b) => (a > b ? a : b), minDate);
+
+  // Date-order validity for the downstream chain. Stages that aren't
+  // entered are skipped; the only thing being validated is that every
+  // entered date is non-decreasing across the chain.
+  const downstreamBothTerminal = Boolean(
+    closeWonEnteredAt && closeLostEnteredAt,
+  );
+  const downstreamOrderOk = (() => {
+    const dates = [
+      stageEnteredAt,
+      oppEnteredAt,
+      pursuitEnteredAt,
+    ].filter(Boolean);
+    for (let i = 1; i < dates.length; i++) {
+      if (dates[i] < dates[i - 1]) return false;
+    }
+    if (downstreamBothTerminal) return false;
+    const terminal = closeWonEnteredAt || closeLostEnteredAt;
+    if (terminal) {
+      const lastNonTerminal =
+        pursuitEnteredAt || oppEnteredAt || stageEnteredAt;
+      if (terminal < lastNonTerminal) return false;
+    }
+    return true;
+  })();
+  const downstreamError = downstreamOrderOk
+    ? null
+    : downstreamBothTerminal
+      ? 'A deal can be Closed Won or Closed Lost, not both.'
+      : 'Dates must be in chronological order: HPP <= Opp <= Pursuit <= Close.';
+
+  // Count for the collapsed caption so the user doesn't lose track
+  // of dates entered while the section is hidden.
+  const downstreamFilledCount = [
+    oppEnteredAt,
+    pursuitEnteredAt,
+    closeWonEnteredAt,
+    closeLostEnteredAt,
+  ].filter(Boolean).length;
+
   const valid =
     label.trim().length > 0 &&
     firstChannelId !== '' &&
     stageEnteredAt >= minDate &&
     stageEnteredAt <= maxDate &&
-    derivedPeriodLabel !== '';
+    derivedPeriodLabel !== '' &&
+    downstreamOrderOk;
 
   const submit = async () => {
     if (!valid) return;
@@ -199,6 +266,42 @@ export default function CreateHPPModal({
           })),
       ];
       await touchesHook.setTouches(created.id, touches);
+
+      // Downstream stages: optional bulk-entry rows that share the
+      // HPP row's deal_id. No touches; the HPP row owns the touch
+      // chain. If any insert fails mid-loop, the HPP row + whatever
+      // downstream rows already landed remain, and the user finishes
+      // via the existing Edit / Promote flows. Per-row year +
+      // period_index derive from each row's own stage_entered_at.
+      const downstream: Array<{
+        stage_key: AttributionStageKey;
+        iso: string;
+      }> = [];
+      if (oppEnteredAt) downstream.push({ stage_key: 'opp', iso: oppEnteredAt });
+      if (pursuitEnteredAt)
+        downstream.push({ stage_key: 'pursuit', iso: pursuitEnteredAt });
+      if (closeWonEnteredAt)
+        downstream.push({ stage_key: 'closeWon', iso: closeWonEnteredAt });
+      if (closeLostEnteredAt)
+        downstream.push({ stage_key: 'closeLost', iso: closeLostEnteredAt });
+
+      for (const row of downstream) {
+        const derivedRow = quarterOfIsoDate(row.iso);
+        if (!derivedRow) throw new Error(`Invalid ${row.stage_key} date`);
+        await attributionsHook.create({
+          stage_key: row.stage_key,
+          channel_id: firstChannelId,
+          year: derivedRow.year,
+          period_index: derivedRow.quarter,
+          label: label.trim(),
+          account: account.trim() || null,
+          amount: parsedAmount,
+          sf_link: sfLink.trim() || null,
+          region,
+          deal_id: dealId,
+          stage_entered_at: row.iso,
+        });
+      }
 
       onCreated?.(created.id);
       onClose();
@@ -315,6 +418,75 @@ export default function CreateHPPModal({
                 {derivedPeriodLabel || '—'}
               </span>
             </p>
+          </section>
+
+          {/* Downstream stages (optional bulk historical entry). Each
+              filled date creates an extra attribution row sharing the
+              HPP row's deal_id; touches stay on the HPP row only. */}
+          <section className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setShowDownstream((v) => !v)}
+              className="w-full flex items-center justify-between text-left"
+              aria-expanded={showDownstream}
+            >
+              <span className="text-xs font-medium text-slate-muted uppercase tracking-wide">
+                Downstream stages (optional)
+              </span>
+              <span className="flex items-center gap-2 text-xs text-slate-muted">
+                {!showDownstream && (
+                  <span>
+                    {downstreamFilledCount === 0
+                      ? 'Add Opp / Pursuit / Close dates if known'
+                      : `${downstreamFilledCount} downstream date${
+                          downstreamFilledCount === 1 ? '' : 's'
+                        } set`}
+                  </span>
+                )}
+                <span className="text-[10px]">
+                  {showDownstream ? '▼' : '▶'}
+                </span>
+              </span>
+            </button>
+            {showDownstream && (
+              <div className="space-y-2">
+                <DownstreamDateField
+                  label="Opp entered on (optional)"
+                  value={oppEnteredAt}
+                  onChange={setOppEnteredAt}
+                  min={oppMin}
+                  max={maxDate}
+                  disabled={busy}
+                />
+                <DownstreamDateField
+                  label="Pursuit entered on (optional)"
+                  value={pursuitEnteredAt}
+                  onChange={setPursuitEnteredAt}
+                  min={pursuitMin}
+                  max={maxDate}
+                  disabled={busy}
+                />
+                <DownstreamDateField
+                  label="Close-Won entered on (optional)"
+                  value={closeWonEnteredAt}
+                  onChange={setCloseWonEnteredAt}
+                  min={closeMin}
+                  max={maxDate}
+                  disabled={busy}
+                />
+                <DownstreamDateField
+                  label="Close-Lost entered on (optional)"
+                  value={closeLostEnteredAt}
+                  onChange={setCloseLostEnteredAt}
+                  min={closeMin}
+                  max={maxDate}
+                  disabled={busy}
+                />
+                {downstreamError && (
+                  <p className="text-xs text-danger">{downstreamError}</p>
+                )}
+              </div>
+            )}
           </section>
 
           {/* Additional touches */}
@@ -451,5 +623,45 @@ function Field({
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+// One downstream date field wired through to the parent state. Renders
+// the date input plus a "Will count as: Qx YYYY" hint when filled, so
+// users can sanity-check the period before submitting.
+function DownstreamDateField({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  min: string;
+  max: string;
+  disabled?: boolean;
+}) {
+  const period = describePeriodFromIso(value);
+  return (
+    <Field label={label}>
+      <input
+        type="date"
+        value={value}
+        min={min}
+        max={max}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+      />
+      {value && (
+        <p className="text-xs text-slate-muted">
+          Will count as:{' '}
+          <span className="text-charcoal font-medium">{period || '—'}</span>
+        </p>
+      )}
+    </Field>
   );
 }
