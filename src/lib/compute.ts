@@ -1369,11 +1369,18 @@ export interface DealVelocity {
   oppToPursuitDays: number | null;     // null if deal hasn't reached Pursuit
   isTerminal: boolean;                 // true when current stage is closeWon or closeLost
   isStale: boolean;                    // currentStage covered by thresholds && daysInCurrentStage > stale
-  // The HPP attribution's (year, period_index) — used by the page to
-  // scope the active deals table by selected period. Null if no HPP row
-  // exists (rare; manual-entry deals at a later stage).
+  // The HPP attribution's (year, period_index) — kept for any future
+  // surface that needs the deal's cohort. The active-deals filter on
+  // FunnelVelocityPage no longer reads these; it uses
+  // stageEnteredAts below to enable the "any stage in period"
+  // semantic (a 2025 deal still moving in 2026 appears in both
+  // years).
   hppYear: number | null;
   hppPeriodIndex: PeriodIndex | null;
+  // Sorted ascending ISO dates: every non-empty stage_entered_at on
+  // the deal's attribution chain. Enables a single-pass "does any
+  // stage fall in the selected period?" check on the page.
+  stageEnteredAts: string[];
   // The deal's region (taken from the HPP row when present, else from
   // the earliest attribution in the chain). Drives region filtering.
   region: RegionKey | null;
@@ -1469,6 +1476,16 @@ export function computeDealVelocities(
       }
     }
 
+    // Collect every non-empty stage_entered_at across the chain so the
+    // page-level "any stage in period" filter can do a single linear
+    // scan. Sort ascending so future callers that want "earliest" /
+    // "latest" can read off the ends without re-sorting.
+    const stageEnteredAts = rows
+      .map((r) => r.stage_entered_at)
+      .filter((d): d is string => Boolean(d))
+      .slice()
+      .sort();
+
     out.push({
       dealId,
       label: currentRow.label ?? '(unlabeled)',
@@ -1485,6 +1502,7 @@ export function computeDealVelocities(
       isStale,
       hppYear: hppRow ? hppRow.year : null,
       hppPeriodIndex: hppRow ? (hppRow.period_index as PeriodIndex) : null,
+      stageEnteredAts,
       region: dealRegion,
     });
   }
@@ -1586,26 +1604,24 @@ export function computeRegionDistribution(
 ): RegionDistribution {
   const { attributions, year, filter } = input;
 
-  // 1. Identify deals (by deal_id) that have ANY attribution in the period.
-  //    Singletons without a deal_id can't form a chain; skip them.
-  const dealIdsInPeriod = new Set<string>();
-  for (const a of attributions) {
-    if (!a.deal_id) continue;
-    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter))
-      continue;
-    dealIdsInPeriod.add(a.deal_id);
-  }
-
-  // 2. For each in-period deal, gather all its rows (across all periods)
-  //    so we can pick the earliest by stage priority. The donut bucket
-  //    uses the deal's region/amount, not any specific period's row.
+  // 1. Group attributions by deal_id (singletons without deal_id can't
+  //    form a chain; skip them).
   const rowsByDeal = new Map<string, Attribution[]>();
   for (const a of attributions) {
     if (!a.deal_id) continue;
-    if (!dealIdsInPeriod.has(a.deal_id)) continue;
     const arr = rowsByDeal.get(a.deal_id) ?? [];
     arr.push(a);
     rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // 2. Keep only deals with at least one attribution row whose
+  //    stage_entered_at falls within the selected period. This
+  //    includes deals that originated in a prior year but had a
+  //    stage transition in the selected period.
+  for (const [dealId, rows] of [...rowsByDeal]) {
+    if (!dealMatchesPeriod(rows, year, filter)) {
+      rowsByDeal.delete(dealId);
+    }
   }
 
   // 3. Pick the deal's "first" row by REGION_STAGE_PRIORITY and tally per
@@ -1709,25 +1725,24 @@ export function computeChannelDistribution(
     return channelId;
   };
 
-  // 1. Identify deals (by deal_id) that have ANY attribution in the period.
-  const dealIdsInPeriod = new Set<string>();
-  for (const a of attributions) {
-    if (!a.deal_id) continue;
-    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter))
-      continue;
-    dealIdsInPeriod.add(a.deal_id);
-  }
-
-  // 2. Gather all rows for those deals (across all periods) so we can
-  //    pick the earliest by stage priority. Channel/amount selection
-  //    uses the same priority as the region donut for consistency.
+  // 1. Group attributions by deal_id (singletons without a deal_id
+  //    can't form a chain; skip them).
   const rowsByDeal = new Map<string, Attribution[]>();
   for (const a of attributions) {
     if (!a.deal_id) continue;
-    if (!dealIdsInPeriod.has(a.deal_id)) continue;
     const arr = rowsByDeal.get(a.deal_id) ?? [];
     arr.push(a);
     rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // 2. Keep only deals with at least one attribution row whose
+  //    stage_entered_at falls within the selected period. This
+  //    includes deals that originated in a prior year but had a
+  //    stage transition in the selected period.
+  for (const [dealId, rows] of [...rowsByDeal]) {
+    if (!dealMatchesPeriod(rows, year, filter)) {
+      rowsByDeal.delete(dealId);
+    }
   }
 
   // 3. Tally per root channel. Deals whose first-stage row has no
@@ -1972,7 +1987,10 @@ interface PeriodBounds {
   end: string;       // ISO date inclusive
 }
 
-function periodBoundsFor(year: number, filter: PeriodFilter): PeriodBounds {
+export function periodBoundsFor(
+  year: number,
+  filter: PeriodFilter,
+): PeriodBounds {
   // Inclusive day endpoints, stringly typed so date math stays a
   // simple lexicographic compare against the cost rows.
   if (filter === 'year') {
@@ -1989,6 +2007,24 @@ function periodBoundsFor(year: number, filter: PeriodFilter): PeriodBounds {
     start: `${year}-${m}-01`,
     end: `${year}-${lastMonth}-${lastDay}`,
   };
+}
+
+// True when at least one attribution row's stage_entered_at falls
+// within the selected period. Used by the Opportunities sub-tab to
+// include deals that originated in a prior year but had a stage
+// transition in the selected period.
+export function dealMatchesPeriod(
+  rows: Attribution[],
+  year: number,
+  filter: PeriodFilter,
+): boolean {
+  const period = periodBoundsFor(year, filter);
+  for (const r of rows) {
+    const d = r.stage_entered_at;
+    if (!d) continue;
+    if (d >= period.start && d <= period.end) return true;
+  }
+  return false;
 }
 
 // Inclusive day count between two ISO dates (a <= b). Local-day math

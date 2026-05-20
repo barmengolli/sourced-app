@@ -21,6 +21,7 @@ import type {
 } from '../../types/db';
 import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
 import { REGIONS, type RegionKey } from '../../constants/regions';
+import { periodBoundsFor, type PeriodFilter } from '../../lib/compute';
 
 // "Feb 3, 2026" formatter for the stage-entry-date sub-label under each
 // stage node. Returns '' for an empty/invalid ISO so the renderer can
@@ -45,11 +46,15 @@ interface CampaignInfluenceViewProps {
   attributions: Attribution[];
   attributionTouches: AttributionTouch[];
   channels: Channel[];
-  // Region filter only. Quarter is intentionally absent: this view is
-  // the deal-portfolio view, not a per-quarter cohort. Deals that span
-  // multiple quarters need to render their full chain regardless of
-  // which quarter the page header is on.
+  // Region filter applies as before. Period filter is now also
+  // applied via the "any stage in period" semantic: a deal renders
+  // when at least one of its stage_entered_at dates falls in the
+  // selected year + quarter window. A deal whose journey spans
+  // multiple years (e.g. HPP in 2025, Pursuit in 2026) shows up on
+  // BOTH year views, so the cross-year story stays visible.
   regions: Set<RegionKey>;
+  year: number;
+  filter: PeriodFilter;
 }
 
 // True when the row passes the region filter. Empty / all-five-selected
@@ -405,6 +410,8 @@ export default function CampaignInfluenceView({
   attributionTouches,
   channels,
   regions,
+  year,
+  filter,
 }: CampaignInfluenceViewProps) {
   const [showAll, setShowAll] = useState(false);
 
@@ -503,12 +510,24 @@ export default function CampaignInfluenceView({
       group.label = group.attributions.find((a) => a.label)?.label || '';
     }
 
+    // Period filter: keep a group only when at least one of its
+    // attribution rows has stage_entered_at in the selected period.
+    // Mirrors dealMatchesPeriod in compute.ts. Applied before the
+    // sort so the sort only runs over the visible set.
+    const period = periodBoundsFor(year, filter);
+    const groups = [...groupMap.values()].filter((g) =>
+      g.attributions.some(
+        (a) =>
+          a.stageEnteredAt >= period.start &&
+          a.stageEnteredAt <= period.end,
+      ),
+    );
+
     // Sort: open deals (current stage HPP/Opp/Pursuit) before terminal
     // deals (closeWon/closeLost). Within each bucket, newest first —
     // open deals by HPP stage_entered_at (or the earliest stage_entered_at
     // if there's no HPP row), terminal deals by the terminal stage's
     // stage_entered_at.
-    const groups = [...groupMap.values()];
     const isTerminalStage = (s: string) =>
       s === 'closeWon' || s === 'closeLost';
     const sortDate = (g: DealGroup): string => {
@@ -534,13 +553,14 @@ export default function CampaignInfluenceView({
     });
 
     return groups;
-  }, [opportunityAttributions]);
+  }, [opportunityAttributions, year, filter]);
 
   if (dealGroups.length === 0) {
     return (
       <p className="text-xs text-slate-muted italic">
-        No opportunities match the current region filter. Use the Data
-        Entry tab to create one, or adjust the region selector above.
+        No opportunities with stage activity in the selected period
+        and region. Use the Data Entry tab to create one, or adjust
+        the period / region selectors above.
       </p>
     );
   }
