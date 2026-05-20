@@ -56,6 +56,11 @@ export interface Channel {
   id: string;
   name: string;
   parent_channel_id?: string | null;
+  // NULL = evergreen (not tied to a specific year). Set by the
+  // year-aware-channels migration. Funnel sub-tabs hide rows whose
+  // year doesn't match the selected year; evergreen rows always
+  // render.
+  year?: number | null;
   display_order: number;
   hidden: boolean;
   created_at: string;

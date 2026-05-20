@@ -7,6 +7,7 @@ import { useAttributions } from '../hooks/useAttributions';
 import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import { computeGrid, type PeriodFilter } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import { currentQuarter, quarterOfIsoDate } from '../lib/dates';
 import type { AttributionStageKey, PeriodIndex } from '../types/db';
 import type { RegionKey } from '../constants/regions';
@@ -92,11 +93,21 @@ export default function FunnelDataEntryPage({
 
   const periodIndex = periodIndexFromFilter(filter);
 
+  // Year-filtered channels feed the grid + table. Modals keep using
+  // the full channel list so their ChannelSelect can apply its own
+  // per-stage-date filter; channelById (used for resolving names in
+  // OpportunitiesListModal) also reads the full set so historical
+  // deals still resolve names regardless of year tag.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
+
   const grid = useMemo(
     () =>
       computeGrid({
         leads,
-        channels,
+        channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
         attributions: attributionsHook.attributions,
@@ -106,7 +117,7 @@ export default function FunnelDataEntryPage({
       }),
     [
       leads,
-      channels,
+      visibleChannels,
       projectionsHook.projections,
       actualsHook.actuals,
       attributionsHook.attributions,
@@ -258,7 +269,7 @@ export default function FunnelDataEntryPage({
       <div className="flex flex-col xl:flex-row gap-4">
         <FunnelTable
           grid={grid}
-          channels={channels}
+          channels={visibleChannels}
           onProjectionChange={(channelId, stage, value) =>
             projectionsHook.upsert(
               channelId,

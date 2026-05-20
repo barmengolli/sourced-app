@@ -10,6 +10,7 @@ import {
   computeMonthlyLeadsForYear,
   type PeriodFilter,
 } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
@@ -83,11 +84,20 @@ export default function FunnelDashboardPage({
     projectionsHook.projections,
   ]);
 
+  // Year-filtered channel set drives every chart on this page so a
+  // 2025-tagged channel doesn't surface as an empty row in the 2026
+  // view (and vice versa). Evergreen channels (year IS NULL) always
+  // surface.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
+
   const grid = useMemo(
     () =>
       computeGrid({
         leads,
-        channels,
+        channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
         attributions: attributionsHook.attributions,
@@ -97,7 +107,7 @@ export default function FunnelDashboardPage({
       }),
     [
       leads,
-      channels,
+      visibleChannels,
       projectionsHook.projections,
       actualsHook.actuals,
       attributionsHook.attributions,
@@ -120,12 +130,12 @@ export default function FunnelDashboardPage({
     () =>
       computeMonthlyLeadsForYear({
         leads,
-        channels,
+        channels: visibleChannels,
         year,
         regions,
         manualActuals: actualsHook.actuals,
       }),
-    [leads, channels, year, regions, actualsHook.actuals],
+    [leads, visibleChannels, year, regions, actualsHook.actuals],
   );
 
   // Per-quarter totals across the selected year, for the trend chart. Always
@@ -135,7 +145,7 @@ export default function FunnelDashboardPage({
       quarter: q,
       totals: computeGrid({
         leads,
-        channels,
+        channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
         attributions: attributionsHook.attributions,
@@ -146,7 +156,7 @@ export default function FunnelDashboardPage({
     }));
   }, [
     leads,
-    channels,
+    visibleChannels,
     projectionsHook.projections,
     actualsHook.actuals,
     attributionsHook.attributions,
@@ -195,17 +205,17 @@ export default function FunnelDashboardPage({
             <BarChartView
               totals={grid.totals}
               rows={grid.rows}
-              channels={channels}
+              channels={visibleChannels}
             />
           </ChartCard>
           <ChartCard title="Channel Distribution">
-            <DonutChartView rows={grid.rows} channels={channels} />
+            <DonutChartView rows={grid.rows} channels={visibleChannels} />
           </ChartCard>
           <ChartCard title="Conversion Funnel">
             <FunnelChartView
               totals={grid.totals}
               rows={grid.rows}
-              channels={channels}
+              channels={visibleChannels}
             />
           </ChartCard>
           <ChartCard title={`${year} Quarterly Trend`}>
@@ -219,7 +229,7 @@ export default function FunnelDashboardPage({
           <FunnelSankeyView
             leads={leads}
             attributions={attributionsHook.attributions}
-            channels={channels}
+            channels={visibleChannels}
             year={year}
             filter={filter}
             regions={regions}

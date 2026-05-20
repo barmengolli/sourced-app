@@ -24,6 +24,7 @@ import {
   type ChannelSpendBreakdown,
   type PeriodFilter,
 } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
@@ -72,7 +73,16 @@ export default function FunnelSpendPage({
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
   const costsHook = useCampaignCosts();
+  // collapse state intentionally tracks the FULL channel set so a
+  // user's expand/collapse picks survive switching years.
   const collapse = useCollapsedChannels(channels);
+  // Year-filtered channels feed computeChannelSpend so a 2026 channel
+  // doesn't render as a $0 row in the 2025 view. Evergreen channels
+  // (year IS NULL) always render.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
 
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -94,7 +104,7 @@ export default function FunnelSpendPage({
     () =>
       computeChannelSpend({
         campaignCosts: costsHook.costs,
-        channels,
+        channels: visibleChannels,
         leads,
         attributions: attributionsHook.attributions,
         attributionTouches: touchesHook.touches,
@@ -104,7 +114,7 @@ export default function FunnelSpendPage({
       }),
     [
       costsHook.costs,
-      channels,
+      visibleChannels,
       leads,
       attributionsHook.attributions,
       touchesHook.touches,

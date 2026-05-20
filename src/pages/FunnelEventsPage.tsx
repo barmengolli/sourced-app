@@ -31,6 +31,7 @@ import {
   type EventActivationCounts,
   type PeriodFilter,
 } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
@@ -114,17 +115,27 @@ export default function FunnelEventsPage({
     projectionsHook.projections,
   ]);
 
+  // Year-filtered channel set: a 2025 view excludes the "2026 - Events"
+  // taxonomy. EVENTS_PARENT_CHANNEL_NAME is still hard-coded to the
+  // 2026 parent, so historical years (without a same-named parent in
+  // the filtered set) render an empty table here — a known follow-up
+  // for the events-parent-by-year resolver.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
+
   const rows: EventActivationCounts[] = useMemo(
     () =>
       computeEventActivations({
         leads,
-        channels,
+        channels: visibleChannels,
         parentChannelName: EVENTS_PARENT_CHANNEL_NAME,
         year,
         filter,
         regions,
       }),
-    [leads, channels, year, filter, regions],
+    [leads, visibleChannels, year, filter, regions],
   );
 
   // KPI tile totals: sum each activation type across every event in
