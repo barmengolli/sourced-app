@@ -12,6 +12,7 @@ import type {
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type { UseAttributionTouchesResult, NewTouchInput } from '../../hooks/useAttributionTouches';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
+import { validateDealStageDates } from '../../lib/dealStageValidation';
 import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
 
 interface CreateHPPModalProps {
@@ -178,33 +179,17 @@ export default function CreateHPPModal({
 
   // Date-order validity for the downstream chain. Stages that aren't
   // entered are skipped; the only thing being validated is that every
-  // entered date is non-decreasing across the chain.
-  const downstreamBothTerminal = Boolean(
-    closeWonEnteredAt && closeLostEnteredAt,
-  );
-  const downstreamOrderOk = (() => {
-    const dates = [
-      stageEnteredAt,
-      oppEnteredAt,
-      pursuitEnteredAt,
-    ].filter(Boolean);
-    for (let i = 1; i < dates.length; i++) {
-      if (dates[i] < dates[i - 1]) return false;
-    }
-    if (downstreamBothTerminal) return false;
-    const terminal = closeWonEnteredAt || closeLostEnteredAt;
-    if (terminal) {
-      const lastNonTerminal =
-        pursuitEnteredAt || oppEnteredAt || stageEnteredAt;
-      if (terminal < lastNonTerminal) return false;
-    }
-    return true;
-  })();
-  const downstreamError = downstreamOrderOk
-    ? null
-    : downstreamBothTerminal
-      ? 'A deal can be Closed Won or Closed Lost, not both.'
-      : 'Dates must be in chronological order: HPP <= Opp <= Pursuit <= Close.';
+  // entered date is non-decreasing across the chain. Shared with the
+  // Edit modal's "Other stage dates" section via dealStageValidation.
+  const downstreamValidation = validateDealStageDates({
+    hpp: stageEnteredAt,
+    opp: oppEnteredAt,
+    pursuit: pursuitEnteredAt,
+    closeWon: closeWonEnteredAt,
+    closeLost: closeLostEnteredAt,
+  });
+  const downstreamOrderOk = downstreamValidation.ok;
+  const downstreamError = downstreamValidation.error;
 
   // Count for the collapsed caption so the user doesn't lose track
   // of dates entered while the section is hidden.
@@ -288,7 +273,7 @@ export default function CreateHPPModal({
       for (const row of downstream) {
         const derivedRow = quarterOfIsoDate(row.iso);
         if (!derivedRow) throw new Error(`Invalid ${row.stage_key} date`);
-        await attributionsHook.create({
+        const downstreamRow = await attributionsHook.create({
           stage_key: row.stage_key,
           channel_id: firstChannelId,
           year: derivedRow.year,
@@ -301,6 +286,15 @@ export default function CreateHPPModal({
           deal_id: dealId,
           stage_entered_at: row.iso,
         });
+        // Touch propagation: each downstream row inherits the HPP row's
+        // touch list, matching how Promote carries touches forward
+        // today. Otherwise a bulk-created deal would show "0 touches"
+        // on every later cell even though the touches belong to the
+        // deal as a whole. Skip the round-trip when no touches were
+        // entered at all.
+        if (touches.length > 0) {
+          await touchesHook.setTouches(downstreamRow.id, touches);
+        }
       }
 
       onCreated?.(created.id);
