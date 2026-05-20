@@ -22,10 +22,12 @@ import {
   computeDealVelocities,
   computeRegionDistribution,
   computeStageVelocityStats,
+  periodBoundsFor,
   type DealVelocity,
   type PeriodFilter,
 } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
@@ -78,18 +80,22 @@ function roundOne(n: number): string {
   return (Math.round(n * 10) / 10).toString();
 }
 
-// Convert a year/PeriodFilter combo into a predicate matching a deal's
-// HPP attribution row. Mirrors the matchesPeriod helper in compute.ts but
-// reads from a velocity record's hppYear/hppPeriodIndex fields.
+// True when a deal has at least one stage transition in the selected
+// period. Replaces the prior cohort filter (which only matched deals
+// whose HPP landed in the period); the new semantic includes a deal
+// that originated in a prior year but is still moving through stages
+// in the current view. Mirrors dealMatchesPeriod in compute.ts.
 function matchesPeriodForDeal(
   d: DealVelocity,
   year: number,
   filter: PeriodFilter,
 ): boolean {
-  if (d.hppYear === null || d.hppPeriodIndex === null) return false;
-  if (d.hppYear !== year) return false;
-  if (filter === 'year') return true;
-  return `Q${d.hppPeriodIndex}` === filter;
+  if (d.stageEnteredAts.length === 0) return false;
+  const period = periodBoundsFor(year, filter);
+  for (const iso of d.stageEnteredAts) {
+    if (iso >= period.start && iso <= period.end) return true;
+  }
+  return false;
 }
 
 // Bucket avg into green / yellow / red against the threshold pair. When
@@ -116,6 +122,14 @@ export default function FunnelVelocityPage({
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
   const channels = useChannels();
+  // Year-filtered channels drive every downstream consumer on this
+  // page so a 2026-tagged taxonomy doesn't show through in the 2025
+  // view (and vice versa). Evergreen channels (year IS NULL) always
+  // render.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
   // Pull leads only to derive yearOptions consistently with the other
   // funnel sub-pages; the velocity compute itself doesn't read leads.
   const { leads } = useLeads();
@@ -175,11 +189,11 @@ export default function FunnelVelocityPage({
     () =>
       computeChannelDistribution({
         attributions: attributionsHook.attributions,
-        channels,
+        channels: visibleChannels,
         year,
         filter,
       }),
-    [attributionsHook.attributions, channels, year, filter],
+    [attributionsHook.attributions, visibleChannels, year, filter],
   );
 
   // Active deals table source: non-terminal, in the selected period.
@@ -350,20 +364,24 @@ export default function FunnelVelocityPage({
       </section>
 
       {/* Opportunity Influence — one Sankey per deal, showing the full
-          touch flow into the deal's stage chain. The Sankey is
-          intentionally quarter-agnostic: a deal whose journey spans
-          multiple quarters (e.g. HPP in Q1, Closed Lost in Q2) should
-          render its complete chain in any view. Region filter still
+          touch flow into the deal's stage chain. The section is now
+          period-filtered using the "any stage in period" semantic:
+          a deal appears when at least one of its stage_entered_at
+          dates falls in the selected year + quarter window. A deal
+          whose journey spans years (e.g. HPP in 2025, Pursuit in
+          2026) shows up on BOTH year views. Region filter still
           applies. */}
       <ChartCard
         title="Opportunity Influence"
-        subtitle="Every deal's full touch flow, regardless of quarter. Region filter applies."
+        subtitle="Deals with any stage activity in the selected period. Region filter applies."
       >
         <CampaignInfluenceView
           attributions={attributionsHook.attributions}
           attributionTouches={touchesHook.touches}
-          channels={channels}
+          channels={visibleChannels}
           regions={regions}
+          year={year}
+          filter={filter}
         />
       </ChartCard>
     </div>

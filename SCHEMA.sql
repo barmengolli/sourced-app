@@ -204,15 +204,19 @@ CREATE TABLE funnel_projections (
 
 CREATE INDEX idx_projections_period ON funnel_projections(year, period_index);
 
--- Manually-entered actuals for stages where lead-level signal is not yet
--- available (HPP, Opp, Pursuit, Closed Won). Lead and MQL actuals are
--- computed live from leads.stage_history and never stored.
+-- Manually-entered actuals. For HPP, Opp, Pursuit, Closed Won, and
+-- Closed Lost, this is the primary store (with attribution rows
+-- preferred when present, per the compute layer). For Lead and MQL,
+-- counts are normally computed live from leads.marketing_sourced_date
+-- and leads.stage_history; funnel_actuals rows with stage_key in
+-- ('lead','mql') are a fallback used for historical-year backfills
+-- (e.g. 2025 pre-Sourced) where no lead-level data was imported.
 CREATE TABLE funnel_actuals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   channel_id UUID REFERENCES channels(id) ON DELETE CASCADE,
   year INTEGER NOT NULL,
   period_index INTEGER NOT NULL CHECK (period_index BETWEEN 1 AND 4),
-  stage_key TEXT NOT NULL CHECK (stage_key IN ('hpp','opp','pursuit','closeWon','closeLost')),
+  stage_key TEXT NOT NULL CHECK (stage_key IN ('lead','mql','hpp','opp','pursuit','closeWon','closeLost')),
   actual NUMERIC(10,0),
   edited_at TIMESTAMPTZ DEFAULT NOW(),
   edited_by TEXT,

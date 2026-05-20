@@ -28,6 +28,7 @@ import {
   type MonthBucket,
   type PeriodFilter,
 } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import {
   FUNNEL_STAGES,
   FUNNEL_STAGE_LABELS,
@@ -107,8 +108,19 @@ export default function FunnelComparePage({
   const attributionsHook = useAttributions();
   // Collapse state shared with Funnel Data Entry via the same localStorage
   // key prefix. One hook instance per page render so both modes (single
-  // and rolling3) read/write the same set without re-syncing.
+  // and rolling3) read/write the same set without re-syncing. The
+  // collapse state intentionally tracks the FULL set so picks survive
+  // year-switches.
   const collapse = useCollapsedChannels(channels);
+  // Year-filtered channels feed computeMonthly + both view tables so a
+  // 2026-tagged taxonomy doesn't render rows in the 2025 view (and
+  // vice versa). Evergreen channels always render. Cross-year deal
+  // tracking (a deal whose stage_entered_at spans two years) is a
+  // separate concern noted on the seed-and-fallback commit.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
 
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -149,12 +161,12 @@ export default function FunnelComparePage({
     () =>
       computeMonthly({
         leads,
-        channels,
+        channels: visibleChannels,
         attributions: attributionsHook.attributions,
         months: compareMonths,
         regions,
       }),
-    [leads, channels, attributionsHook.attributions, compareMonths, regions],
+    [leads, visibleChannels, attributionsHook.attributions, compareMonths, regions],
   );
 
   // Single-mode: did the comparison month have any data? If not, deltas
@@ -269,7 +281,7 @@ export default function FunnelComparePage({
       {compareView === 'single' ? (
         <SingleMonthView
           grid={grid}
-          channels={channels}
+          channels={visibleChannels}
           months={compareMonths}
           selectedMonth={selectedMonth}
           compareIsZero={compareIsZero}
@@ -278,7 +290,7 @@ export default function FunnelComparePage({
       ) : (
         <RollingThreeView
           grid={grid}
-          channels={channels}
+          channels={visibleChannels}
           months={compareMonths}
           collapse={collapse}
         />

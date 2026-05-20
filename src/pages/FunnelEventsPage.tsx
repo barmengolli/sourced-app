@@ -22,11 +22,16 @@ import {
 } from 'recharts';
 import { useLeads } from '../hooks/useLeads';
 import { useChannels } from '../hooks/useChannels';
+import { useAttributions } from '../hooks/useAttributions';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
+import { useFunnelActuals } from '../hooks/useFunnelActuals';
+import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import {
   computeEventActivations,
   type EventActivationCounts,
   type PeriodFilter,
 } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
@@ -67,27 +72,70 @@ export default function FunnelEventsPage({
 }: FunnelEventsPageProps) {
   const { leads } = useLeads();
   const channels = useChannels();
+  // Only consumed by the year-selector derivation below; this page's
+  // table doesn't read these directly.
+  const attributionsHook = useAttributions();
+  const costsHook = useCampaignCosts();
+  const actualsHook = useFunnelActuals();
+  const projectionsHook = useFunnelProjections();
 
   const yearOptions = useMemo(() => {
+    // Unified derivation: any year touched by a lead, attribution,
+    // budget, actual, or projection surfaces in the dropdown. Lets
+    // historical-year backfills (e.g. 2025 pre-Sourced) be
+    // reachable even when no lead-level data was imported.
     const years = new Set<number>([new Date().getFullYear()]);
     for (const l of leads) {
       const sourced = quarterOfIsoDate(l.marketing_sourced_date);
       if (sourced) years.add(sourced.year);
+      for (const h of l.stage_history ?? []) {
+        const q = quarterOfIsoDate(h.entered_at);
+        if (q) years.add(q.year);
+      }
+    }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
+    }
+    for (const a of actualsHook.actuals) {
+      years.add(a.year);
+    }
+    for (const p of projectionsHook.projections) {
+      years.add(p.year);
     }
     return [...years].sort((a, b) => a - b);
-  }, [leads]);
+  }, [
+    leads,
+    attributionsHook.attributions,
+    costsHook.costs,
+    actualsHook.actuals,
+    projectionsHook.projections,
+  ]);
+
+  // Year-filtered channel set: a 2025 view excludes the "2026 - Events"
+  // taxonomy. EVENTS_PARENT_CHANNEL_NAME is still hard-coded to the
+  // 2026 parent, so historical years (without a same-named parent in
+  // the filtered set) render an empty table here — a known follow-up
+  // for the events-parent-by-year resolver.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
 
   const rows: EventActivationCounts[] = useMemo(
     () =>
       computeEventActivations({
         leads,
-        channels,
+        channels: visibleChannels,
         parentChannelName: EVENTS_PARENT_CHANNEL_NAME,
         year,
         filter,
         regions,
       }),
-    [leads, channels, year, filter, regions],
+    [leads, visibleChannels, year, filter, regions],
   );
 
   // KPI tile totals: sum each activation type across every event in

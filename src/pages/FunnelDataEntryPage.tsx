@@ -5,7 +5,9 @@ import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
 import { useAttributionTouches } from '../hooks/useAttributionTouches';
+import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import { computeGrid, type PeriodFilter } from '../lib/compute';
+import { filterChannelsByYear } from '../lib/channelFilter';
 import { currentQuarter, quarterOfIsoDate } from '../lib/dates';
 import type { AttributionStageKey, PeriodIndex } from '../types/db';
 import type { RegionKey } from '../constants/regions';
@@ -49,8 +51,15 @@ export default function FunnelDataEntryPage({
   const actualsHook = useFunnelActuals();
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
+  // Used only to widen the year selector below so a year that has a
+  // budget but no leads still shows up in the dropdown.
+  const costsHook = useCampaignCosts();
 
   const yearOptions = useMemo(() => {
+    // Unified derivation: any year touched by a lead, attribution,
+    // budget, actual, or projection surfaces in the dropdown. Lets
+    // historical-year backfills (e.g. 2025 pre-Sourced lead/MQL
+    // actuals seeded via funnel_actuals) be reachable here.
     const years = new Set<number>([new Date().getFullYear()]);
     for (const l of leads) {
       const sourced = quarterOfIsoDate(l.marketing_sourced_date);
@@ -60,16 +69,45 @@ export default function FunnelDataEntryPage({
         if (q) years.add(q.year);
       }
     }
+    for (const a of attributionsHook.attributions) {
+      years.add(a.year);
+    }
+    for (const c of costsHook.costs) {
+      const m = /^(\d{4})/.exec(c.start_date);
+      if (m) years.add(parseInt(m[1], 10));
+    }
+    for (const a of actualsHook.actuals) {
+      years.add(a.year);
+    }
+    for (const p of projectionsHook.projections) {
+      years.add(p.year);
+    }
     return [...years].sort((a, b) => a - b);
-  }, [leads]);
+  }, [
+    leads,
+    attributionsHook.attributions,
+    costsHook.costs,
+    actualsHook.actuals,
+    projectionsHook.projections,
+  ]);
 
   const periodIndex = periodIndexFromFilter(filter);
+
+  // Year-filtered channels feed the grid + table. Modals keep using
+  // the full channel list so their ChannelSelect can apply its own
+  // per-stage-date filter; channelById (used for resolving names in
+  // OpportunitiesListModal) also reads the full set so historical
+  // deals still resolve names regardless of year tag.
+  const visibleChannels = useMemo(
+    () => filterChannelsByYear(channels, year),
+    [channels, year],
+  );
 
   const grid = useMemo(
     () =>
       computeGrid({
         leads,
-        channels,
+        channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
         attributions: attributionsHook.attributions,
@@ -79,7 +117,7 @@ export default function FunnelDataEntryPage({
       }),
     [
       leads,
-      channels,
+      visibleChannels,
       projectionsHook.projections,
       actualsHook.actuals,
       attributionsHook.attributions,
@@ -231,7 +269,7 @@ export default function FunnelDataEntryPage({
       <div className="flex flex-col xl:flex-row gap-4">
         <FunnelTable
           grid={grid}
-          channels={channels}
+          channels={visibleChannels}
           onProjectionChange={(channelId, stage, value) =>
             projectionsHook.upsert(
               channelId,

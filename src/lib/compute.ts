@@ -138,10 +138,23 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     });
   }
 
+  // Shared dedupe-key shape for the "compute pass wins, funnel_actuals
+  // is fallback" pattern below. Used by both the leads pass (lead/mql)
+  // and the attribution pass (hpp/opp/pursuit/closeWon/closeLost).
+  const attribKey = (cid: string, y: number, p: number, s: string): string =>
+    `${cid}\x1f${y}\x1f${p}\x1f${s}`;
+
   // 2. Lead pass: bucket each lead's lead-stage and (optional) mql-stage
   //    into its source channel's own counts. Region filter is applied at
   //    the top of each iteration so a filtered-out lead doesn't contribute
   //    to grid totals OR to the unassigned count.
+  //
+  //    Cells covered here populate handledByLeads so the manualActuals
+  //    fallback below knows not to also add a funnel_actuals lead/mql
+  //    row for the same (channel, year, period, stage) — without the
+  //    dedupe, 2025-style fallback rows would stack on top of real lead
+  //    counts in years where both exist.
+  const handledByLeads = new Set<string>();
   let unassignedLeadCount = 0;
   for (const l of leads) {
     if (!regionMatches(l.region, regions)) continue;
@@ -155,6 +168,9 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
         if (row) {
           const cell = row.cells.lead;
           cell.actual = (cell.actual ?? 0) + 1;
+          handledByLeads.add(
+            attribKey(l.source_channel_id, leadBucket.year, leadBucket.quarter, 'lead'),
+          );
         }
       }
     }
@@ -168,25 +184,25 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
           if (row) {
             const cell = row.cells.mql;
             cell.actual = (cell.actual ?? 0) + 1;
+            handledByLeads.add(
+              attribKey(l.source_channel_id, mqlBucket.year, mqlBucket.quarter, 'mql'),
+            );
           }
         }
       }
     }
   }
 
-  // 3. Attribution-stage actuals (HPP / Opp / Pursuit / CloseWon).
+  // 3. Attribution-stage actuals (HPP / Opp / Pursuit / CloseWon / CloseLost).
   //
-  //    Prefer count(attributions where channel_id, year, period_index,
-  //    stage_key match) over funnel_actuals when one or more attribution
-  //    rows exist for that exact cell. Fall back to funnel_actuals only
-  //    when no attribution covers the cell — this keeps the old cell-edit
-  //    path working through the migration window.
-  //
-  //    M8 cleanup note: once teams commit to attribution-only data entry,
-  //    drop the manualActuals fallback (and useFunnelActuals + the
-  //    funnel_actuals table itself can be retired).
-  const attribKey = (cid: string, y: number, p: number, s: string): string =>
-    `${cid}\x1f${y}\x1f${p}\x1f${s}`;
+  //    Two dedupe patterns flow into the manualActuals fallback below:
+  //    - For HPP+ stages, the attribution pass wins; funnel_actuals
+  //      rows for the same cell are skipped.
+  //    - For lead/mql stages, the leads pass above wins; funnel_actuals
+  //      rows for the same cell are skipped. Historical-year backfills
+  //      (e.g. 2025 pre-Sourced) typically have funnel_actuals lead/mql
+  //      rows AND no leads, so the dedupe is a no-op in that case and
+  //      the fallback row supplies the count.
 
   // Count attributions per (channel, year, period, stage). One attribution row
   // contributes 1 to its leaf channel's stage cell. Channel rollup to parents
@@ -206,17 +222,17 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     );
   }
 
-  // Manual fallback: only contribute when no attribution covers this exact
-  // (channel, year, period, stage) cell.
+  // Manual fallback: only contribute when no compute pass already covers
+  // this exact (channel, year, period, stage) cell. For HPP+ that means
+  // attributions win; for lead/mql that means the leads pass wins.
   for (const m of manualActuals) {
     if (m.actual === null || m.actual === undefined) continue;
     const bucket = { year: m.year, quarter: m.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
-    if (
-      handledByAttribution.has(
-        attribKey(m.channel_id, m.year, m.period_index, m.stage_key),
-      )
-    ) {
+    const key = attribKey(m.channel_id, m.year, m.period_index, m.stage_key);
+    if (m.stage_key === 'lead' || m.stage_key === 'mql') {
+      if (handledByLeads.has(key)) continue;
+    } else if (handledByAttribution.has(key)) {
       continue;
     }
     const row = rowMap.get(m.channel_id);
@@ -817,17 +833,24 @@ export function shiftMonth(m: MonthBucket, delta: number): MonthBucket {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
 }
 
-// ---------- Monthly leads-for-year (Compare tab year charts) ----------
+// ---------- Monthly leads-for-year (Leads & MQLs tab year charts) ----------
 //
-// Powers the two bar charts at the bottom of the Compare tab. Always
-// spans all 12 months of the input year; the per-month comparison
-// selector at the top of the page is intentionally not an input.
-// Region filter still applies.
-//
-// Each lead rolls up to its top-level (root) channel via the
+// Powers the two year-wide bar charts on the Leads & MQLs tab. Always
+// spans all 12 months of the input year. Region filter applies. Each
+// lead rolls up to its top-level (root) channel via the
 // parent_channel_id chain so the stacked-bar chart's legend stays
 // short and stable. Leads without a source_channel_id are dropped
 // (they can't be attributed to a channel).
+//
+// Historical-year backfill: when no leads exist for the year but
+// funnel_actuals carries lead rows (e.g. 2025 pre-Sourced), spread
+// the quarterly count across the three calendar months of the
+// quarter (remainder pushed to the last month). The dedupe pattern
+// matches computeGrid: a (channel, year, month, 'lead') cell with
+// real leads suppresses the funnel_actuals fallback for that cell,
+// so a year with both kinds of data won't double-count. Only
+// stage_key='lead' rows feed this output; mql is irrelevant to the
+// charts on this surface.
 
 export interface MonthlyChannelLeads {
   channelId: string;
@@ -850,18 +873,47 @@ export interface ComputeMonthlyLeadsForYearInput {
   channels: Channel[];
   year: number;
   regions: Set<RegionKey>;
+  // Optional historical-year fallback. Quarterly lead actuals are
+  // spread across the three months of the quarter when no real leads
+  // cover the (channel, month) cell. Omitted callers get the same
+  // behavior as before (no fallback).
+  manualActuals?: FunnelActual[];
+}
+
+// Spread a quarterly integer count across its three months. The
+// spec's worked example pins the direction: 245 splits as 82/82/81
+// across Jan/Feb/Mar (front-loaded ceilings), not 81/81/83 or
+// 81/82/82. So the first `remainder` months get +1 and the rest
+// take the floor. Returns [m0, m1, m2] aligned to the quarter's
+// months.
+function spreadQuarterlyToMonths(value: number): [number, number, number] {
+  const base = Math.floor(value / 3);
+  const remainder = value - base * 3; // 0, 1, or 2
+  return [
+    remainder > 0 ? base + 1 : base,
+    remainder > 1 ? base + 1 : base,
+    base,
+  ];
 }
 
 export function computeMonthlyLeadsForYear(
   input: ComputeMonthlyLeadsForYearInput,
 ): MonthlyLeadsForYear {
-  const { leads, channels, year, regions } = input;
+  const { leads, channels, year, regions, manualActuals } = input;
   const channelById = new Map(channels.map((c) => [c.id, c] as const));
 
   // Accumulator: top-level channel id → 12-element month array. We
   // also need a quick lookup for channel name when materializing.
   const perChannel = new Map<string, number[]>();
   const monthTotals = new Array<number>(12).fill(0);
+
+  // Dedupe key shared between the leads pass and the funnel_actuals
+  // fallback. Same shape as computeGrid's attribKey, but keyed on
+  // month index (0..11) instead of period_index since this output
+  // is monthly.
+  const cellKey = (cid: string, mIdx: number): string =>
+    `${cid}\x1f${year}\x1f${mIdx}\x1f${'lead'}`;
+  const handledByLeads = new Set<string>();
 
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
@@ -880,6 +932,37 @@ export function computeMonthlyLeadsForYear(
     const idx = leadMonth.month - 1;
     row[idx] += 1;
     monthTotals[idx] += 1;
+    handledByLeads.add(cellKey(topId, idx));
+  }
+
+  // Historical-year fallback: spread quarterly funnel_actuals leads
+  // across their three months. A cell already covered by real leads
+  // is skipped so years with both data sources don't double-count.
+  for (const m of manualActuals ?? []) {
+    if (m.stage_key !== 'lead') continue;
+    if (m.year !== year) continue;
+    if (m.actual === null || m.actual === undefined) continue;
+    const value = Math.round(m.actual);
+    if (value <= 0) continue;
+    const quarter = m.period_index; // 1..4
+    const monthsForQuarter: [number, number, number] = [
+      (quarter - 1) * 3,
+      (quarter - 1) * 3 + 1,
+      (quarter - 1) * 3 + 2,
+    ];
+    const topId = resolveTopLevelChannelId(m.channel_id, channelById);
+    const spread = spreadQuarterlyToMonths(value);
+    let row = perChannel.get(topId);
+    if (!row) {
+      row = new Array<number>(12).fill(0);
+      perChannel.set(topId, row);
+    }
+    for (let i = 0; i < 3; i++) {
+      const monthIdx = monthsForQuarter[i];
+      if (handledByLeads.has(cellKey(topId, monthIdx))) continue;
+      row[monthIdx] += spread[i];
+      monthTotals[monthIdx] += spread[i];
+    }
   }
 
   const byChannel: MonthlyChannelLeads[] = [];
@@ -1286,11 +1369,18 @@ export interface DealVelocity {
   oppToPursuitDays: number | null;     // null if deal hasn't reached Pursuit
   isTerminal: boolean;                 // true when current stage is closeWon or closeLost
   isStale: boolean;                    // currentStage covered by thresholds && daysInCurrentStage > stale
-  // The HPP attribution's (year, period_index) — used by the page to
-  // scope the active deals table by selected period. Null if no HPP row
-  // exists (rare; manual-entry deals at a later stage).
+  // The HPP attribution's (year, period_index) — kept for any future
+  // surface that needs the deal's cohort. The active-deals filter on
+  // FunnelVelocityPage no longer reads these; it uses
+  // stageEnteredAts below to enable the "any stage in period"
+  // semantic (a 2025 deal still moving in 2026 appears in both
+  // years).
   hppYear: number | null;
   hppPeriodIndex: PeriodIndex | null;
+  // Sorted ascending ISO dates: every non-empty stage_entered_at on
+  // the deal's attribution chain. Enables a single-pass "does any
+  // stage fall in the selected period?" check on the page.
+  stageEnteredAts: string[];
   // The deal's region (taken from the HPP row when present, else from
   // the earliest attribution in the chain). Drives region filtering.
   region: RegionKey | null;
@@ -1386,6 +1476,16 @@ export function computeDealVelocities(
       }
     }
 
+    // Collect every non-empty stage_entered_at across the chain so the
+    // page-level "any stage in period" filter can do a single linear
+    // scan. Sort ascending so future callers that want "earliest" /
+    // "latest" can read off the ends without re-sorting.
+    const stageEnteredAts = rows
+      .map((r) => r.stage_entered_at)
+      .filter((d): d is string => Boolean(d))
+      .slice()
+      .sort();
+
     out.push({
       dealId,
       label: currentRow.label ?? '(unlabeled)',
@@ -1402,6 +1502,7 @@ export function computeDealVelocities(
       isStale,
       hppYear: hppRow ? hppRow.year : null,
       hppPeriodIndex: hppRow ? (hppRow.period_index as PeriodIndex) : null,
+      stageEnteredAts,
       region: dealRegion,
     });
   }
@@ -1503,26 +1604,24 @@ export function computeRegionDistribution(
 ): RegionDistribution {
   const { attributions, year, filter } = input;
 
-  // 1. Identify deals (by deal_id) that have ANY attribution in the period.
-  //    Singletons without a deal_id can't form a chain; skip them.
-  const dealIdsInPeriod = new Set<string>();
-  for (const a of attributions) {
-    if (!a.deal_id) continue;
-    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter))
-      continue;
-    dealIdsInPeriod.add(a.deal_id);
-  }
-
-  // 2. For each in-period deal, gather all its rows (across all periods)
-  //    so we can pick the earliest by stage priority. The donut bucket
-  //    uses the deal's region/amount, not any specific period's row.
+  // 1. Group attributions by deal_id (singletons without deal_id can't
+  //    form a chain; skip them).
   const rowsByDeal = new Map<string, Attribution[]>();
   for (const a of attributions) {
     if (!a.deal_id) continue;
-    if (!dealIdsInPeriod.has(a.deal_id)) continue;
     const arr = rowsByDeal.get(a.deal_id) ?? [];
     arr.push(a);
     rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // 2. Keep only deals with at least one attribution row whose
+  //    stage_entered_at falls within the selected period. This
+  //    includes deals that originated in a prior year but had a
+  //    stage transition in the selected period.
+  for (const [dealId, rows] of [...rowsByDeal]) {
+    if (!dealMatchesPeriod(rows, year, filter)) {
+      rowsByDeal.delete(dealId);
+    }
   }
 
   // 3. Pick the deal's "first" row by REGION_STAGE_PRIORITY and tally per
@@ -1626,25 +1725,24 @@ export function computeChannelDistribution(
     return channelId;
   };
 
-  // 1. Identify deals (by deal_id) that have ANY attribution in the period.
-  const dealIdsInPeriod = new Set<string>();
-  for (const a of attributions) {
-    if (!a.deal_id) continue;
-    if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter))
-      continue;
-    dealIdsInPeriod.add(a.deal_id);
-  }
-
-  // 2. Gather all rows for those deals (across all periods) so we can
-  //    pick the earliest by stage priority. Channel/amount selection
-  //    uses the same priority as the region donut for consistency.
+  // 1. Group attributions by deal_id (singletons without a deal_id
+  //    can't form a chain; skip them).
   const rowsByDeal = new Map<string, Attribution[]>();
   for (const a of attributions) {
     if (!a.deal_id) continue;
-    if (!dealIdsInPeriod.has(a.deal_id)) continue;
     const arr = rowsByDeal.get(a.deal_id) ?? [];
     arr.push(a);
     rowsByDeal.set(a.deal_id, arr);
+  }
+
+  // 2. Keep only deals with at least one attribution row whose
+  //    stage_entered_at falls within the selected period. This
+  //    includes deals that originated in a prior year but had a
+  //    stage transition in the selected period.
+  for (const [dealId, rows] of [...rowsByDeal]) {
+    if (!dealMatchesPeriod(rows, year, filter)) {
+      rowsByDeal.delete(dealId);
+    }
   }
 
   // 3. Tally per root channel. Deals whose first-stage row has no
@@ -1870,7 +1968,7 @@ export interface ChannelSpendBreakdown {
 
   costPerLead: number | null;     // null when leads = 0
   costPerMql: number | null;      // null when mqls = 0
-  roi: number | null;              // pipelineAmount / allocatedCost, null when cost = 0
+  roi: number | null;              // wonAmount / allocatedCost, null when cost = 0
 }
 
 export interface ComputeChannelSpendInput {
@@ -1889,7 +1987,10 @@ interface PeriodBounds {
   end: string;       // ISO date inclusive
 }
 
-function periodBoundsFor(year: number, filter: PeriodFilter): PeriodBounds {
+export function periodBoundsFor(
+  year: number,
+  filter: PeriodFilter,
+): PeriodBounds {
   // Inclusive day endpoints, stringly typed so date math stays a
   // simple lexicographic compare against the cost rows.
   if (filter === 'year') {
@@ -1906,6 +2007,24 @@ function periodBoundsFor(year: number, filter: PeriodFilter): PeriodBounds {
     start: `${year}-${m}-01`,
     end: `${year}-${lastMonth}-${lastDay}`,
   };
+}
+
+// True when at least one attribution row's stage_entered_at falls
+// within the selected period. Used by the Opportunities sub-tab to
+// include deals that originated in a prior year but had a stage
+// transition in the selected period.
+export function dealMatchesPeriod(
+  rows: Attribution[],
+  year: number,
+  filter: PeriodFilter,
+): boolean {
+  const period = periodBoundsFor(year, filter);
+  for (const r of rows) {
+    const d = r.stage_entered_at;
+    if (!d) continue;
+    if (d >= period.start && d <= period.end) return true;
+  }
+  return false;
 }
 
 // Inclusive day count between two ISO dates (a <= b). Local-day math
@@ -2209,7 +2328,10 @@ export function computeChannelSpend(
     const won = wonByChannel.get(channel.id) ?? 0;
     const cpl = leadsCount > 0 ? ac / leadsCount : null;
     const cpmql = mqlsCount > 0 ? ac / mqlsCount : null;
-    const roi = ac > 0 ? pipeline / ac : null;
+    // ROI is won-based, not pipeline-based: pipeline can deflate as
+    // deals fall through, and reporting unclosed dollars as "return"
+    // inflates channels that haven't actually paid back yet.
+    const roi = ac > 0 ? won / ac : null;
     out.push({
       channelId: channel.id,
       channelName: channel.name,
@@ -2228,5 +2350,64 @@ export function computeChannelSpend(
       roi,
     });
   }
+
+  // --- 9. Roll up sub-channel metrics to their parents.
+  //
+  // A parent's displayed value = sum of its direct children's (already
+  // rolled-up) values. We walk post-order so deeper subtrees aggregate
+  // before their ancestors. `cost` (direct only) is intentionally left
+  // alone so callers that sum direct cost across rows stay
+  // double-count-free; the displayed Cost column reads `allocatedCost`.
+  //
+  // Content Syndication case: parent.allocatedCost was already its
+  // directCost, and children's allocatedCost slices sum to that same
+  // directCost (because the redistribution loop above fully
+  // re-allocates the parent's budget). Overwriting parent.allocatedCost
+  // with sum-of-children yields the same number, so this is a no-op
+  // for that shape.
+  //
+  // Events case: parent.allocatedCost was 0 and children carry their
+  // own direct costs. After this pass, parent.allocatedCost equals the
+  // sum of its event children's spend, which is what the user expects
+  // when looking at the Events row.
+  const rowsById = new Map<string, ChannelSpendBreakdown>();
+  for (const r of out) rowsById.set(r.channelId, r);
+  const rolledUp = new Set<string>();
+  const rollupRow = (channelId: string): void => {
+    if (rolledUp.has(channelId)) return;
+    rolledUp.add(channelId);
+    const kids = childrenByParent.get(channelId) ?? [];
+    if (kids.length === 0) return; // leaf, nothing to do
+    for (const kid of kids) rollupRow(kid);
+    const r = rowsById.get(channelId);
+    if (!r) return;
+    let allocCost = 0;
+    let leads = 0;
+    let mqls = 0;
+    let opps = 0;
+    let pipe = 0;
+    let won = 0;
+    for (const kid of kids) {
+      const cr = rowsById.get(kid);
+      if (!cr) continue;
+      allocCost += cr.allocatedCost;
+      leads += cr.leads;
+      mqls += cr.mqls;
+      opps += cr.firstTouchOpps;
+      pipe += cr.pipelineAmount;
+      won += cr.wonAmount;
+    }
+    r.allocatedCost = allocCost;
+    r.leads = leads;
+    r.mqls = mqls;
+    r.firstTouchOpps = opps;
+    r.pipelineAmount = pipe;
+    r.wonAmount = won;
+    r.costPerLead = leads > 0 ? allocCost / leads : null;
+    r.costPerMql = mqls > 0 ? allocCost / mqls : null;
+    r.roi = allocCost > 0 ? won / allocCost : null;
+  };
+  for (const channel of channels) rollupRow(channel.id);
+
   return out;
 }

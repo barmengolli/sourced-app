@@ -56,6 +56,11 @@ export interface Channel {
   id: string;
   name: string;
   parent_channel_id?: string | null;
+  // NULL = evergreen (not tied to a specific year). Set by the
+  // year-aware-channels migration. Funnel sub-tabs hide rows whose
+  // year doesn't match the selected year; evergreen rows always
+  // render.
+  year?: number | null;
   display_order: number;
   hidden: boolean;
   created_at: string;
@@ -77,7 +82,12 @@ export interface FunnelActual {
   channel_id: string;
   year: number;
   period_index: PeriodIndex;
-  stage_key: AttributionStageKey;
+  // Matches the relaxed DB CHECK: HPP+ remains the primary case, but
+  // 'lead' and 'mql' rows are valid as historical-year fallbacks
+  // (e.g. 2025 pre-Sourced). The compute layer treats lead/mql
+  // funnel_actuals as a fallback used only when no leads cover the
+  // same (channel, year, period) cell.
+  stage_key: StageKey | AttributionStageKey;
   actual: number | null;
   edited_at: string;
   edited_by?: string | null;
