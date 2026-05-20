@@ -16,10 +16,7 @@ import type {
 } from '../../hooks/useAttributionTouches';
 import { ChannelSelect } from './CreateHPPModal';
 import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
-import {
-  FUNNEL_STAGE_LABELS,
-  MANUAL_ACTUAL_STAGES,
-} from '../../constants/funnelStages';
+import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 
@@ -61,8 +58,12 @@ export default function AttributionEditorModal({
   const [channelId, setChannelId] = useState('');
   const [region, setRegion] = useState<RegionKey>('NA');
   // Year + period_index are derived from stage_entered_at at save time.
-  // No standalone year/quarter controls in the editor anymore.
-  const [stageKey, setStageKey] = useState<AttributionStageKey>('hpp');
+  // No standalone year/quarter controls in the editor anymore. The
+  // row's stage_key is fixed at whatever the row was created as;
+  // users change a row's stage by clearing its date here and filling
+  // the target stage's date in the "Other stage dates" section
+  // (which does CREATE/UPDATE/DELETE end-to-end).
+  const stageKey: AttributionStageKey = attribution?.stage_key ?? 'hpp';
   const [stageEnteredAt, setStageEnteredAt] = useState<string>('');
   const [touches, setTouches] = useState<TouchDraft[]>([]);
 
@@ -101,7 +102,6 @@ export default function AttributionEditorModal({
     setSfLink(attribution.sf_link ?? '');
     setRegion((attribution.region as RegionKey) ?? 'NA');
     setChannelId(attribution.channel_id ?? '');
-    setStageKey(attribution.stage_key);
     setStageEnteredAt(attribution.stage_entered_at);
   }, [attribution]);
 
@@ -191,19 +191,6 @@ export default function AttributionEditorModal({
     stageKey === 'closeWon' ? '' : otherCloseWon,
     stageKey === 'closeLost' ? '' : otherCloseLost,
   ].filter(Boolean).length;
-
-  // Stage dropdown: a stage that already has a (different) row on
-  // this deal is disabled, because switching the primary row INTO
-  // that stage would collide with the existing one. The hint tells
-  // the user how to free up the slot.
-  const stageConflicts = useMemo(() => {
-    const s = new Set<AttributionStageKey>();
-    if (!attribution) return s;
-    for (const [k, row] of dealRowsByStage) {
-      if (row.id !== attribution.id) s.add(k);
-    }
-    return s;
-  }, [attribution, dealRowsByStage]);
 
   if (!attribution) {
     return (
@@ -434,7 +421,7 @@ export default function AttributionEditorModal({
 
           <section className="space-y-2">
             <h3 className="text-xs font-medium text-slate-muted uppercase tracking-wide">
-              Primary channel and period
+              Primary channel and date
             </h3>
             <Field label="Channel">
               <ChannelSelect
@@ -443,40 +430,6 @@ export default function AttributionEditorModal({
                 onChange={setChannelId}
                 disabled={busy}
               />
-            </Field>
-            <Field label="Stage">
-              <select
-                value={stageKey}
-                onChange={(e) =>
-                  setStageKey(e.target.value as AttributionStageKey)
-                }
-                disabled={busy}
-                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
-              >
-                {MANUAL_ACTUAL_STAGES.map((s) => {
-                  // Disable stages already occupied by a different
-                  // row on this deal — switching INTO that slot
-                  // would collide with the existing row. The user
-                  // can free it up by clearing the date in the
-                  // "Other stage dates" section first.
-                  const conflict = stageConflicts.has(s);
-                  return (
-                    <option
-                      key={s}
-                      value={s}
-                      disabled={conflict}
-                      title={
-                        conflict
-                          ? `Already exists on this deal. Clear the ${FUNNEL_STAGE_LABELS[s]} date below first.`
-                          : undefined
-                      }
-                    >
-                      {FUNNEL_STAGE_LABELS[s]}
-                      {conflict ? ' (occupied)' : ''}
-                    </option>
-                  );
-                })}
-              </select>
             </Field>
             <Field label={`Entered ${FUNNEL_STAGE_LABELS[stageKey]} on (required)`}>
               <input
