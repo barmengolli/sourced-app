@@ -431,7 +431,13 @@ export default function FunnelVelocityPage({
           <CampaignInfluenceView
             attributions={attributionsHook.attributions}
             attributionTouches={touchesHook.touches}
-            channels={visibleChannels}
+            // Full channels list, not the year-filtered one. The
+            // Influence tabs explicitly show cross-year deals (e.g.
+            // a 2026 HPP attributed to a 2025 channel), so the
+            // Sankey needs every channel for name resolution. The
+            // donuts below stay on visibleChannels — those are
+            // intentionally scoped to the page-level year.
+            channels={channels}
             regions={regions}
             influenceTab={influenceTab}
           />
