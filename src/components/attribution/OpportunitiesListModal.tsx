@@ -24,6 +24,12 @@ interface OpportunitiesListModalProps {
   stageKey: AttributionStageKey;
   year: number;
   periodIndex: PeriodIndex;
+  // True when the list was opened from a parent (rollup) row — the
+  // page layer pre-rolled the attributions across descendants. We
+  // just need the flag here to tag the header so the user knows
+  // they're looking at the sum across sub-channels, not the
+  // parent's own (always-zero) direct attributions.
+  isRollup?: boolean;
   attributionsHook: UseAttributionsResult;
   touchesHook: UseAttributionTouchesResult;
   onClose: () => void;
@@ -65,6 +71,7 @@ export default function OpportunitiesListModal({
   stageKey,
   year,
   periodIndex,
+  isRollup = false,
   attributionsHook,
   touchesHook,
   onClose,
@@ -104,7 +111,9 @@ export default function OpportunitiesListModal({
               {FUNNEL_STAGE_LABELS[stageKey]} deals
             </h2>
             <p className="text-xs text-slate-muted mt-0.5">
-              {channelName} · {year} Q{periodIndex} · {attributions.length} deal
+              {channelName}
+              {isRollup ? ' (rollup)' : ''} · {year} Q{periodIndex} ·{' '}
+              {attributions.length} deal
               {attributions.length === 1 ? '' : 's'}
             </p>
           </div>

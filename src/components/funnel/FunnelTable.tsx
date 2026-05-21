@@ -341,10 +341,13 @@ function RowCells({
           isAttributionStage(stage) && attributionCounts
             ? attributionCounts[stage as AttributionStageKey] ?? 0
             : 0;
-        const showAttribBadge =
-          attribCount > 0 &&
-          manualActualsEditable &&
-          isAttributionStage(stage);
+        // Badges are clickable drill-downs and don't carry editability.
+        // Parent rows (manualActualsEditable=false) used to suppress
+        // the badge entirely, so the rolled-up cell count wasn't
+        // clickable. Now we show the badge whenever there's a count
+        // on an attribution stage; the manualActualsEditable gate
+        // only governs the alternative numeric-input rendering below.
+        const showAttribBadge = attribCount > 0 && isAttributionStage(stage);
 
         const baseCol = baseColForStage(idx);
         const projCol = baseCol;
@@ -676,9 +679,15 @@ export default function FunnelTable({
                   projectionsEditable={true}
                   manualActualsEditable={!row.hasChildren}
                   attributionCounts={
-                    row.hasChildren || !attributionsByCell
+                    !attributionsByCell
                       ? undefined
                       : (() => {
+                          // Parent rows also get badges now — the page
+                          // layer rolls counts up the channel tree so
+                          // a parent's badge matches the rolled-up
+                          // grid count, and clicking opens the rollup
+                          // modal. Editability is still disabled for
+                          // parents via manualActualsEditable below.
                           const counts: Partial<
                             Record<AttributionStageKey, number>
                           > = {};

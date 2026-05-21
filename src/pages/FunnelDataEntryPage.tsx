@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLeads } from '../hooks/useLeads';
 import { useChannels } from '../hooks/useChannels';
+import { descendantIds } from '../hooks/useChannelMutations';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
 import { useAttributions } from '../hooks/useAttributions';
@@ -33,8 +34,16 @@ interface FunnelDataEntryPageProps {
 }
 
 interface ListModalQuery {
+  // The clicked row's channel id (parent or leaf). Used as the
+  // header's channel label and as the single-channel filter when
+  // channelIds is undefined (leaf-row case).
   channelId: string;
   stage: AttributionStageKey;
+  // Set when the click came from a parent row. Contains the parent's
+  // own id plus every descendant id at any depth; the listAttributions
+  // filter switches to set-membership so the modal sums across
+  // sub-channels — mirroring what the grid cell rendered.
+  channelIds?: string[];
 }
 
 export default function FunnelDataEntryPage({
@@ -127,8 +136,20 @@ export default function FunnelDataEntryPage({
     ],
   );
 
+  // parent map keyed by child id: id → parent id. Drives the
+  // ancestor walk in attributionsByCell so a leaf-channel attribution
+  // also increments every ancestor's cell, giving parent rows a
+  // clickable badge that matches the rolled-up grid count.
+  const parentByChild = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const c of channels) m.set(c.id, c.parent_channel_id ?? null);
+    return m;
+  }, [channels]);
+
   // Per-cell attribution counts for the active period. Keys match what the
   // FunnelTable's RowCells looks up via attributionCellKey(channelId, stage).
+  // Parent rows accumulate their descendants' counts via an ancestor walk
+  // so clicking a parent cell opens the same rollup the grid is showing.
   const attributionsByCell = useMemo(() => {
     const m = new Map<string, number>();
     for (const a of attributionsHook.attributions) {
@@ -136,11 +157,20 @@ export default function FunnelDataEntryPage({
       if (a.year !== year) continue;
       // When viewing 'year' filter, count attributions across all quarters.
       if (filter !== 'year' && `Q${a.period_index}` !== filter) continue;
-      const k = attributionCellKey(a.channel_id, a.stage_key);
-      m.set(k, (m.get(k) ?? 0) + 1);
+      // Increment the leaf cell plus every ancestor's cell. The ancestor
+      // walk is bounded by the channel tree depth (typically 2–3 levels);
+      // a `seen` set guards against malformed cycles in the parent chain.
+      let cur: string | null | undefined = a.channel_id;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const k = attributionCellKey(cur, a.stage_key);
+        m.set(k, (m.get(k) ?? 0) + 1);
+        cur = parentByChild.get(cur) ?? null;
+      }
     }
     return m;
-  }, [attributionsHook.attributions, year, filter]);
+  }, [attributionsHook.attributions, year, filter, parentByChild]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [listQuery, setListQuery] = useState<ListModalQuery | null>(null);
@@ -158,11 +188,19 @@ export default function FunnelDataEntryPage({
 
   // Attributions matching the active list-modal query, derived live so that
   // creating/deleting/promoting in another tab updates the visible list.
+  // When the click came from a parent row, listQuery.channelIds carries
+  // the parent + every descendant; we switch to set membership so the
+  // modal sums across sub-channels.
   const listAttributions = useMemo(() => {
     if (!listQuery) return [];
+    const idSet = listQuery.channelIds
+      ? new Set(listQuery.channelIds)
+      : null;
     return attributionsHook.attributions.filter(
       (a) =>
-        a.channel_id === listQuery.channelId &&
+        (idSet
+          ? Boolean(a.channel_id) && idSet.has(a.channel_id as string)
+          : a.channel_id === listQuery.channelId) &&
         a.stage_key === listQuery.stage &&
         a.year === year &&
         (filter === 'year' || `Q${a.period_index}` === filter),
@@ -289,9 +327,22 @@ export default function FunnelDataEntryPage({
             )
           }
           attributionsByCell={attributionsByCell}
-          onAttributionCellClick={(channelId, stage) =>
-            setListQuery({ channelId, stage })
-          }
+          onAttributionCellClick={(channelId, stage) => {
+            // Parent rows: open the rollup. descendantIds includes the
+            // root itself, so the filter set spans parent + every
+            // descendant at any depth. Leaf rows fall through with
+            // channelIds undefined, preserving the existing single-id
+            // query path.
+            const hasChildren = channels.some(
+              (c) => c.parent_channel_id === channelId,
+            );
+            if (hasChildren) {
+              const ids = [...descendantIds(channels, channelId)];
+              setListQuery({ channelId, stage, channelIds: ids });
+            } else {
+              setListQuery({ channelId, stage });
+            }
+          }}
           editsLocked={editsLocked}
         />
         <ConversionsPanel totals={grid.totals} />
@@ -317,6 +368,7 @@ export default function FunnelDataEntryPage({
           stageKey={listQuery.stage}
           year={year}
           periodIndex={periodIndex}
+          isRollup={Boolean(listQuery.channelIds)}
           attributionsHook={attributionsHook}
           touchesHook={touchesHook}
           onClose={() => setListQuery(null)}
