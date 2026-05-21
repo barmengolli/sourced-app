@@ -39,6 +39,11 @@ export default function FunnelDashboardPage({
   regions,
   onRegionsChange,
 }: FunnelDashboardPageProps) {
+  // Keep FunnelSankeyView reachable for TS while the Funnel Flow
+  // card is commented out below. The void reference satisfies the
+  // compiler's no-unused-locals check without emitting any runtime
+  // work; remove this line when the card is restored.
+  void FunnelSankeyView;
   const { leads } = useLeads();
   const channels = useChannels();
   const projectionsHook = useFunnelProjections();
@@ -222,6 +227,13 @@ export default function FunnelDashboardPage({
             <TrendLineChartView quarterly={quarterly} />
           </ChartCard>
         </div>
+        {/* Funnel Flow Sankey hidden 2026-05-21: visual rendering is
+            misleading at current data volumes (Leads dominates,
+            downstream stages compress to near-invisible threads).
+            Restore once the component is reworked. The
+            FunnelSankeyView component and its imports/hooks are
+            intentionally retained. */}
+        {/*
         <ChartCard
           title="Funnel Flow"
           subtitle="Lead cohort progression through the funnel, with channel attribution preserved end-to-end. Drop-off is the gap between each stage's incoming and outgoing edges."
@@ -235,6 +247,7 @@ export default function FunnelDashboardPage({
             regions={regions}
           />
         </ChartCard>
+        */}
 
       </section>
     </div>
