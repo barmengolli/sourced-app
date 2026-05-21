@@ -50,10 +50,30 @@ export default function ConversionsPanel({ totals }: ConversionsPanelProps) {
               ? null
               : p / 100 / benchmark;
           const color = getOTColor(ratio);
+          // MQL → SQL exception: under strict-cohort the rest of the
+          // table is bounded ≤ 100%, but this row can still exceed it
+          // because MQL count is leads-based while HPP count is
+          // deals-based and the join via attribution.lead_id isn't
+          // reliable for the 2025 backfill. The tooltip explains the
+          // discrepancy so a reader doesn't assume bad data.
+          const showMqlSqlNote = from === 'mql' && to === 'hpp';
           return (
             <li key={`${from}-${to}`} className="space-y-1">
               <div className="flex items-baseline justify-between text-xs">
-                <span className="text-charcoal">{label}</span>
+                <span className="text-charcoal flex items-center gap-1">
+                  {label}
+                  {showMqlSqlNote && (
+                    <span
+                      tabIndex={0}
+                      role="img"
+                      aria-label="About this conversion rate"
+                      title="Computed from period totals. May exceed 100% when deals are sourced outside the standard funnel."
+                      className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-slate-muted text-slate-muted text-[9px] leading-none cursor-help"
+                    >
+                      ?
+                    </span>
+                  )}
+                </span>
                 {p === null ? (
                   <span className="text-slate-muted italic">no data</span>
                 ) : (

@@ -30,7 +30,9 @@ import { quarterOfIsoDate } from '../lib/dates';
 import { filterChannelsByYear } from '../lib/channelFilter';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
-import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
+import CampaignInfluenceView, {
+  type InfluenceTab,
+} from '../components/charts/CampaignInfluenceView';
 import ChannelDistributionDonut from '../components/charts/ChannelDistributionDonut';
 import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
 import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
@@ -203,6 +205,11 @@ export default function FunnelVelocityPage({
       (v) => !v.isTerminal && matchesPeriodForDeal(v, year, filter),
     );
   }, [velocities, year, filter]);
+
+  // Opportunity Influence tab. Defaults to 'all' — every deal in the
+  // system. Year tabs are derived from yearOptions below so the
+  // available years stay in lockstep with the rest of the page.
+  const [influenceTab, setInfluenceTab] = useState<InfluenceTab>('all');
 
   const [sortCol, setSortCol] = useState<SortColumn>('daysInCurrentStage');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -405,26 +412,30 @@ export default function FunnelVelocityPage({
         )}
       </section>
 
-      {/* Opportunity Influence — one Sankey per deal, showing the full
-          touch flow into the deal's stage chain. The section is now
-          period-filtered using the "any stage in period" semantic:
-          a deal appears when at least one of its stage_entered_at
-          dates falls in the selected year + quarter window. A deal
-          whose journey spans years (e.g. HPP in 2025, Pursuit in
-          2026) shows up on BOTH year views. Region filter still
-          applies. */}
+      {/* Opportunity Influence — one Sankey per deal, showing the
+          full touch flow into the deal's stage chain. Tab-driven
+          scope so cross-period deals stay accessible from the
+          Opportunities sub-tab even though the Data Entry grid now
+          enforces strict cohort bounds. Region filter applies on
+          every tab. */}
       <ChartCard
         title="Opportunity Influence"
-        subtitle="Deals with any stage activity in the selected period. Region filter applies."
+        subtitle={influenceSubtitle(influenceTab)}
       >
-        <CampaignInfluenceView
-          attributions={attributionsHook.attributions}
-          attributionTouches={touchesHook.touches}
-          channels={visibleChannels}
-          regions={regions}
-          year={year}
-          filter={filter}
-        />
+        <div className="space-y-3">
+          <InfluenceTabs
+            value={influenceTab}
+            onChange={setInfluenceTab}
+            yearOptions={yearOptions}
+          />
+          <CampaignInfluenceView
+            attributions={attributionsHook.attributions}
+            attributionTouches={touchesHook.touches}
+            channels={visibleChannels}
+            regions={regions}
+            influenceTab={influenceTab}
+          />
+        </div>
       </ChartCard>
 
       {editingAttributionId && (
@@ -438,6 +449,64 @@ export default function FunnelVelocityPage({
       )}
     </div>
   );
+}
+
+// Tab bar above the Opportunity Influence card list. Styled to match
+// the Year / Q1..Q4 toggle row used elsewhere on the funnel pages so
+// it reads as the same control type. Year tabs are generated from
+// yearOptions; the page's All / Close-Won / Close-Lost tabs anchor
+// the two ends.
+function InfluenceTabs({
+  value,
+  onChange,
+  yearOptions,
+}: {
+  value: InfluenceTab;
+  onChange: (next: InfluenceTab) => void;
+  yearOptions: number[];
+}) {
+  const buttons: { key: InfluenceTab; label: string }[] = [
+    { key: 'all', label: 'All' },
+    ...yearOptions.map((y) => ({ key: String(y), label: String(y) })),
+    { key: 'closeWon', label: 'Close-Won' },
+    { key: 'closeLost', label: 'Close-Lost' },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {buttons.map((b) => {
+        const active = b.key === value;
+        return (
+          <button
+            key={b.key}
+            type="button"
+            onClick={() => onChange(b.key)}
+            className={
+              'text-xs px-2.5 py-1 rounded border transition-colors ' +
+              (active
+                ? 'bg-indigo text-white border-indigo'
+                : 'bg-bg text-charcoal border-border hover:bg-muted')
+            }
+            aria-pressed={active}
+          >
+            {b.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function influenceSubtitle(tab: InfluenceTab): string {
+  if (tab === 'all') {
+    return "Every deal's full touch flow. Region filter applies.";
+  }
+  if (tab === 'closeWon') {
+    return 'Deals that closed won, all time. Region filter applies.';
+  }
+  if (tab === 'closeLost') {
+    return 'Deals that closed lost, all time. Region filter applies.';
+  }
+  return `Deals with any stage activity in ${tab}. Region filter applies.`;
 }
 
 function VelocityCard({
