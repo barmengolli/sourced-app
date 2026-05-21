@@ -10,7 +10,7 @@
 // attribution_id from useAttributionTouches) and pass an inline-shape array
 // into the function.
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ResponsiveContainer, Sankey } from 'recharts';
 import type {
   Attribution,
@@ -20,7 +20,7 @@ import type {
   PeriodIndex,
 } from '../../types/db';
 import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
-import { REGIONS, type RegionKey } from '../../constants/regions';
+import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
 
 // Tab driving which deals are visible on the Opportunity Influence
 // section. 'all' has no period scope; a year string (e.g. '2025')
@@ -52,29 +52,16 @@ interface CampaignInfluenceViewProps {
   attributions: Attribution[];
   attributionTouches: AttributionTouch[];
   channels: Channel[];
-  // Region filter applies across every tab. The page-level year
-  // selector no longer scopes this view; tab selection drives the
-  // visible set instead.
-  regions: Set<RegionKey>;
   // Tab-driven scope:
   //   'all'        — every deal in the system
   //   '2025' etc.  — deals with any stage activity in that year
   //   'closeWon'   — deals with a closeWon row (all time)
   //   'closeLost'  — deals with a closeLost row (all time)
+  //
+  // Region and Channel filters are now section-local (managed
+  // internally below) so the user can narrow Opportunity Influence
+  // without disturbing the rest of the page.
   influenceTab: InfluenceTab;
-}
-
-// True when the row passes the region filter. Empty / all-five-selected
-// regions mean "no filter, include everything"; a partial set excludes
-// rows whose region is null/undefined or not in the set. Same contract
-// as compute.ts's regionMatches helper.
-function regionMatches(
-  rowRegion: RegionKey | string | null | undefined,
-  regions: Set<RegionKey>,
-): boolean {
-  if (regions.size === REGIONS.length) return true;
-  if (!rowRegion) return false;
-  return regions.has(rowRegion as RegionKey);
 }
 
 // ---------- DataVis-shape adapter types ----------
@@ -459,10 +446,27 @@ export default function CampaignInfluenceView({
   attributions,
   attributionTouches,
   channels,
-  regions,
   influenceTab,
 }: CampaignInfluenceViewProps) {
   const [showAll, setShowAll] = useState(false);
+
+  // Section-local filter state. Defaults match what the spec calls
+  // out: Region defaults to "all five selected"; Channel defaults to
+  // empty (treated as "no explicit selection = include everything").
+  // Both reset whenever the tab changes since each tab can have a
+  // different deal population (and therefore a different set of
+  // relevant chips).
+  const [influenceRegions, setInfluenceRegions] = useState<Set<RegionKey>>(
+    () => new Set(REGIONS),
+  );
+  const [influenceParentChannels, setInfluenceParentChannels] = useState<
+    Set<string>
+  >(() => new Set());
+  useEffect(() => {
+    setInfluenceRegions(new Set(REGIONS));
+    setInfluenceParentChannels(new Set());
+    setShowAll(false);
+  }, [influenceTab]);
 
   // Adapter: join attribution_touches onto each attribution by attribution_id
   // so the ported buildDealJourneySankeyData can iterate `touches` inline.
@@ -479,32 +483,39 @@ export default function CampaignInfluenceView({
     return m;
   }, [attributionTouches]);
 
-  // Filter by region only (no quarter scope: a deal that spans multiple
-  // quarters should render its full chain in every view). Then reshape
-  // to the DataVis OpportunityAttribution inline-touches form. Rows
-  // outside the selected regions are dropped at the attribution level;
-  // a deal whose every attribution falls outside the filter ends up
-  // with zero matches and won't render a card.
+  // Reshape every attribution into the DataVis-shape inline-touches
+  // form. No region/channel narrowing here — those filters apply
+  // downstream so the chip-count derivations have an un-narrowed base
+  // to work from.
   const opportunityAttributions: OpportunityAttribution[] = useMemo(() => {
-    return attributions
-      .filter((a) => regionMatches(a.region, regions))
-      .map((a) => {
-        const touches = (touchesByAttribution.get(a.id) ?? [])
-          .map((t) => ({ channelId: t.channel_id ?? '' }))
-          .filter((t) => t.channelId !== '');
-        return {
-          id: a.id,
-          dealId: a.deal_id ?? null,
-          stageKey: a.stage_key,
-          channelId: a.channel_id ?? '',
-          year: a.year,
-          periodIndex: a.period_index,
-          label: a.label ?? '',
-          stageEnteredAt: a.stage_entered_at,
-          touches,
-        };
-      });
-  }, [attributions, touchesByAttribution, regions]);
+    return attributions.map((a) => {
+      const touches = (touchesByAttribution.get(a.id) ?? [])
+        .map((t) => ({ channelId: t.channel_id ?? '' }))
+        .filter((t) => t.channelId !== '');
+      return {
+        id: a.id,
+        dealId: a.deal_id ?? null,
+        stageKey: a.stage_key,
+        channelId: a.channel_id ?? '',
+        year: a.year,
+        periodIndex: a.period_index,
+        label: a.label ?? '',
+        stageEnteredAt: a.stage_entered_at,
+        touches,
+      };
+    });
+  }, [attributions, touchesByAttribution]);
+
+  // Per-attribution region lookup (so a deal-level "any attribution
+  // in selected region" check doesn't need to re-walk the original
+  // attribution list).
+  const regionByAttrId = useMemo(() => {
+    const m = new Map<string, RegionKey | null>();
+    for (const a of attributions) {
+      m.set(a.id, (a.region as RegionKey | null) ?? null);
+    }
+    return m;
+  }, [attributions]);
 
   // Channel parent/sub lookup. Sourced uses parent_channel_id (snake_case)
   // where DataVis used parentChannelId, otherwise identical.
@@ -527,11 +538,31 @@ export default function CampaignInfluenceView({
     [channels],
   );
 
-  // Group by dealId. Singletons (no deal_id) use their own attribution id as
-  // the key so they render as their own card.
-  const dealGroups: DealGroup[] = useMemo(() => {
-    const groupMap = new Map<string, DealGroup>();
+  // Resolve a channel id up to its top-level (root) channel id. The
+  // Channel chip filter operates on parents, so any sub-channel rolls
+  // up to its parent for membership. Cycles are guarded just in case
+  // of malformed parent chains.
+  const topLevelIdOf = useCallback(
+    (channelId: string): string => {
+      let cur: string | undefined = channelId;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const node = channels.find((c) => c.id === cur);
+        if (!node) return channelId;
+        if (!node.parent_channel_id) return cur;
+        cur = node.parent_channel_id;
+      }
+      return channelId;
+    },
+    [channels],
+  );
 
+  // Group every reshaped attribution by deal_id. Singleton attributions
+  // (no deal_id) become their own group keyed by attribution id so the
+  // Sankey still has something to render.
+  const allGroups: DealGroup[] = useMemo(() => {
+    const groupMap = new Map<string, DealGroup>();
     for (const attr of opportunityAttributions) {
       const key = attr.dealId || attr.id;
       if (groupMap.has(key)) {
@@ -547,7 +578,6 @@ export default function CampaignInfluenceView({
         });
       }
     }
-
     for (const group of groupMap.values()) {
       group.attributions.sort(
         (a, b) => (STAGE_ORDER[a.stageKey] ?? 0) - (STAGE_ORDER[b.stageKey] ?? 0),
@@ -558,37 +588,117 @@ export default function CampaignInfluenceView({
       group.highestStageLabel = FUNNEL_STAGE_LABELS[highest.stageKey] || highest.stageKey;
       group.label = group.attributions.find((a) => a.label)?.label || '';
     }
+    return [...groupMap.values()];
+  }, [opportunityAttributions]);
 
-    // Tab filter:
-    //   'all'        — no scope (every deal passes).
-    //   year string  — at least one stage_entered_at in that calendar year.
-    //   'closeWon'   — chain contains a closeWon row (all time).
-    //   'closeLost'  — chain contains a closeLost row (all time).
-    // Region filter is already applied upstream at the attribution level.
-    let groups = [...groupMap.values()];
+  // Apply tab filter only. This is the base set for both the Region
+  // chip counts and the next narrowing step.
+  const tabFilteredGroups = useMemo(() => {
     if (influenceTab === 'closeWon') {
-      groups = groups.filter((g) =>
+      return allGroups.filter((g) =>
         g.attributions.some((a) => a.stageKey === 'closeWon'),
       );
-    } else if (influenceTab === 'closeLost') {
-      groups = groups.filter((g) =>
+    }
+    if (influenceTab === 'closeLost') {
+      return allGroups.filter((g) =>
         g.attributions.some((a) => a.stageKey === 'closeLost'),
       );
-    } else if (influenceTab !== 'all') {
-      // Year tab: '2025', '2026', etc. Robust to non-numeric input by
-      // falling through to no filter.
-      const yearNum = parseInt(influenceTab, 10);
-      if (Number.isFinite(yearNum)) {
-        const start = `${yearNum}-01-01`;
-        const end = `${yearNum}-12-31`;
-        groups = groups.filter((g) =>
-          g.attributions.some(
-            (a) => a.stageEnteredAt >= start && a.stageEnteredAt <= end,
-          ),
-        );
+    }
+    if (influenceTab === 'all') return allGroups;
+    // Year tab: '2025', '2026', etc.
+    const yearNum = parseInt(influenceTab, 10);
+    if (!Number.isFinite(yearNum)) return allGroups;
+    const start = `${yearNum}-01-01`;
+    const end = `${yearNum}-12-31`;
+    return allGroups.filter((g) =>
+      g.attributions.some(
+        (a) => a.stageEnteredAt >= start && a.stageEnteredAt <= end,
+      ),
+    );
+  }, [allGroups, influenceTab]);
+
+  // Region chip counts: for each region R, how many tab-in-scope
+  // deals have any attribution in R. Drives the chip's enabled/
+  // muted appearance and matches the spec's "smart" affordance. A
+  // deal can contribute to multiple regions if its chain spans them.
+  const regionChipCounts = useMemo(() => {
+    const counts: Record<RegionKey, number> = {} as Record<RegionKey, number>;
+    for (const r of REGIONS) counts[r] = 0;
+    for (const g of tabFilteredGroups) {
+      const seen = new Set<RegionKey>();
+      for (const a of g.attributions) {
+        const r = regionByAttrId.get(a.id);
+        if (r && (REGIONS as readonly string[]).includes(r) && !seen.has(r)) {
+          seen.add(r);
+          counts[r] += 1;
+        }
       }
     }
+    return counts;
+  }, [tabFilteredGroups, regionByAttrId]);
 
+  // Region filter: drop a deal when none of its attributions sit in
+  // a selected region. Spec semantic — deal-level filtering, not
+  // attribution-level pruning. A multi-region deal still renders its
+  // full chain when any of its regions match.
+  const regionFilteredGroups = useMemo(() => {
+    // Both "empty set" and "all five selected" mean no filter.
+    if (
+      influenceRegions.size === 0 ||
+      influenceRegions.size === REGIONS.length
+    ) {
+      return tabFilteredGroups;
+    }
+    return tabFilteredGroups.filter((g) =>
+      g.attributions.some((a) => {
+        const r = regionByAttrId.get(a.id);
+        return r ? influenceRegions.has(r) : false;
+      }),
+    );
+  }, [tabFilteredGroups, influenceRegions, regionByAttrId]);
+
+  // Available parent-channel chips: every top-level channel that has
+  // at least one deal in the tab+region-in-scope set. Counts drive
+  // optional sorting (highest first) but not visibility — the spec
+  // says to hide parents with zero deals here.
+  const channelChips = useMemo(() => {
+    const counts = new Map<string, { name: string; count: number }>();
+    for (const g of regionFilteredGroups) {
+      const seen = new Set<string>();
+      for (const a of g.attributions) {
+        if (!a.channelId) continue;
+        const topId = topLevelIdOf(a.channelId);
+        if (seen.has(topId)) continue;
+        seen.add(topId);
+        const name = channelNameMap.get(topId) ?? 'Unknown';
+        const entry = counts.get(topId) ?? { name, count: 0 };
+        entry.count += 1;
+        entry.name = name;
+        counts.set(topId, entry);
+      }
+    }
+    return [...counts.entries()]
+      .map(([id, v]) => ({ id, name: v.name, count: v.count }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.name.localeCompare(b.name);
+      });
+  }, [regionFilteredGroups, topLevelIdOf, channelNameMap]);
+
+  // Channel filter: when a non-empty parent set is selected, keep
+  // only deals where at least one attribution's top-level channel is
+  // in the set. Empty set means "no explicit selection = include
+  // everything".
+  const displayedGroups = useMemo(() => {
+    let groups = regionFilteredGroups;
+    if (influenceParentChannels.size > 0) {
+      groups = groups.filter((g) =>
+        g.attributions.some((a) => {
+          if (!a.channelId) return false;
+          return influenceParentChannels.has(topLevelIdOf(a.channelId));
+        }),
+      );
+    }
     // Sort: open deals (current stage HPP/Opp/Pursuit) before terminal
     // deals (closeWon/closeLost). Within each bucket, newest first —
     // open deals by HPP stage_entered_at (or the earliest stage_entered_at
@@ -604,36 +714,126 @@ export default function CampaignInfluenceView({
       }
       const hpp = g.attributions.find((a) => a.stageKey === 'hpp');
       if (hpp) return hpp.stageEnteredAt;
-      // No HPP row (rare; manual entry at a later stage). Fall back to
-      // the chain's earliest stage_entered_at.
       return [...g.attributions]
         .sort((a, b) => a.stageEnteredAt.localeCompare(b.stageEnteredAt))[0]
         .stageEnteredAt;
     };
-    groups.sort((a, b) => {
+    return [...groups].sort((a, b) => {
       const aTerm = isTerminalStage(a.highestStage);
       const bTerm = isTerminalStage(b.highestStage);
-      if (aTerm !== bTerm) return aTerm ? 1 : -1; // open first
-      // Within bucket: newest first (descending ISO date).
+      if (aTerm !== bTerm) return aTerm ? 1 : -1;
       return sortDate(b).localeCompare(sortDate(a));
     });
+  }, [regionFilteredGroups, influenceParentChannels, topLevelIdOf]);
 
-    return groups;
-  }, [opportunityAttributions, influenceTab]);
+  const toggleRegion = (r: RegionKey) => {
+    setInfluenceRegions((prev) => {
+      const next = new Set(prev);
+      if (next.has(r)) next.delete(r);
+      else next.add(r);
+      return next;
+    });
+  };
+  const clearRegions = () => setInfluenceRegions(new Set(REGIONS));
+  const toggleParentChannel = (id: string) => {
+    setInfluenceParentChannels((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const clearChannels = () => setInfluenceParentChannels(new Set());
 
-  if (dealGroups.length === 0) {
+  const filterBar = (
+    <div className="pl-3 border-l-2 border-border space-y-2">
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-slate-muted mr-1 w-14">Region</span>
+        <button
+          type="button"
+          onClick={clearRegions}
+          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
+        >
+          Clear
+        </button>
+        {REGIONS.map((r) => {
+          const on = influenceRegions.has(r);
+          const empty = regionChipCounts[r] === 0;
+          const cls = on
+            ? 'bg-indigo text-white border-indigo'
+            : empty
+              ? 'bg-bg text-slate-muted/60 border-border/60'
+              : 'bg-bg text-charcoal border-border hover:border-charcoal/30';
+          return (
+            <button
+              key={r}
+              type="button"
+              onClick={() => toggleRegion(r)}
+              title={
+                empty
+                  ? `${REGION_LABELS[r]} — no deals in this tab`
+                  : REGION_LABELS[r]
+              }
+              className={`text-xs px-2 py-1 rounded-full border transition-colors ${cls}`}
+            >
+              {r}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-slate-muted mr-1 w-14">Channel</span>
+        <button
+          type="button"
+          onClick={clearChannels}
+          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
+        >
+          Clear
+        </button>
+        {channelChips.length === 0 ? (
+          <span className="text-xs text-slate-muted italic">
+            No channels in scope
+          </span>
+        ) : (
+          channelChips.map((c) => {
+            const on = influenceParentChannels.has(c.id);
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => toggleParentChannel(c.id)}
+                className={
+                  'text-xs px-2 py-1 rounded-full border transition-colors ' +
+                  (on
+                    ? 'bg-indigo text-white border-indigo'
+                    : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+                }
+              >
+                {c.name}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+
+  if (displayedGroups.length === 0) {
     return (
-      <p className="text-xs text-slate-muted italic">
-        No opportunities match the selected tab and region. Switch
-        tabs or adjust the region selector above.
-      </p>
+      <div className="space-y-3">
+        {filterBar}
+        <p className="text-xs text-slate-muted italic">
+          No deals match the current filters.
+        </p>
+      </div>
     );
   }
 
-  const shown = showAll ? dealGroups : dealGroups.slice(0, PAGE);
+  const shown = showAll ? displayedGroups : displayedGroups.slice(0, PAGE);
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
+      {filterBar}
       {shown.map((deal, idx) => (
         <DealJourneySankeyCard
           key={deal.dealId}
@@ -643,7 +843,7 @@ export default function CampaignInfluenceView({
           channelNameMap={channelNameMap}
         />
       ))}
-      {dealGroups.length > PAGE && (
+      {displayedGroups.length > PAGE && (
         <button
           type="button"
           onClick={() => setShowAll((v) => !v)}
@@ -651,7 +851,7 @@ export default function CampaignInfluenceView({
         >
           {showAll
             ? `Show first ${PAGE} only`
-            : `Show all ${dealGroups.length} cards`}
+            : `Show all ${displayedGroups.length} cards`}
         </button>
       )}
     </div>

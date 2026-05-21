@@ -406,14 +406,14 @@ export default function FunnelVelocityPage({
       </section>
 
       {/* Opportunity Influence — one Sankey per deal, showing the
-          full touch flow into the deal's stage chain. Tab-driven
-          scope so cross-period deals stay accessible from the
-          Opportunities sub-tab even though the Data Entry grid now
-          enforces strict cohort bounds. Region filter applies on
-          every tab. */}
+          full touch flow into the deal's stage chain. This section
+          owns its own Region + Channel filters so the user can
+          narrow the influence view without disturbing the velocity
+          cards, donuts, or Active Deals table above (which still
+          read the page-level Region toggle). */}
       <ChartCard
         title="Opportunity Influence"
-        subtitle={influenceSubtitle(influenceTab)}
+        subtitle="Every deal's full touch flow. Use the filters below to narrow this section."
       >
         <div className="space-y-3">
           <InfluenceTabs
@@ -428,7 +428,6 @@ export default function FunnelVelocityPage({
             // (e.g. a 2026 HPP attributed to a 2025 channel) still
             // resolve to a real name instead of "Unknown".
             channels={channels}
-            regions={regions}
             influenceTab={influenceTab}
           />
         </div>
@@ -490,19 +489,6 @@ function InfluenceTabs({
       })}
     </div>
   );
-}
-
-function influenceSubtitle(tab: InfluenceTab): string {
-  if (tab === 'all') {
-    return "Every deal's full touch flow. Region filter applies.";
-  }
-  if (tab === 'closeWon') {
-    return 'Deals that closed won, all time. Region filter applies.';
-  }
-  if (tab === 'closeLost') {
-    return 'Deals that closed lost, all time. Region filter applies.';
-  }
-  return `Deals with any stage activity in ${tab}. Region filter applies.`;
 }
 
 function VelocityCard({
