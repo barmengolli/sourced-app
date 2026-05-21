@@ -27,7 +27,6 @@ import {
   type PeriodFilter,
 } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
-import { filterChannelsByYear } from '../lib/channelFilter';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView, {
@@ -125,14 +124,6 @@ export default function FunnelVelocityPage({
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
   const channels = useChannels();
-  // Year-filtered channels drive every downstream consumer on this
-  // page so a 2026-tagged taxonomy doesn't show through in the 2025
-  // view (and vice versa). Evergreen channels (year IS NULL) always
-  // render.
-  const visibleChannels = useMemo(
-    () => filterChannelsByYear(channels, year),
-    [channels, year],
-  );
   // Pull leads only to derive yearOptions consistently with the other
   // funnel sub-pages; the velocity compute itself doesn't read leads.
   const { leads } = useLeads();
@@ -186,17 +177,19 @@ export default function FunnelVelocityPage({
   );
 
   // Channel distribution: same period-yes, region-no contract as the
-  // region donut. Needs the full channel list to resolve sub-channels
-  // to their top-level parent.
+  // region donut. Uses the full channels list (not visibleChannels)
+  // so cross-year attribution references still resolve to real names
+  // instead of landing in Unknown — the donut's deal scope already
+  // spans cross-year cases, so name lookup needs the same breadth.
   const channelDistribution = useMemo(
     () =>
       computeChannelDistribution({
         attributions: attributionsHook.attributions,
-        channels: visibleChannels,
+        channels,
         year,
         filter,
       }),
-    [attributionsHook.attributions, visibleChannels, year, filter],
+    [attributionsHook.attributions, channels, year, filter],
   );
 
   // Active deals table source: non-terminal, in the selected period.
@@ -431,12 +424,9 @@ export default function FunnelVelocityPage({
           <CampaignInfluenceView
             attributions={attributionsHook.attributions}
             attributionTouches={touchesHook.touches}
-            // Full channels list, not the year-filtered one. The
-            // Influence tabs explicitly show cross-year deals (e.g.
-            // a 2026 HPP attributed to a 2025 channel), so the
-            // Sankey needs every channel for name resolution. The
-            // donuts below stay on visibleChannels — those are
-            // intentionally scoped to the page-level year.
+            // Full channels list so cross-year attribution references
+            // (e.g. a 2026 HPP attributed to a 2025 channel) still
+            // resolve to a real name instead of "Unknown".
             channels={channels}
             regions={regions}
             influenceTab={influenceTab}
