@@ -9,6 +9,7 @@ import type {
   AttributionStageKey,
   Channel,
 } from '../../types/db';
+import { STAGE_RANK } from '../../hooks/useAttributions';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type {
   NewTouchInput,
@@ -16,10 +17,7 @@ import type {
 } from '../../hooks/useAttributionTouches';
 import { ChannelSelect } from './CreateHPPModal';
 import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
-import {
-  FUNNEL_STAGE_LABELS,
-  MANUAL_ACTUAL_STAGES,
-} from '../../constants/funnelStages';
+import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 
@@ -61,8 +59,12 @@ export default function AttributionEditorModal({
   const [channelId, setChannelId] = useState('');
   const [region, setRegion] = useState<RegionKey>('NA');
   // Year + period_index are derived from stage_entered_at at save time.
-  // No standalone year/quarter controls in the editor anymore.
-  const [stageKey, setStageKey] = useState<AttributionStageKey>('hpp');
+  // No standalone year/quarter controls in the editor anymore. The
+  // row's stage_key is fixed at whatever the row was created as;
+  // users change a row's stage by clearing its date here and filling
+  // the target stage's date in the "Other stage dates" section
+  // (which does CREATE/UPDATE/DELETE end-to-end).
+  const stageKey: AttributionStageKey = attribution?.stage_key ?? 'hpp';
   const [stageEnteredAt, setStageEnteredAt] = useState<string>('');
   const [touches, setTouches] = useState<TouchDraft[]>([]);
 
@@ -101,7 +103,6 @@ export default function AttributionEditorModal({
     setSfLink(attribution.sf_link ?? '');
     setRegion((attribution.region as RegionKey) ?? 'NA');
     setChannelId(attribution.channel_id ?? '');
-    setStageKey(attribution.stage_key);
     setStageEnteredAt(attribution.stage_entered_at);
   }, [attribution]);
 
@@ -192,19 +193,6 @@ export default function AttributionEditorModal({
     stageKey === 'closeLost' ? '' : otherCloseLost,
   ].filter(Boolean).length;
 
-  // Stage dropdown: a stage that already has a (different) row on
-  // this deal is disabled, because switching the primary row INTO
-  // that stage would collide with the existing one. The hint tells
-  // the user how to free up the slot.
-  const stageConflicts = useMemo(() => {
-    const s = new Set<AttributionStageKey>();
-    if (!attribution) return s;
-    for (const [k, row] of dealRowsByStage) {
-      if (row.id !== attribution.id) s.add(k);
-    }
-    return s;
-  }, [attribution, dealRowsByStage]);
-
   if (!attribution) {
     return (
       <div className="fixed inset-0 z-40 bg-charcoal/30 flex items-center justify-center p-4">
@@ -230,6 +218,76 @@ export default function AttributionEditorModal({
     stageEnteredAt <= maxDate &&
     derivedPeriodLabel !== '' &&
     stageValidation.ok;
+
+  // Map of stage_key -> setter for the corresponding date input. The
+  // primary stage's slot resolves to setStageEnteredAt; everything
+  // else maps to its other-stage setter. Used by clearDownstream to
+  // mirror a cleared non-terminal date by wiping the strictly-
+  // downstream inputs in the form so the user doesn't see Pursuit
+  // filled while Opp is blank. The actual row deletions happen on
+  // Save via deleteWithCascade.
+  const setterForStage = (k: AttributionStageKey): ((v: string) => void) => {
+    if (k === stageKey) return setStageEnteredAt;
+    switch (k) {
+      case 'hpp':
+        return setOtherHpp;
+      case 'opp':
+        return setOtherOpp;
+      case 'pursuit':
+        return setOtherPursuit;
+      case 'closeWon':
+        return setOtherCloseWon;
+      case 'closeLost':
+        return setOtherCloseLost;
+    }
+  };
+
+  // Strictly-downstream stages (rank > the cleared stage's rank)
+  // that currently have a date filled. closeWon and closeLost share
+  // rank 4 so terminals never cascade onto each other.
+  const downstreamFilledStages = (k: AttributionStageKey): AttributionStageKey[] => {
+    const rank = STAGE_RANK[k];
+    const stages: AttributionStageKey[] = ['hpp', 'opp', 'pursuit', 'closeWon', 'closeLost'];
+    return stages.filter((s) => {
+      if (STAGE_RANK[s] <= rank) return false;
+      const v =
+        s === stageKey
+          ? stageEnteredAt
+          : s === 'hpp'
+          ? otherHpp
+          : s === 'opp'
+          ? otherOpp
+          : s === 'pursuit'
+          ? otherPursuit
+          : s === 'closeWon'
+          ? otherCloseWon
+          : otherCloseLost;
+      return Boolean(v);
+    });
+  };
+
+  // When the user clears a non-terminal stage's date, also clear any
+  // strictly-downstream date inputs so the form stays consistent with
+  // what Save will do (deleteWithCascade removes the downstream rows).
+  const clearDownstreamFor = (k: AttributionStageKey) => {
+    for (const s of downstreamFilledStages(k)) {
+      setterForStage(s)('');
+    }
+  };
+
+  // Muted note shown next to a cleared non-terminal date input when
+  // strictly-downstream rows exist for the deal. The form's auto-
+  // clear already wiped the inputs, but the rows still exist in the
+  // DB and will be removed by deleteWithCascade on Save.
+  const cascadeNoteFor = (k: AttributionStageKey): string | null => {
+    if (!hasDealChain) return null;
+    const rank = STAGE_RANK[k];
+    const downstreamRowCount = Array.from(dealRowsByStage.values()).filter(
+      (r) => STAGE_RANK[r.stage_key] > rank,
+    ).length;
+    if (downstreamRowCount === 0) return null;
+    return `Clearing the ${FUNNEL_STAGE_LABELS[k]} date will also remove ${downstreamRowCount} downstream stage${downstreamRowCount === 1 ? '' : 's'} on save.`;
+  };
 
   const moveTouch = (idx: number, dir: -1 | 1) => {
     setTouches((prev) => {
@@ -343,8 +401,11 @@ export default function AttributionEditorModal({
               });
             }
           } else if (!iso && existing) {
-            // DELETE: existing row was cleared.
-            await attributionsHook.deleteAttribution(existing.id);
+            // DELETE: existing row was cleared. Use deleteWithCascade
+            // so any strictly-downstream rows on the same deal are
+            // also removed in one round trip. The auto-clear UI
+            // logic already wiped the corresponding inputs above.
+            await attributionsHook.deleteWithCascade(existing.id);
           }
         }
       }
@@ -434,7 +495,7 @@ export default function AttributionEditorModal({
 
           <section className="space-y-2">
             <h3 className="text-xs font-medium text-slate-muted uppercase tracking-wide">
-              Primary channel and period
+              Primary channel and date
             </h3>
             <Field label="Channel">
               <ChannelSelect
@@ -444,47 +505,17 @@ export default function AttributionEditorModal({
                 disabled={busy}
               />
             </Field>
-            <Field label="Stage">
-              <select
-                value={stageKey}
-                onChange={(e) =>
-                  setStageKey(e.target.value as AttributionStageKey)
-                }
-                disabled={busy}
-                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
-              >
-                {MANUAL_ACTUAL_STAGES.map((s) => {
-                  // Disable stages already occupied by a different
-                  // row on this deal — switching INTO that slot
-                  // would collide with the existing row. The user
-                  // can free it up by clearing the date in the
-                  // "Other stage dates" section first.
-                  const conflict = stageConflicts.has(s);
-                  return (
-                    <option
-                      key={s}
-                      value={s}
-                      disabled={conflict}
-                      title={
-                        conflict
-                          ? `Already exists on this deal. Clear the ${FUNNEL_STAGE_LABELS[s]} date below first.`
-                          : undefined
-                      }
-                    >
-                      {FUNNEL_STAGE_LABELS[s]}
-                      {conflict ? ' (occupied)' : ''}
-                    </option>
-                  );
-                })}
-              </select>
-            </Field>
             <Field label={`Entered ${FUNNEL_STAGE_LABELS[stageKey]} on (required)`}>
               <input
                 type="date"
                 value={stageEnteredAt}
                 min={minDate}
                 max={maxDate}
-                onChange={(e) => setStageEnteredAt(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setStageEnteredAt(next);
+                  if (!next) clearDownstreamFor(stageKey);
+                }}
                 disabled={busy}
                 className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
               />
@@ -495,6 +526,11 @@ export default function AttributionEditorModal({
                 {derivedPeriodLabel || '—'}
               </span>
             </p>
+            {!stageEnteredAt && cascadeNoteFor(stageKey) && (
+              <p className="text-xs text-slate-muted italic">
+                {cascadeNoteFor(stageKey)}
+              </p>
+            )}
           </section>
 
           {/* Other stage dates — pre-populated from existing rows on
@@ -533,30 +569,42 @@ export default function AttributionEditorModal({
                     <OtherDateField
                       label="HPP entered on"
                       value={otherHpp}
-                      onChange={setOtherHpp}
+                      onChange={(v) => {
+                        setOtherHpp(v);
+                        if (!v) clearDownstreamFor('hpp');
+                      }}
                       min={minDate}
                       max={maxDate}
                       disabled={busy}
+                      cascadeNote={cascadeNoteFor('hpp')}
                     />
                   )}
                   {stageKey !== 'opp' && (
                     <OtherDateField
                       label="Opp entered on"
                       value={otherOpp}
-                      onChange={setOtherOpp}
+                      onChange={(v) => {
+                        setOtherOpp(v);
+                        if (!v) clearDownstreamFor('opp');
+                      }}
                       min={minDate}
                       max={maxDate}
                       disabled={busy}
+                      cascadeNote={cascadeNoteFor('opp')}
                     />
                   )}
                   {stageKey !== 'pursuit' && (
                     <OtherDateField
                       label="Pursuit entered on"
                       value={otherPursuit}
-                      onChange={setOtherPursuit}
+                      onChange={(v) => {
+                        setOtherPursuit(v);
+                        if (!v) clearDownstreamFor('pursuit');
+                      }}
                       min={minDate}
                       max={maxDate}
                       disabled={busy}
+                      cascadeNote={cascadeNoteFor('pursuit')}
                     />
                   )}
                   {stageKey !== 'closeWon' && (
@@ -761,6 +809,7 @@ function OtherDateField({
   min,
   max,
   disabled,
+  cascadeNote,
 }: {
   label: string;
   value: string;
@@ -768,6 +817,7 @@ function OtherDateField({
   min: string;
   max: string;
   disabled?: boolean;
+  cascadeNote?: string | null;
 }) {
   const period = describePeriodFromIso(value);
   return (
@@ -786,6 +836,9 @@ function OtherDateField({
           Will count as:{' '}
           <span className="text-charcoal font-medium">{period || '—'}</span>
         </p>
+      )}
+      {!value && cascadeNote && (
+        <p className="text-xs text-slate-muted italic">{cascadeNote}</p>
       )}
     </Field>
   );

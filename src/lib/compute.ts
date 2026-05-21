@@ -1384,6 +1384,15 @@ export interface DealVelocity {
   // The deal's region (taken from the HPP row when present, else from
   // the earliest attribution in the chain). Drives region filtering.
   region: RegionKey | null;
+  // The id of the attribution row representing the deal's current
+  // stage. Used by the Active deals table's inline Edit button so
+  // the page can open AttributionEditorModal against this row
+  // directly.
+  currentAttributionId: string;
+  // sf_link from the current row, so the deal name can render as a
+  // Salesforce link when the user has populated it. Null when the
+  // row has no SF link configured.
+  sfLink: string | null;
 }
 
 export interface ComputeDealVelocityInput {
@@ -1504,6 +1513,8 @@ export function computeDealVelocities(
       hppPeriodIndex: hppRow ? (hppRow.period_index as PeriodIndex) : null,
       stageEnteredAts,
       region: dealRegion,
+      currentAttributionId: currentRow.id,
+      sfLink: currentRow.sf_link ?? null,
     });
   }
 
