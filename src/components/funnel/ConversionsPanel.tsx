@@ -99,30 +99,45 @@ export default function ConversionsPanel({ totals }: ConversionsPanelProps) {
   );
 }
 
-// Win/Loss rates: deal-level outcome breakdown. Denominator is closed deals
-// (won + lost), not anything upstream — these are "of the deals that
-// closed, what fraction closed each way." Renders dashes when neither side
-// has signal in the period so the panel doesn't shout 0% at users.
+// Cohort outcome split: Win / Loss / In Flight all share the HPP-cohort
+// denominator so the three rates sum to 100% of the deals that entered
+// the funnel in this period. Reads as a clean "where did this cohort
+// end up" breakdown. Renders "no data" across the row when there are
+// no HPPs in scope so the panel doesn't shout 0% at users with empty
+// periods.
 function WinLossBlock({
   totals,
 }: {
   totals: Record<FunnelStageKey, CellValues>;
 }) {
+  const hpp = totals.hpp.actual ?? 0;
   const won = totals.closeWon.actual ?? 0;
   const lost = totals.closeLost.actual ?? 0;
-  const denom = won + lost;
-  const winRate = denom === 0 ? null : (won / denom) * 100;
-  const lossRate = denom === 0 ? null : (lost / denom) * 100;
+  const inFlight = Math.max(0, hpp - won - lost);
+  const winRate = hpp > 0 ? (won / hpp) * 100 : null;
+  const lossRate = hpp > 0 ? (lost / hpp) * 100 : null;
+  const inFlightRate = hpp > 0 ? (inFlight / hpp) * 100 : null;
   return (
     <div className="pt-2 border-t border-border space-y-2">
       <div className="flex items-baseline justify-between text-xs">
-        <span className="text-charcoal">Win rate</span>
+        <span className="text-charcoal flex items-center gap-1">
+          Win rate
+          <span
+            tabIndex={0}
+            role="img"
+            aria-label="About win, loss, and in-flight rates"
+            title="Win rate = Closed Won ÷ HPP cohort for the selected period. Loss rate and In Flight rate use the same denominator; the three sum to 100%."
+            className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-slate-muted text-slate-muted text-[9px] leading-none cursor-help"
+          >
+            ?
+          </span>
+        </span>
         {winRate === null ? (
-          <span className="text-slate-muted italic">—</span>
+          <span className="text-slate-muted italic">no data</span>
         ) : (
           <span
             className="font-medium tabular-nums text-blue-600"
-            title={`${won} won / ${denom} closed`}
+            title={`${won} won / ${hpp} HPP`}
           >
             {formatPct(winRate)}
           </span>
@@ -131,13 +146,26 @@ function WinLossBlock({
       <div className="flex items-baseline justify-between text-xs">
         <span className="text-charcoal">Loss rate</span>
         {lossRate === null ? (
-          <span className="text-slate-muted italic">—</span>
+          <span className="text-slate-muted italic">no data</span>
         ) : (
           <span
             className="font-medium tabular-nums text-danger"
-            title={`${lost} lost / ${denom} closed`}
+            title={`${lost} lost / ${hpp} HPP`}
           >
             {formatPct(lossRate)}
+          </span>
+        )}
+      </div>
+      <div className="flex items-baseline justify-between text-xs">
+        <span className="text-charcoal">In Flight rate</span>
+        {inFlightRate === null ? (
+          <span className="text-slate-muted italic">no data</span>
+        ) : (
+          <span
+            className="font-medium tabular-nums text-charcoal"
+            title={`${inFlight} in flight / ${hpp} HPP`}
+          >
+            {formatPct(inFlightRate)}
           </span>
         )}
       </div>
