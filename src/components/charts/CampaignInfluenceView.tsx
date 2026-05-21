@@ -205,20 +205,59 @@ function buildDealJourneySankeyData(
 
   const linkCountMap = new Map<string, number>();
 
-  // 1. Create touch nodes from the first (earliest) attribution's touches
+  // 1. Create touch nodes from the first (earliest) attribution's
+  //    touches. Fallback path: when the deal has zero touches, or
+  //    every touch resolves to an Unknown channel (e.g. backfilled
+  //    2025 deals where the bulk-create flow's Touch section was
+  //    left empty), synthesize a single "1st Touch" node from the
+  //    earliest stage row's own channel_id. Mirrors the
+  //    computeChannelSpend first-touch fallback so the Sankey and
+  //    the Spend tab read the deal's channel the same way.
+  //
+  //    Acceptance: a deal whose HPP channel_id itself points at a
+  //    since-deleted channel still resolves to Unknown — we don't
+  //    paper over real data issues, we only paper over the missing-
+  //    touch case.
+  const resolvedTouches = firstAttr.touches.map((t) => ({
+    channelId: t.channelId,
+    parts: getChannelParts(t.channelId),
+  }));
+  const anyUsableTouch = resolvedTouches.some(
+    (r) => r.parts.parentName !== 'Unknown',
+  );
+  const useFallback = resolvedTouches.length === 0 || !anyUsableTouch;
+
   const touchNodeIndices: number[] = [];
-  for (let i = 0; i < firstAttr.touches.length; i++) {
-    const touch = firstAttr.touches[i];
-    const parts = getChannelParts(touch.channelId);
-    const ordinal = i === 0 ? '1st Touch' : i === 1 ? '2nd Touch' : i === 2 ? '3rd Touch' : `${i + 1}th Touch`;
+  if (useFallback) {
+    // sorted[0] is already the chain's earliest row by STAGE_ORDER
+    // (HPP first when present, else the lowest-ranked stage). Use
+    // its channel_id as the implicit first touch.
+    const fallbackChannelId = sorted[0]?.channelId ?? '';
+    const parts = getChannelParts(fallbackChannelId);
+    const ordinal = '1st Touch';
     const nodeKey = `touch:${parts.fullKey}@${ordinal}`;
-    touchNodeIndices.push(getOrCreateNode(nodeKey, {
-      name: parts.subName ? `${parts.parentName} - ${parts.subName}` : parts.parentName,
-      parentName: parts.parentName,
-      subName: parts.subName,
-      touchPosition: i,
-      touchLabel: ordinal,
-    }));
+    touchNodeIndices.push(
+      getOrCreateNode(nodeKey, {
+        name: parts.subName ? `${parts.parentName} - ${parts.subName}` : parts.parentName,
+        parentName: parts.parentName,
+        subName: parts.subName,
+        touchPosition: 0,
+        touchLabel: ordinal,
+      }),
+    );
+  } else {
+    for (let i = 0; i < resolvedTouches.length; i++) {
+      const { parts } = resolvedTouches[i];
+      const ordinal = i === 0 ? '1st Touch' : i === 1 ? '2nd Touch' : i === 2 ? '3rd Touch' : `${i + 1}th Touch`;
+      const nodeKey = `touch:${parts.fullKey}@${ordinal}`;
+      touchNodeIndices.push(getOrCreateNode(nodeKey, {
+        name: parts.subName ? `${parts.parentName} - ${parts.subName}` : parts.parentName,
+        parentName: parts.parentName,
+        subName: parts.subName,
+        touchPosition: i,
+        touchLabel: ordinal,
+      }));
+    }
   }
 
   // 2. Create stage nodes for each stage the deal has reached. We carry
@@ -236,11 +275,15 @@ function buildDealJourneySankeyData(
     stageNodeIndices.push(stageNodeIdx);
   }
 
-  // 3. Links: last touch → first stage (weighted by touch position)
+  // 3. Links: last touch → first stage (weighted by touch position).
+  //    Synthetic fallback first-touch uses weight 1 (single thin
+  //    ribbon) so it doesn't visually dominate stage-to-stage links.
   if (touchNodeIndices.length > 0 && stageNodeIndices.length > 0) {
     // All touches point to first stage
     for (let i = 0; i < touchNodeIndices.length; i++) {
-      const weight = TOUCH_WEIGHTS[Math.min(i, TOUCH_WEIGHTS.length - 1)];
+      const weight = useFallback
+        ? 1
+        : TOUCH_WEIGHTS[Math.min(i, TOUCH_WEIGHTS.length - 1)];
       const linkKey = `${touchNodeIndices[i]}-${stageNodeIndices[0]}`;
       linkCountMap.set(linkKey, (linkCountMap.get(linkKey) || 0) + weight);
     }
