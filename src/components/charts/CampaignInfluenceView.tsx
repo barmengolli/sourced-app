@@ -10,7 +10,7 @@
 // attribution_id from useAttributionTouches) and pass an inline-shape array
 // into the function.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ResponsiveContainer, Sankey } from 'recharts';
 import type {
   Attribution,
@@ -593,7 +593,16 @@ export default function CampaignInfluenceView({
 
   // Apply tab filter only. This is the base set for both the Region
   // chip counts and the next narrowing step.
+  //
+  // Non-terminal tabs (All / year) exclude any deal whose chain has
+  // a closeWon or closeLost row. Closed deals live exclusively on the
+  // dedicated Close-Won and Close-Lost tabs, so the in-flight surface
+  // doesn't double-show them.
   const tabFilteredGroups = useMemo(() => {
+    const isOpenDeal = (g: DealGroup): boolean =>
+      !g.attributions.some(
+        (a) => a.stageKey === 'closeWon' || a.stageKey === 'closeLost',
+      );
     if (influenceTab === 'closeWon') {
       return allGroups.filter((g) =>
         g.attributions.some((a) => a.stageKey === 'closeWon'),
@@ -604,16 +613,18 @@ export default function CampaignInfluenceView({
         g.attributions.some((a) => a.stageKey === 'closeLost'),
       );
     }
-    if (influenceTab === 'all') return allGroups;
+    if (influenceTab === 'all') return allGroups.filter(isOpenDeal);
     // Year tab: '2025', '2026', etc.
     const yearNum = parseInt(influenceTab, 10);
-    if (!Number.isFinite(yearNum)) return allGroups;
+    if (!Number.isFinite(yearNum)) return allGroups.filter(isOpenDeal);
     const start = `${yearNum}-01-01`;
     const end = `${yearNum}-12-31`;
-    return allGroups.filter((g) =>
-      g.attributions.some(
-        (a) => a.stageEnteredAt >= start && a.stageEnteredAt <= end,
-      ),
+    return allGroups.filter(
+      (g) =>
+        isOpenDeal(g) &&
+        g.attributions.some(
+          (a) => a.stageEnteredAt >= start && a.stageEnteredAt <= end,
+        ),
     );
   }, [allGroups, influenceTab]);
 
@@ -657,32 +668,28 @@ export default function CampaignInfluenceView({
     );
   }, [tabFilteredGroups, influenceRegions, regionByAttrId]);
 
-  // Available parent-channel chips: every top-level channel that has
-  // at least one deal in the tab+region-in-scope set. Counts drive
-  // optional sorting (highest first) but not visibility — the spec
-  // says to hide parents with zero deals here.
-  const channelChips = useMemo(() => {
-    const counts = new Map<string, { name: string; count: number }>();
+  // Available parent channels for the Channel dropdown: every
+  // top-level channel that has at least one deal in the tab+region-
+  // in-scope set. Sorted alphabetically so the dropdown is easy to
+  // scan; the previous count-desc ordering on the chip row made the
+  // top entries jump around as the user toggled filters.
+  const availableChannels = useMemo(() => {
+    const seen = new Map<string, { name: string }>();
     for (const g of regionFilteredGroups) {
-      const seen = new Set<string>();
+      const seenForGroup = new Set<string>();
       for (const a of g.attributions) {
         if (!a.channelId) continue;
         const topId = topLevelIdOf(a.channelId);
-        if (seen.has(topId)) continue;
-        seen.add(topId);
-        const name = channelNameMap.get(topId) ?? 'Unknown';
-        const entry = counts.get(topId) ?? { name, count: 0 };
-        entry.count += 1;
-        entry.name = name;
-        counts.set(topId, entry);
+        if (seenForGroup.has(topId)) continue;
+        seenForGroup.add(topId);
+        if (!seen.has(topId)) {
+          seen.set(topId, { name: channelNameMap.get(topId) ?? 'Unknown' });
+        }
       }
     }
-    return [...counts.entries()]
-      .map(([id, v]) => ({ id, name: v.name, count: v.count }))
-      .sort((a, b) => {
-        if (b.count !== a.count) return b.count - a.count;
-        return a.name.localeCompare(b.name);
-      });
+    return [...seen.entries()]
+      .map(([id, v]) => ({ id, name: v.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }, [regionFilteredGroups, topLevelIdOf, channelNameMap]);
 
   // Channel filter: when a non-empty parent set is selected, keep
@@ -735,14 +742,6 @@ export default function CampaignInfluenceView({
     });
   };
   const clearRegions = () => setInfluenceRegions(new Set(REGIONS));
-  const toggleParentChannel = (id: string) => {
-    setInfluenceParentChannels((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
   const clearChannels = () => setInfluenceParentChannels(new Set());
 
   const filterBar = (
@@ -790,30 +789,32 @@ export default function CampaignInfluenceView({
         >
           Clear
         </button>
-        {channelChips.length === 0 ? (
-          <span className="text-xs text-slate-muted italic">
-            No channels in scope
-          </span>
-        ) : (
-          channelChips.map((c) => {
-            const on = influenceParentChannels.has(c.id);
-            return (
-              <button
-                key={c.id}
-                type="button"
-                onClick={() => toggleParentChannel(c.id)}
-                className={
-                  'text-xs px-2 py-1 rounded-full border transition-colors ' +
-                  (on
-                    ? 'bg-indigo text-white border-indigo'
-                    : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                }
-              >
-                {c.name}
-              </button>
-            );
-          })
-        )}
+        <ChannelDropdown
+          available={availableChannels}
+          selected={influenceParentChannels}
+          onSetChecked={(id, checked) => {
+            setInfluenceParentChannels((prev) => {
+              // Empty set means "include everything" by convention.
+              // The first uncheck from that default has to first
+              // materialize the full set so we can then drop the
+              // clicked id — otherwise we'd flip into "1 selected"
+              // when the user expected "N-1 selected".
+              const base =
+                prev.size === 0
+                  ? new Set(availableChannels.map((c) => c.id))
+                  : new Set(prev);
+              if (checked) base.add(id);
+              else base.delete(id);
+              return base;
+            });
+          }}
+          onSelectAll={() =>
+            setInfluenceParentChannels(
+              new Set(availableChannels.map((c) => c.id)),
+            )
+          }
+          onClear={clearChannels}
+        />
       </div>
     </div>
   );
@@ -853,6 +854,163 @@ export default function CampaignInfluenceView({
             ? `Show first ${PAGE} only`
             : `Show all ${displayedGroups.length} cards`}
         </button>
+      )}
+    </div>
+  );
+}
+
+// Compact multi-select for the Channel filter. Button label adapts
+// to the current selection: "All channels" when nothing's explicitly
+// selected (empty set means "include everything" per the filter
+// contract), a single channel name when one is on, "N channels"
+// otherwise. Panel opens just below the button, closes on outside
+// click / Escape / re-clicking the button. Selections apply
+// immediately as the user toggles them.
+interface ChannelOption {
+  id: string;
+  name: string;
+}
+
+function ChannelDropdown({
+  available,
+  selected,
+  onSetChecked,
+  onSelectAll,
+  onClear,
+}: {
+  available: ChannelOption[];
+  selected: Set<string>;
+  // Set the checkbox state for one channel. Implemented at the call
+  // site so the parent owns the "empty set = all included" idiom
+  // (materializing the full set on the first uncheck-from-default
+  // happens there, not here).
+  onSetChecked: (id: string, checked: boolean) => void;
+  onSelectAll: () => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const empty = available.length === 0;
+
+  // Close on outside click + Escape. Both listeners are bound only
+  // while the panel is open so the component is quiet at rest.
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const node = containerRef.current;
+      if (node && e.target instanceof Node && !node.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  // Force-close when the available set drops to zero (e.g. user
+  // switched to a tab with no in-scope channels). Keeps the panel
+  // from sticking around with stale chips.
+  useEffect(() => {
+    if (empty && open) setOpen(false);
+  }, [empty, open]);
+
+  const label = (() => {
+    if (selected.size === 0 || selected.size === available.length) {
+      return 'All channels';
+    }
+    if (selected.size === 1) {
+      const onlyId = [...selected][0];
+      const match = available.find((c) => c.id === onlyId);
+      return match?.name ?? '1 channel';
+    }
+    return `${selected.size} channels`;
+  })();
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={() => {
+          if (empty) return;
+          setOpen((v) => !v);
+        }}
+        disabled={empty}
+        title={empty ? 'No channels in scope' : undefined}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={
+          'text-xs px-2 py-1 rounded-full border inline-flex items-center gap-1 ' +
+          (empty
+            ? 'bg-bg text-slate-muted/60 border-border/60 cursor-not-allowed'
+            : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+        }
+      >
+        <span>{label}</span>
+        <span className="text-[10px] leading-none">▾</span>
+      </button>
+      {open && !empty && (
+        <div
+          role="listbox"
+          aria-multiselectable="true"
+          className="absolute top-full left-0 mt-1 z-10 min-w-[12rem] max-h-72 overflow-y-auto bg-bg border border-border rounded shadow-sm"
+        >
+          <div className="sticky top-0 flex items-center justify-between px-2 py-1 border-b border-border bg-bg">
+            <button
+              type="button"
+              onClick={onSelectAll}
+              className="text-xs text-indigo hover:underline"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={onClear}
+              className="text-xs text-slate-muted hover:text-charcoal"
+            >
+              Clear
+            </button>
+          </div>
+          <ul className="py-1">
+            {available.map((c) => {
+              // Empty selection means "all included" per the filter
+              // contract, so render every checkbox checked in that
+              // state so the user can confidently toggle one off.
+              const allChecked = selected.size === 0;
+              const checked = allChecked || selected.has(c.id);
+              return (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={checked}
+                    onClick={() => onSetChecked(c.id, !checked)}
+                    className="w-full flex items-center gap-2 px-2 py-1 text-xs text-charcoal hover:bg-muted text-left"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={
+                        'inline-flex items-center justify-center w-3.5 h-3.5 rounded border ' +
+                        (checked
+                          ? 'bg-indigo border-indigo text-white'
+                          : 'bg-bg border-border')
+                      }
+                    >
+                      {checked ? '✓' : ''}
+                    </span>
+                    <span className="flex-1">{c.name}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </div>
   );
