@@ -131,7 +131,10 @@ function SidebarSectionView({
                     : 'text-charcoal hover:bg-border/60')
                 }
               >
-                {child.label}
+                <span className="flex items-center gap-1.5">
+                  {child.label}
+                  {child.beta && <BetaPill active={active} />}
+                </span>
               </button>
             );
           })}
@@ -160,7 +163,30 @@ function UtilityNavButton({ child, page, onNavigate }: UtilityNavButtonProps) {
           : 'text-charcoal hover:bg-border/60')
       }
     >
-      {child.label}
+      <span className="flex items-center gap-1.5">
+        {child.label}
+        {child.beta && <BetaPill active={active} />}
+      </span>
     </button>
+  );
+}
+
+// Small "Beta" pill rendered next to a sidebar child label. Reuses
+// the app's warning token so it reads as caution without clashing
+// with the indigo primary. The active variant tones the pill down
+// against the indigo-on-white inverted state of the selected row.
+function BetaPill({ active }: { active: boolean }) {
+  const cls = active
+    ? 'bg-white/20 text-white'
+    : 'bg-warning/15 text-warning';
+  return (
+    <span
+      className={
+        'text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded ' +
+        cls
+      }
+    >
+      Beta
+    </span>
   );
 }

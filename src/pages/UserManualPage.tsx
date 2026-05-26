@@ -54,22 +54,13 @@ export default function UserManualPage() {
             Marketing Funnel → Opportunities
           </Row>
           <Row label="Cost per channel and ROI">
-            Marketing Funnel → Spend
+            Marketing Funnel → Spend (Beta)
           </Row>
           <Row label="Quarter-over-quarter comparison">
-            Marketing Funnel → Compare
+            Marketing Funnel → Compare (Beta)
           </Row>
           <Row label="BDR sequence performance">
             Outreach → Data / Dashboard / Compare
-          </Row>
-          <Row label="Edit a single lead's data">
-            Leads
-          </Row>
-          <Row label="Add, rename, or hide a channel">
-            Channels
-          </Row>
-          <Row label="Upload a new Salesforce export">
-            Funnel Import
           </Row>
         </ul>
       </Section>
@@ -94,22 +85,26 @@ export default function UserManualPage() {
           the Active Deals table, and the Opportunity Influence section
           showing each deal's full touch-to-close journey.
         </SubSection>
-        <SubSection title="Spend">
+        <SubSection title="Spend" beta>
           Campaign cost and ROI per channel. Shows budgeted spend, leads
           generated, cost per lead, cost per MQL, first-touch opportunities,
-          pipeline coverage, and won-based ROI.
+          pipeline coverage, and won-based ROI. This tab is in Beta;
+          no further development is planned until the rest of the
+          Marketing Funnel is complete.
         </SubSection>
-        <SubSection title="Compare">
+        <SubSection title="Compare" beta>
           Side-by-side period comparison at monthly granularity. Shows
-          what changed between any two periods you select.
+          what changed between any two periods you select. This tab is in
+          Beta; no further development is planned until the rest of the
+          Marketing Funnel is complete.
         </SubSection>
       </Section>
 
       <Section title="Outreach sub-tabs">
         <SubSection title="Data">
           Weekly snapshots of BDR sequence performance. Each row is one
-          sequence at a point in time; the n8n workflow refreshes the
-          data every Thursday.
+          sequence at a point in time; the data refreshes automatically
+          every Thursday.
         </SubSection>
         <SubSection title="Dashboard">
           Current-week view of sequence performance with week-over-week
@@ -118,22 +113,6 @@ export default function UserManualPage() {
         <SubSection title="Compare">
           Side-by-side period comparison for sequences, same shape as
           the Marketing Funnel Compare tab.
-        </SubSection>
-      </Section>
-
-      <Section title="Utility pages">
-        <SubSection title="Leads">
-          The lead-level ledger. Search by name or email, click into a
-          lead to see and edit any field.
-        </SubSection>
-        <SubSection title="Channels">
-          The campaign taxonomy. Rename, hide, merge, or create channels
-          here; year metadata controls which channels appear in which
-          year's modals.
-        </SubSection>
-        <SubSection title="Funnel Import">
-          Upload a fresh Salesforce export. Match CSV columns to Sourced
-          fields, review the diff, and confirm.
         </SubSection>
       </Section>
 
@@ -236,13 +215,22 @@ function Section({
 function SubSection({
   title,
   children,
+  beta,
 }: {
   title: string;
   children: React.ReactNode;
+  beta?: boolean;
 }) {
   return (
     <div className="space-y-1">
-      <h3 className="text-sm font-medium text-charcoal">{title}</h3>
+      <h3 className="text-sm font-medium text-charcoal flex items-center gap-2">
+        {title}
+        {beta && (
+          <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-warning/15 text-warning">
+            Beta
+          </span>
+        )}
+      </h3>
       <p className="text-sm text-slate-muted">{children}</p>
     </div>
   );
