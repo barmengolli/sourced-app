@@ -62,7 +62,6 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
 
 export const UTILITY_PAGES: SidebarChild[] = [
   { key: 'user-manual', label: 'User Manual' },
-  { key: 'roadmap', label: 'Product Roadmap' },
   { key: 'leads', label: 'Leads' },
   { key: 'channels', label: 'Channels' },
   { key: 'funnel-import', label: 'Funnel Import' },
