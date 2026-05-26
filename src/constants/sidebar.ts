@@ -3,6 +3,9 @@ import type { PageKey } from '../App';
 export interface SidebarChild {
   key: PageKey;
   label: string;
+  // When true, render a small "Beta" pill next to the label in the
+  // sidebar. Signals to readers that the surface isn't finalized.
+  beta?: boolean;
 }
 
 export interface SidebarSection {
@@ -39,8 +42,8 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
       { key: 'funnel-dashboard', label: 'Leads & MQLs' },
       { key: 'funnel-events', label: 'Events' },
       { key: 'funnel-velocity', label: 'Opportunities' },
-      { key: 'funnel-spend', label: 'Spend' },
-      { key: 'funnel-compare', label: 'Compare' },
+      { key: 'funnel-spend', label: 'Spend', beta: true },
+      { key: 'funnel-compare', label: 'Compare', beta: true },
     ],
   },
   {
@@ -58,6 +61,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
 ];
 
 export const UTILITY_PAGES: SidebarChild[] = [
+  { key: 'user-manual', label: 'User Manual' },
   { key: 'leads', label: 'Leads' },
   { key: 'channels', label: 'Channels' },
   { key: 'funnel-import', label: 'Funnel Import' },
