@@ -5,6 +5,7 @@ import LeadsPage from './pages/LeadsPage';
 import ChannelsPage from './pages/ChannelsPage';
 import SettingsPage from './pages/SettingsPage';
 import UserManualPage from './pages/UserManualPage';
+import FeedbackPage from './pages/FeedbackPage';
 import FunnelImportPage from './pages/FunnelImportPage';
 import FunnelDataEntryPage from './pages/FunnelDataEntryPage';
 import FunnelDashboardPage from './pages/FunnelDashboardPage';
@@ -37,7 +38,8 @@ export type PageKey =
   | 'channels'
   | 'funnel-import'
   | 'settings'
-  | 'user-manual';
+  | 'user-manual'
+  | 'feedback';
 
 // Initial page: pick from the Funnel section's lastTabStorageKey if present,
 // else its defaultChild. So returning users land on whatever Funnel sub-tab
@@ -130,6 +132,8 @@ function PageBody({
       return <SettingsPage />;
     case 'user-manual':
       return <UserManualPage />;
+    case 'feedback':
+      return <FeedbackPage />;
   }
 }
 
