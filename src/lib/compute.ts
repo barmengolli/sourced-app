@@ -1877,19 +1877,14 @@ export function computeChannelDistribution(
   const channelsOut: ChannelDealStats[] = [];
   for (const [channelId, v] of tally) {
     if (v.count <= 0) continue;
-    // Year-aware label: prepend the root channel's year so the donut
-    // legend can distinguish duplicate-name year-scoped channels
-    // (e.g. "2025 - Sales" vs "2026 - Sales"). NO_CHANNEL_KEY and
-    // evergreen channels (year IS NULL) keep the bare name.
-    const rootYear =
-      channelId === NO_CHANNEL_KEY
-        ? null
-        : channelById.get(channelId)?.year ?? null;
-    const displayLabel = rootYear ? `${rootYear} - ${v.name}` : v.name;
+    // displayLabel = the canonical channel name. The year prefix
+    // ("2025 - Sales") now lives directly in channels.name in the DB,
+    // so any year-prefix construction here would double up
+    // ("2025 - 2025 - Sales") on the Opportunities donut legend.
     channelsOut.push({
       channelId,
       channelName: v.name,
-      displayLabel,
+      displayLabel: v.name,
       dealCount: v.count,
       totalAmount: v.amount,
       percentageOfCount:
