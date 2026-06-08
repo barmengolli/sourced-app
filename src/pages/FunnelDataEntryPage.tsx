@@ -361,6 +361,20 @@ export default function FunnelDataEntryPage({
           attributionsHook={attributionsHook}
           touchesHook={touchesHook}
           onClose={() => setCreateOpen(false)}
+          onOpenExisting={(dealId) => {
+            // The editor takes an attribution row id, not a deal id.
+            // Prefer the HPP row of the deal so the editor opens at
+            // the canonical entry point; fall back to any row that
+            // shares the deal_id if no HPP row exists.
+            const rows = attributionsHook.attributions.filter(
+              (a) => a.deal_id === dealId,
+            );
+            const target =
+              rows.find((r) => r.stage_key === 'hpp') ?? rows[0] ?? null;
+            if (!target) return;
+            setCreateOpen(false);
+            setEditId(target.id);
+          }}
         />
       )}
 

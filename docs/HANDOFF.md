@@ -96,11 +96,12 @@ These are EIS-owned and not at handoff risk. The new Sourced owner needs:
 
 ## 4. Environment variables
 
-Sourced reads three environment variables, all prefixed with `VITE_` so Vite ships them to the client bundle. **These values are visible to anyone who inspects the JavaScript bundle in their browser.** That is acceptable for the current threat model (the password gate is a soft barrier, not real auth) but should be revisited as part of the F-001 auth migration.
+Sourced reads four environment variables, all prefixed with `VITE_` so Vite ships them to the client bundle. **These values are visible to anyone who inspects the JavaScript bundle in their browser.** That is acceptable for the current threat model (the password gate is a soft barrier, not real auth) but should be revisited as part of the F-001 auth migration.
 
 | Variable | Value | Notes |
 |---|---|---|
 | `VITE_APP_PASSWORD` | The shared password for the gate | Marked sensitive in Vercel but still ships to the client. Rotate periodically. |
+| `VITE_REVEAL_PII_PASSWORD` | Section-level password gate for the Leads view | Different from `VITE_APP_PASSWORD`. Page contents are hidden behind this gate; unlocking exposes raw lead data inside the Leads section only. Defeats shoulder-surfing, not devtools (rows still ship from Supabase). Share only with users who need raw PII access. |
 | `VITE_SUPABASE_URL` | The Supabase project URL (`https://<ref>.supabase.co`) | Stable across deployments |
 | `VITE_SUPABASE_ANON_KEY` | The Supabase anonymous key | Public by design (combined with RLS for security), but RLS is currently permissive (audit F-001) so treat as semi-sensitive |
 
@@ -112,6 +113,7 @@ Sourced reads three environment variables, all prefixed with `VITE_` so Vite shi
 
 ```
 VITE_APP_PASSWORD=<your-password>
+VITE_REVEAL_PII_PASSWORD=<your-pii-password>
 VITE_SUPABASE_URL=https://<your-project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=<your-anon-key>
 ```

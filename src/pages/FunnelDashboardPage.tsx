@@ -201,6 +201,11 @@ export default function FunnelDashboardPage({
             Read-only funnel charts for the selected period. Edit values on
             the Data Entry tab.
           </p>
+          <p className="mt-1 text-sm text-slate-muted">
+            Cohort reporting: each lead is counted in the period they
+            entered the funnel and tracked forward over time. This is not
+            a point-in-time snapshot of current funnel volumes.
+          </p>
         </div>
         <PeriodSelector
           year={year}

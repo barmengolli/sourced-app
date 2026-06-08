@@ -7,6 +7,10 @@ import { STAGE_ORDER } from '../constants/stages';
 import LeadsFilterBar from '../components/leads/LeadsFilterBar';
 import LeadsTable, { type LeadSortKey } from '../components/leads/LeadsTable';
 import LeadDetailDrawer from '../components/leads/LeadDetailDrawer';
+import LeadsGate, {
+  formatLockCountdown,
+  useLeadsGate,
+} from '../components/leads/LeadsGate';
 
 interface LeadsPageProps {
   onNavigate?: (page: PageKey) => void;
@@ -30,7 +34,15 @@ function useDebounced<T>(value: T, ms = 200): T {
   return debounced;
 }
 
-export default function LeadsPage({ onNavigate }: LeadsPageProps = {}) {
+export default function LeadsPage(props: LeadsPageProps = {}) {
+  return (
+    <LeadsGate>
+      <LeadsPageContent {...props} />
+    </LeadsGate>
+  );
+}
+
+function LeadsPageContent({ onNavigate }: LeadsPageProps) {
   const {
     leads,
     loading,
@@ -144,6 +156,7 @@ export default function LeadsPage({ onNavigate }: LeadsPageProps = {}) {
             </p>
           </div>
           <div className="flex items-start gap-2">
+            <LockLeadsButton />
             {onNavigate && (
               <button
                 type="button"
@@ -255,5 +268,26 @@ export default function LeadsPage({ onNavigate }: LeadsPageProps = {}) {
         />
       )}
     </div>
+  );
+}
+
+// Header button: immediate re-lock of the Leads section. Visible
+// only inside the unlocked LeadsGate subtree. Title attribute
+// carries the auto-lock countdown so the user can hover and see
+// "Auto-lock in M:SS".
+function LockLeadsButton() {
+  const { lock, secondsUntilLock } = useLeadsGate();
+  return (
+    <button
+      type="button"
+      onClick={lock}
+      title={`Auto-lock in ${formatLockCountdown(secondsUntilLock)}`}
+      className="text-sm px-3 py-1.5 rounded border border-indigo bg-indigo/10 text-indigo hover:bg-indigo/20"
+    >
+      Lock Leads
+      <span className="ml-1 text-xs text-indigo/70">
+        ({formatLockCountdown(secondsUntilLock)})
+      </span>
+    </button>
   );
 }

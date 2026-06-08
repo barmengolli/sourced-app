@@ -89,6 +89,7 @@ export default function AttributionEditorModal({
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   // Hydrate from props once we have the attribution.
   useEffect(() => {
@@ -299,6 +300,32 @@ export default function AttributionEditorModal({
     });
   };
 
+  // Delete the entire opportunity (every attribution row sharing
+  // this deal). Resolves to the HPP row when available so
+  // deleteWithCascade removes the strictly-downstream chain in one
+  // pass; falls back to the current attribution otherwise (matches
+  // the cascade behavior used by OpportunitiesListModal).
+  const handleDelete = async () => {
+    if (!attribution) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const chain = attributionsHook.attributions.filter(
+        (a) =>
+          attribution.deal_id
+            ? a.deal_id === attribution.deal_id
+            : a.id === attribution.id,
+      );
+      const root =
+        chain.find((r) => r.stage_key === 'hpp') ?? chain[0] ?? attribution;
+      await attributionsHook.deleteWithCascade(root.id);
+      onClose();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Delete failed');
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
     if (!valid) return;
     // Defensive: refuse to save if every date input ended up empty.
@@ -315,7 +342,7 @@ export default function AttributionEditorModal({
     );
     if (!anyDateEntered) {
       setErr(
-        'At least one stage must have a date. To remove the deal entirely, use Delete from the parent modal.',
+        'At least one stage must have a date. To remove the deal entirely, use Delete opportunity.',
       );
       return;
     }
@@ -760,7 +787,40 @@ export default function AttributionEditorModal({
           )}
         </div>
 
-        <footer className="px-5 py-4 border-t border-border flex items-center justify-end gap-2">
+        <footer className="px-5 py-4 border-t border-border flex items-center gap-2">
+          {confirmingDelete ? (
+            <div className="flex items-center gap-2 mr-auto text-xs">
+              <span className="text-charcoal">
+                Delete this opportunity and all of its stage rows? This
+                cannot be undone.
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleDelete()}
+                disabled={busy}
+                className="text-xs px-2 py-1 rounded bg-danger text-white disabled:opacity-40"
+              >
+                {busy ? 'Deleting' : 'Confirm delete'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={busy}
+                className="text-xs px-2 py-1 text-slate-muted hover:text-charcoal"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmingDelete(true)}
+              disabled={busy}
+              className="text-sm px-3 py-1.5 mr-auto text-danger hover:underline disabled:opacity-40"
+            >
+              Delete opportunity
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -772,7 +832,7 @@ export default function AttributionEditorModal({
           <button
             type="button"
             onClick={() => void submit()}
-            disabled={!valid || busy}
+            disabled={!valid || busy || confirmingDelete}
             className="text-sm px-3 py-1.5 rounded bg-indigo text-white disabled:opacity-40"
           >
             {busy ? 'Saving' : 'Save'}

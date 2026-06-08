@@ -3,7 +3,7 @@
 // first touch, and N optional additional touches. On submit, inserts one
 // attribution row at stage_key='hpp' plus the touches via setTouches.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   AttributionStageKey,
   Channel,
@@ -14,6 +14,10 @@ import type { UseAttributionTouchesResult, NewTouchInput } from '../../hooks/use
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
+import {
+  checkForDuplicates,
+  type DupeCheckResult,
+} from '../../lib/dupeDetection';
 
 interface CreateHPPModalProps {
   channels: Channel[];
@@ -23,6 +27,10 @@ interface CreateHPPModalProps {
   touchesHook: UseAttributionTouchesResult;
   onClose: () => void;
   onCreated?: (attributionId: string) => void;
+  // Called when the user clicks "Open existing opportunity" inside a
+  // duplicate-detection banner. Parent is responsible for closing
+  // this modal and opening the editor for the matched deal.
+  onOpenExisting?: (dealId: string) => void;
 }
 
 interface TouchDraft {
@@ -122,6 +130,7 @@ export default function CreateHPPModal({
   touchesHook,
   onClose,
   onCreated,
+  onOpenExisting,
 }: CreateHPPModalProps) {
   const [label, setLabel] = useState('');
   const [account, setAccount] = useState('');
@@ -162,6 +171,28 @@ export default function CreateHPPModal({
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Duplicate detection runs reactively against the existing
+  // attribution list whenever the user edits Label or Salesforce
+  // link. Debounced so a fast typist doesn't recompute on every
+  // keystroke; the helper itself is O(n) over deals so the cost is
+  // small even without the debounce.
+  const [dupeResult, setDupeResult] = useState<DupeCheckResult>({
+    exactMatch: null,
+    fuzzyMatches: [],
+  });
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setDupeResult(
+        checkForDuplicates({
+          name: label,
+          sfLink: sfLink,
+          attributions: attributionsHook.attributions,
+        }),
+      );
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [label, sfLink, attributionsHook.attributions]);
 
   const derivedPeriodLabel = describePeriodFromIso(stageEnteredAt);
 
@@ -206,7 +237,8 @@ export default function CreateHPPModal({
     stageEnteredAt >= minDate &&
     stageEnteredAt <= maxDate &&
     derivedPeriodLabel !== '' &&
-    downstreamOrderOk;
+    downstreamOrderOk &&
+    dupeResult.exactMatch === null;
 
   const submit = async () => {
     if (!valid) return;
@@ -574,6 +606,74 @@ export default function CreateHPPModal({
               </ul>
             )}
           </section>
+
+          {dupeResult.exactMatch && (
+            <div className="text-xs border border-danger/40 bg-danger/5 rounded px-3 py-2 space-y-1">
+              <p className="font-semibold text-danger">
+                Duplicate opportunity detected
+              </p>
+              <p className="text-charcoal">
+                An opportunity with this{' '}
+                {dupeResult.exactMatch.matchedOn === 'sf_link'
+                  ? 'Salesforce link'
+                  : 'name'}{' '}
+                already exists:{' '}
+                <span className="font-semibold">
+                  {dupeResult.exactMatch.name || '(unnamed)'}
+                </span>
+                .
+              </p>
+              {onOpenExisting && dupeResult.exactMatch && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (dupeResult.exactMatch) {
+                      onOpenExisting(dupeResult.exactMatch.dealId);
+                    }
+                  }}
+                  className="text-xs text-indigo hover:underline"
+                >
+                  Open existing opportunity →
+                </button>
+              )}
+            </div>
+          )}
+
+          {!dupeResult.exactMatch && dupeResult.fuzzyMatches.length > 0 && (
+            <div className="text-xs border border-warning/40 bg-warning/5 rounded px-3 py-2 space-y-1">
+              <p className="text-charcoal">
+                Similar opportunit
+                {dupeResult.fuzzyMatches.length > 1 ? 'ies' : 'y'} found:
+              </p>
+              <ul className="space-y-0.5">
+                {dupeResult.fuzzyMatches.map((m) => (
+                  <li
+                    key={m.dealId}
+                    className="flex items-center justify-between gap-2"
+                  >
+                    <span className="text-charcoal truncate">
+                      {m.name || '(unnamed)'}{' '}
+                      <span className="text-slate-muted">
+                        ({Math.round(m.similarity * 100)}% similar)
+                      </span>
+                    </span>
+                    {onOpenExisting && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenExisting(m.dealId)}
+                        className="text-xs text-indigo hover:underline shrink-0"
+                      >
+                        Open existing
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-slate-muted italic">
+                Continue if this is a distinct deal.
+              </p>
+            </div>
+          )}
 
           {err && (
             <p className="text-xs text-danger border border-danger/40 bg-danger/5 rounded px-2 py-1">
