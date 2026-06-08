@@ -12,7 +12,7 @@
 //   - Add the transition to VELOCITY_THRESHOLDS.
 //   - Mount one more <VelocityCard> below.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAttributions } from '../hooks/useAttributions';
 import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { useChannels } from '../hooks/useChannels';
@@ -30,7 +30,7 @@ import { quarterOfIsoDate } from '../lib/dates';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView, {
-  type InfluenceTab,
+  type InfluenceStatus,
 } from '../components/charts/CampaignInfluenceView';
 import ChannelDistributionDonut from '../components/charts/ChannelDistributionDonut';
 import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
@@ -199,10 +199,26 @@ export default function FunnelVelocityPage({
     );
   }, [velocities, year, filter]);
 
-  // Opportunity Influence tab. Defaults to 'all' — every deal in the
-  // system. Year tabs are derived from yearOptions below so the
-  // available years stay in lockstep with the rest of the page.
-  const [influenceTab, setInfluenceTab] = useState<InfluenceTab>('all');
+  // Opportunity Influence filters. Two independent multi-select axes
+  // above the existing Region/Channel rows owned by the view. Both
+  // default to "all on" (every available year, every status), which
+  // is equivalent to the old single-tab 'all' option. Empty set on
+  // either axis is treated as "no filter on that axis" (mirrors the
+  // empty-set semantics the Region row already uses).
+  const allYearsSet = useMemo(() => new Set<number>(yearOptions), [yearOptions]);
+  const [influenceYears, setInfluenceYears] = useState<Set<number>>(
+    () => new Set<number>(yearOptions),
+  );
+  // Re-anchor the year set to the available years whenever yearOptions
+  // changes (new data brings a new year into view). Keeps the
+  // "default = all on" contract without trapping the user on a stale
+  // selection.
+  useEffect(() => {
+    setInfluenceYears(new Set<number>(yearOptions));
+  }, [yearOptions]);
+  const [influenceStatuses, setInfluenceStatuses] = useState<
+    Set<InfluenceStatus>
+  >(() => new Set<InfluenceStatus>(['open', 'closeWon', 'closeLost']));
 
   const [sortCol, setSortCol] = useState<SortColumn>('daysInCurrentStage');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -290,14 +306,14 @@ export default function FunnelVelocityPage({
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <ChartCard
-            title="Deals by Region"
-            subtitle="Distribution across all deals in this period. Region filter does not apply."
+            title="Open Opportunities by Region (HPP, OPP, Pursuit)"
+            subtitle="Open opportunities only (HPP, OPP, Pursuit). Excludes closed-won and closed-lost. Region filter does not apply."
           >
             <RegionDistributionDonut distribution={regionDistribution} />
           </ChartCard>
           <ChartCard
-            title="Deals by Channel"
-            subtitle="Distribution across all deals in this period, grouped by top-level channel."
+            title="Open Opportunities by Channel (HPP, OPP, Pursuit)"
+            subtitle="Open opportunities only (HPP, OPP, Pursuit) for the selected period, grouped by top-level channel."
           >
             <ChannelDistributionDonut distribution={channelDistribution} />
           </ChartCard>
@@ -416,10 +432,13 @@ export default function FunnelVelocityPage({
         subtitle="Every deal's full touch flow. Use the filters below to narrow this section."
       >
         <div className="space-y-3">
-          <InfluenceTabs
-            value={influenceTab}
-            onChange={setInfluenceTab}
+          <InfluenceYearStatusFilters
             yearOptions={yearOptions}
+            years={influenceYears}
+            statuses={influenceStatuses}
+            allYearsSet={allYearsSet}
+            onYearsChange={setInfluenceYears}
+            onStatusesChange={setInfluenceStatuses}
           />
           <CampaignInfluenceView
             attributions={attributionsHook.attributions}
@@ -428,7 +447,9 @@ export default function FunnelVelocityPage({
             // (e.g. a 2026 HPP attributed to a 2025 channel) still
             // resolve to a real name instead of "Unknown".
             channels={channels}
-            influenceTab={influenceTab}
+            yearFilter={influenceYears}
+            statusFilter={influenceStatuses}
+            allYearsSet={allYearsSet}
           />
         </div>
       </ChartCard>
@@ -446,47 +467,106 @@ export default function FunnelVelocityPage({
   );
 }
 
-// Tab bar above the Opportunity Influence card list. Styled to match
-// the Year / Q1..Q4 toggle row used elsewhere on the funnel pages so
-// it reads as the same control type. Year tabs are generated from
-// yearOptions; the page's All / Close-Won / Close-Lost tabs anchor
-// the two ends.
-function InfluenceTabs({
-  value,
-  onChange,
+// Year + Status filter rows above the Opportunity Influence card
+// list. Two independent multi-selects styled to match the Region
+// pill row below (matches Sara's spec). Empty set on either axis
+// is treated as "no filter on that axis" — same semantics the
+// Region row already uses.
+const STATUS_OPTIONS: { key: InfluenceStatus; label: string }[] = [
+  { key: 'open', label: 'Open' },
+  { key: 'closeWon', label: 'Close-Won' },
+  { key: 'closeLost', label: 'Close-Lost' },
+];
+
+function InfluenceYearStatusFilters({
   yearOptions,
+  years,
+  statuses,
+  allYearsSet,
+  onYearsChange,
+  onStatusesChange,
 }: {
-  value: InfluenceTab;
-  onChange: (next: InfluenceTab) => void;
   yearOptions: number[];
+  years: Set<number>;
+  statuses: Set<InfluenceStatus>;
+  allYearsSet: Set<number>;
+  onYearsChange: (next: Set<number>) => void;
+  onStatusesChange: (next: Set<InfluenceStatus>) => void;
 }) {
-  const buttons: { key: InfluenceTab; label: string }[] = [
-    { key: 'all', label: 'All' },
-    ...yearOptions.map((y) => ({ key: String(y), label: String(y) })),
-    { key: 'closeWon', label: 'Close-Won' },
-    { key: 'closeLost', label: 'Close-Lost' },
-  ];
+  const toggleYear = (y: number) => {
+    const next = new Set(years);
+    if (next.has(y)) next.delete(y);
+    else next.add(y);
+    onYearsChange(next);
+  };
+  const toggleStatus = (s: InfluenceStatus) => {
+    const next = new Set(statuses);
+    if (next.has(s)) next.delete(s);
+    else next.add(s);
+    onStatusesChange(next);
+  };
+  const clearYears = () => onYearsChange(new Set(allYearsSet));
+  const clearStatuses = () =>
+    onStatusesChange(
+      new Set<InfluenceStatus>(['open', 'closeWon', 'closeLost']),
+    );
+
   return (
-    <div className="flex flex-wrap items-center gap-1">
-      {buttons.map((b) => {
-        const active = b.key === value;
-        return (
-          <button
-            key={b.key}
-            type="button"
-            onClick={() => onChange(b.key)}
-            className={
-              'text-xs px-2.5 py-1 rounded border transition-colors ' +
-              (active
-                ? 'bg-indigo text-white border-indigo'
-                : 'bg-bg text-charcoal border-border hover:bg-muted')
-            }
-            aria-pressed={active}
-          >
-            {b.label}
-          </button>
-        );
-      })}
+    <div className="pl-3 border-l-2 border-border space-y-2">
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-slate-muted mr-1 w-14">Year</span>
+        <button
+          type="button"
+          onClick={clearYears}
+          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
+        >
+          Clear
+        </button>
+        {yearOptions.map((y) => {
+          const on = years.has(y);
+          const cls = on
+            ? 'bg-indigo text-white border-indigo'
+            : 'bg-bg text-charcoal border-border hover:border-charcoal/30';
+          return (
+            <button
+              key={y}
+              type="button"
+              onClick={() => toggleYear(y)}
+              className={`text-xs px-2 py-1 rounded-full border transition-colors ${cls}`}
+              aria-pressed={on}
+            >
+              {y}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-slate-muted mr-1 w-14">Status</span>
+        <button
+          type="button"
+          onClick={clearStatuses}
+          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
+        >
+          Clear
+        </button>
+        {STATUS_OPTIONS.map((opt) => {
+          const on = statuses.has(opt.key);
+          const cls = on
+            ? 'bg-indigo text-white border-indigo'
+            : 'bg-bg text-charcoal border-border hover:border-charcoal/30';
+          return (
+            <button
+              key={opt.key}
+              type="button"
+              onClick={() => toggleStatus(opt.key)}
+              className={`text-xs px-2 py-1 rounded-full border transition-colors ${cls}`}
+              aria-pressed={on}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

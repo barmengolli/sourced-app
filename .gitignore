@@ -40,3 +40,6 @@ docs/*.tsv
 docs/*.xlsx
 docs/*.xls
 *.sfdc-export.csv
+
+# Claude Code local state (do not commit)
+.claude/
