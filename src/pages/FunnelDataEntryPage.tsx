@@ -8,6 +8,7 @@ import { useAttributions } from '../hooks/useAttributions';
 import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { useCampaignCosts } from '../hooks/useCampaignCosts';
 import { computeGrid, type PeriodFilter } from '../lib/compute';
+import { matchesRegionFilter } from '../lib/regionFilter';
 import { filterChannelsByYear } from '../lib/channelFilter';
 import { currentQuarter, quarterOfIsoDate } from '../lib/dates';
 import type { AttributionStageKey, PeriodIndex } from '../types/db';
@@ -157,6 +158,9 @@ export default function FunnelDataEntryPage({
       if (a.year !== year) continue;
       // When viewing 'year' filter, count attributions across all quarters.
       if (filter !== 'year' && `Q${a.period_index}` !== filter) continue;
+      // Region filter matches the ACT column in computeGrid so the
+      // per-row badges always reconcile with their cell value.
+      if (!matchesRegionFilter(a.region, regions)) continue;
       // Increment the leaf cell plus every ancestor's cell. The ancestor
       // walk is bounded by the channel tree depth (typically 2–3 levels);
       // a `seen` set guards against malformed cycles in the parent chain.
@@ -170,7 +174,7 @@ export default function FunnelDataEntryPage({
       }
     }
     return m;
-  }, [attributionsHook.attributions, year, filter, parentByChild]);
+  }, [attributionsHook.attributions, year, filter, parentByChild, regions]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [listQuery, setListQuery] = useState<ListModalQuery | null>(null);
@@ -203,9 +207,10 @@ export default function FunnelDataEntryPage({
           : a.channel_id === listQuery.channelId) &&
         a.stage_key === listQuery.stage &&
         a.year === year &&
-        (filter === 'year' || `Q${a.period_index}` === filter),
+        (filter === 'year' || `Q${a.period_index}` === filter) &&
+        matchesRegionFilter(a.region, regions),
     );
-  }, [attributionsHook.attributions, listQuery, year, filter]);
+  }, [attributionsHook.attributions, listQuery, year, filter, regions]);
 
   const channelById = useMemo(
     () => new Map(channels.map((c) => [c.id, c] as const)),

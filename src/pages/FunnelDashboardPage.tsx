@@ -143,6 +143,27 @@ export default function FunnelDashboardPage({
     [leads, visibleChannels, year, regions, actualsHook.actuals],
   );
 
+  // Prior-year totals for the YoY overlay on the Total Leads per Month
+  // card. visibleChannels is filtered to the current year so we
+  // recompute the channel set for (year - 1) here — otherwise a
+  // channel only tagged for the prior year would silently drop its
+  // leads from the comparison.
+  const priorYearChannels = useMemo(
+    () => filterChannelsByYear(channels, year - 1),
+    [channels, year],
+  );
+  const priorYearLeads = useMemo(
+    () =>
+      computeMonthlyLeadsForYear({
+        leads,
+        channels: priorYearChannels,
+        year: year - 1,
+        regions,
+        manualActuals: actualsHook.actuals,
+      }),
+    [leads, priorYearChannels, year, regions, actualsHook.actuals],
+  );
+
   // Per-quarter totals across the selected year, for the trend chart. Always
   // computed on this page since charts ARE the surface.
   const quarterly = useMemo(() => {
@@ -204,7 +225,13 @@ export default function FunnelDashboardPage({
         {/* Year-wide bar charts sit at the top so the user lands on
             the portfolio shape before drilling into per-period
             details. These two ignore the quarter selector. */}
-        <YearLeadCharts data={yearLeads} year={year} />
+        <YearLeadCharts
+          data={yearLeads}
+          year={year}
+          priorYearTotals={priorYearLeads.monthTotals}
+          priorYearByChannel={priorYearLeads.byChannel}
+          priorYear={year - 1}
+        />
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <ChartCard title="Actuals vs Projections">
             <BarChartView

@@ -35,6 +35,7 @@ interface TooltipPayloadEntry {
   payload?: {
     channelId?: string;
     channelName?: string;
+    displayLabel?: string;
     dealCount?: number;
     totalAmount?: number;
     percentageOfCount?: number;
@@ -66,7 +67,7 @@ function DonutTooltip({ active, payload, colorOf }: DonutTooltipProps) {
         className="font-semibold"
         style={{ color: colorOf ? colorOf(d.channelId) : CHART_COLORS.charcoal }}
       >
-        {d.channelName ?? 'Unknown'}
+        {d.displayLabel ?? d.channelName ?? 'Unknown'}
       </div>
       <div className="text-charcoal tabular-nums mt-1">
         Deals: {d.dealCount ?? 0}
@@ -111,7 +112,7 @@ export default function ChannelDistributionDonut({
               outerRadius={90}
               paddingAngle={2}
               dataKey="dealCount"
-              nameKey="channelName"
+              nameKey="displayLabel"
               isAnimationActive={false}
             >
               {channels.map((c) => (
@@ -154,7 +155,7 @@ export default function ChannelDistributionDonut({
               style={{ backgroundColor: colorOf(c.channelId) }}
               aria-hidden
             />
-            <span className="text-charcoal truncate">{c.channelName}</span>
+            <span className="text-charcoal truncate">{c.displayLabel}</span>
             <span className="text-slate-muted tabular-nums text-right">
               {c.dealCount}
             </span>

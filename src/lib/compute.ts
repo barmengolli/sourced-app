@@ -9,7 +9,12 @@ import type {
   Lead,
   PeriodIndex,
 } from '../types/db';
-import { REGIONS, type RegionKey } from '../constants/regions';
+import { type RegionKey } from '../constants/regions';
+import {
+  REGION_STAGE_PRIORITY,
+  deriveDealRegion,
+  matchesRegionFilter,
+} from './regionFilter';
 import {
   FUNNEL_STAGES,
   type FunnelStageKey,
@@ -97,20 +102,6 @@ function firstMqlDate(lead: Lead): string | null {
   return best;
 }
 
-// Region filter helper. Returns true when the row should be included.
-// Undefined regions or a fully-populated set means "no filter, include
-// everything." A partial set excludes rows whose region is null/undefined
-// or not in the set.
-function regionMatches(
-  rowRegion: RegionKey | string | null | undefined,
-  regions: Set<RegionKey> | undefined,
-): boolean {
-  if (!regions) return true;
-  if (regions.size === REGIONS.length) return true;
-  if (!rowRegion) return false;
-  return regions.has(rowRegion as RegionKey);
-}
-
 export function computeGrid(input: ComputeInput): ComputedGrid {
   const {
     leads,
@@ -167,7 +158,7 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   const handledByLeads = new Set<string>();
   let unassignedLeadCount = 0;
   for (const l of leads) {
-    if (!regionMatches(l.region, regions)) continue;
+    if (!matchesRegionFilter(l.region, regions)) continue;
     // Lead stage: bucket by marketing_sourced_date.
     const leadBucket = quarterOfIsoDate(l.marketing_sourced_date);
     const leadInPeriod = Boolean(
@@ -243,7 +234,7 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   for (const a of attributions) {
     if (a.stage_key !== 'hpp') continue;
     if (!a.deal_id) continue;
-    if (!regionMatches(a.region, regions)) continue;
+    if (!matchesRegionFilter(a.region, regions)) continue;
     const arr = hppPeriodsByDeal.get(a.deal_id) ?? [];
     arr.push({ year: a.year, quarter: a.period_index });
     hppPeriodsByDeal.set(a.deal_id, arr);
@@ -264,7 +255,7 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   const handledByAttribution = new Set<string>();
   for (const a of attributions) {
     if (!a.channel_id) continue;
-    if (!regionMatches(a.region, regions)) continue;
+    if (!matchesRegionFilter(a.region, regions)) continue;
     const bucket = { year: a.year, quarter: a.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
     // Strict-cohort: non-HPP deal stages require the deal's HPP to
@@ -540,7 +531,7 @@ export function computeWeekly(input: ComputeWeeklyInput): WeeklyGrid {
   // 2. Lead pass.
   let unassignedLeadCount = 0;
   for (const l of leads) {
-    if (!regionMatches(l.region, regions)) continue;
+    if (!matchesRegionFilter(l.region, regions)) continue;
     const leadWeek = isoWeekOf(l.marketing_sourced_date);
     if (leadWeek) {
       const idx = weekIndex.get(weekKey(leadWeek));
@@ -570,7 +561,7 @@ export function computeWeekly(input: ComputeWeeklyInput): WeeklyGrid {
   //    week-of-stage-transition; see the doc comment above).
   for (const a of attributions) {
     if (!a.channel_id) continue;
-    if (!regionMatches(a.region, regions)) continue;
+    if (!matchesRegionFilter(a.region, regions)) continue;
     const w = isoWeekOf(a.created_at);
     if (!w) continue;
     const idx = weekIndex.get(weekKey(w));
@@ -763,7 +754,7 @@ export function computeMonthly(input: ComputeMonthlyInput): MonthlyGrid {
   //    bucket = earliest stage_history entry with stage='mql'.
   let unassignedLeadCount = 0;
   for (const l of leads) {
-    if (!regionMatches(l.region, regions)) continue;
+    if (!matchesRegionFilter(l.region, regions)) continue;
     const leadMonth = monthOfIsoDate(l.marketing_sourced_date);
     if (leadMonth) {
       const idx = monthIndex.get(monthKey(leadMonth));
@@ -794,7 +785,7 @@ export function computeMonthly(input: ComputeMonthlyInput): MonthlyGrid {
   //    computeWeekly's attribution loop.
   for (const a of attributions) {
     if (!a.channel_id) continue;
-    if (!regionMatches(a.region, regions)) continue;
+    if (!matchesRegionFilter(a.region, regions)) continue;
     const aMonth = monthOfIsoDate(a.stage_entered_at);
     if (!aMonth) continue;
     const idx = monthIndex.get(monthKey(aMonth));
@@ -979,7 +970,7 @@ export function computeMonthlyLeadsForYear(
 
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
-    if (!regionMatches(lead.region, regions)) continue;
+    if (!matchesRegionFilter(lead.region, regions)) continue;
     const leadMonth = monthOfIsoDate(lead.marketing_sourced_date);
     if (!leadMonth || leadMonth.year !== year) continue;
     const topId = resolveTopLevelChannelId(
@@ -1221,7 +1212,7 @@ export function computeFunnelSankey(
 
   // ---------- Pass 1: cohort leads ----------
   for (const lead of leads) {
-    if (!regionMatches(lead.region, regions)) continue;
+    if (!matchesRegionFilter(lead.region, regions)) continue;
     const leadBucket = quarterOfIsoDate(lead.marketing_sourced_date);
     if (!leadBucket || !matchesPeriod(leadBucket, year, filter)) continue;
     if (!lead.source_channel_id) continue; // unattributed leads skip the Sankey
@@ -1278,10 +1269,12 @@ export function computeFunnelSankey(
     // lead-sourced deal that should have been counted in Pass 1; skip.
     if (dealAttrs.some((a) => a.lead_id)) continue;
 
-    // Filter by the HPP row's period + region (the entry-point row).
+    // Filter by the HPP row's period (the entry-point row) and the
+    // deal's canonical region derived from REGION_STAGE_PRIORITY so
+    // a chain reads the same region everywhere.
     const hpp = dealAttrs.find((a) => a.stage_key === 'hpp');
     if (!hpp) continue; // chains without an HPP entry don't enter the Sankey
-    if (!regionMatches(hpp.region, regions)) continue;
+    if (!matchesRegionFilter(deriveDealRegion(dealAttrs), regions)) continue;
     if (!matchesPeriod({ year: hpp.year, quarter: hpp.period_index }, year, filter)) {
       continue;
     }
@@ -1301,7 +1294,7 @@ export function computeFunnelSankey(
     if (a.lead_id) continue;
     if (a.deal_id) continue;
     if (a.stage_key !== 'hpp') continue;
-    if (!regionMatches(a.region, regions)) continue;
+    if (!matchesRegionFilter(a.region, regions)) continue;
     if (!matchesPeriod({ year: a.year, quarter: a.period_index }, year, filter)) {
       continue;
     }
@@ -1502,16 +1495,16 @@ export function computeDealVelocities(
     }
     if (!currentRow) continue;
 
-    // Region filter: take from the HPP row when present (it's the entry
-    // point), else from the current row. Apply the same partial-set
-    // semantics as regionMatches.
+    // Region filter: derive the deal's region from its earliest
+    // stage row by REGION_STAGE_PRIORITY (matches the canonical
+    // computeRegionDistribution pattern). Null region falls through
+    // to 'Other' inside matchesRegionFilter so manual deals with no
+    // region show up under 'Other'.
     const hppRow = rows.find((r) => r.stage_key === 'hpp') ?? null;
     const oppRow = rows.find((r) => r.stage_key === 'opp') ?? null;
     const pursuitRow = rows.find((r) => r.stage_key === 'pursuit') ?? null;
-    const dealRegion = (hppRow?.region ?? currentRow.region ?? null) as
-      | RegionKey
-      | null;
-    if (!regionMatches(dealRegion, regions)) continue;
+    const dealRegion = deriveDealRegion(rows);
+    if (!matchesRegionFilter(dealRegion, regions)) continue;
 
     const currentStage = currentRow.stage_key;
     const currentStageEnteredAt = currentRow.stage_entered_at;
@@ -1661,16 +1654,27 @@ export interface ComputeRegionDistributionInput {
   filter: PeriodFilter;
 }
 
-// Stage order used to pick the deal's "first" row. Matches VELOCITY_PROGRESSION
-// plus closeLost as a parallel terminal; for region/amount selection
-// closeLost only matters when it's the only row in the chain.
-const REGION_STAGE_PRIORITY: AttributionStageKey[] = [
-  'hpp',
-  'opp',
-  'pursuit',
-  'closeWon',
-  'closeLost',
-];
+// Returns true when a deal's attribution chain is "open" — at least
+// one row at hpp/opp/pursuit AND no row at closeWon/closeLost. Same
+// definition the Active deals table uses (via !isTerminal on the
+// current stage), exposed here so the Opportunities donuts and the
+// table reconcile by construction.
+export function isDealOpen(rows: Attribution[]): boolean {
+  let hasOpen = false;
+  for (const r of rows) {
+    if (r.stage_key === 'closeWon' || r.stage_key === 'closeLost') {
+      return false;
+    }
+    if (
+      r.stage_key === 'hpp' ||
+      r.stage_key === 'opp' ||
+      r.stage_key === 'pursuit'
+    ) {
+      hasOpen = true;
+    }
+  }
+  return hasOpen;
+}
 
 export function computeRegionDistribution(
   input: ComputeRegionDistributionInput,
@@ -1687,11 +1691,16 @@ export function computeRegionDistribution(
     rowsByDeal.set(a.deal_id, arr);
   }
 
-  // 2. Keep only deals with at least one attribution row whose
-  //    stage_entered_at falls within the selected period. This
-  //    includes deals that originated in a prior year but had a
-  //    stage transition in the selected period.
+  // 2. Keep only OPEN deals with at least one attribution row whose
+  //    stage_entered_at falls within the selected period. Open means
+  //    the chain has at least one HPP/Opp/Pursuit row and no
+  //    closeWon/closeLost row — mirrors the Active deals table on
+  //    the same page so the donut and the table reconcile.
   for (const [dealId, rows] of [...rowsByDeal]) {
+    if (!isDealOpen(rows)) {
+      rowsByDeal.delete(dealId);
+      continue;
+    }
     if (!dealMatchesPeriod(rows, year, filter)) {
       rowsByDeal.delete(dealId);
     }
@@ -1756,6 +1765,12 @@ export const NO_CHANNEL_KEY = '__no_channel__';
 export interface ChannelDealStats {
   channelId: string;       // root channel id or NO_CHANNEL_KEY
   channelName: string;
+  // Year-aware label for surfaces (the Opportunities donut) that
+  // need to distinguish a 2025 channel from a 2026 channel with the
+  // same bare name. Evergreen channels (year IS NULL) fall back to
+  // the bare name. channelName stays the canonical bare name for
+  // any consumer that still wants it.
+  displayLabel: string;
   dealCount: number;
   totalAmount: number;
   percentageOfCount: number;
@@ -1808,11 +1823,15 @@ export function computeChannelDistribution(
     rowsByDeal.set(a.deal_id, arr);
   }
 
-  // 2. Keep only deals with at least one attribution row whose
-  //    stage_entered_at falls within the selected period. This
-  //    includes deals that originated in a prior year but had a
-  //    stage transition in the selected period.
+  // 2. Keep only OPEN deals with at least one attribution row whose
+  //    stage_entered_at falls within the selected period. Open means
+  //    HPP/Opp/Pursuit present and no closeWon/closeLost — mirrors
+  //    the Active deals table on the same page.
   for (const [dealId, rows] of [...rowsByDeal]) {
+    if (!isDealOpen(rows)) {
+      rowsByDeal.delete(dealId);
+      continue;
+    }
     if (!dealMatchesPeriod(rows, year, filter)) {
       rowsByDeal.delete(dealId);
     }
@@ -1858,9 +1877,19 @@ export function computeChannelDistribution(
   const channelsOut: ChannelDealStats[] = [];
   for (const [channelId, v] of tally) {
     if (v.count <= 0) continue;
+    // Year-aware label: prepend the root channel's year so the donut
+    // legend can distinguish duplicate-name year-scoped channels
+    // (e.g. "2025 - Sales" vs "2026 - Sales"). NO_CHANNEL_KEY and
+    // evergreen channels (year IS NULL) keep the bare name.
+    const rootYear =
+      channelId === NO_CHANNEL_KEY
+        ? null
+        : channelById.get(channelId)?.year ?? null;
+    const displayLabel = rootYear ? `${rootYear} - ${v.name}` : v.name;
     channelsOut.push({
       channelId,
       channelName: v.name,
+      displayLabel,
       dealCount: v.count,
       totalAmount: v.amount,
       percentageOfCount:
@@ -1957,7 +1986,7 @@ export function computeEventActivations(
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
     if (!eventChannelIds.has(lead.source_channel_id)) continue;
-    if (!regionMatches(lead.region, regions)) continue;
+    if (!matchesRegionFilter(lead.region, regions)) continue;
     const bucket = quarterOfIsoDate(lead.marketing_sourced_date);
     if (!bucket || !matchesPeriod(bucket, year, filter)) continue;
 
@@ -2200,7 +2229,7 @@ export function computeChannelSpend(
   const mqlsByChannel = new Map<string, number>();
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
-    if (!regionMatches(lead.region, regions)) continue;
+    if (!matchesRegionFilter(lead.region, regions)) continue;
     const d = lead.marketing_sourced_date;
     if (d && d >= period.start && d <= period.end) {
       leadsByChannel.set(
@@ -2290,16 +2319,11 @@ export function computeChannelSpend(
   for (const [dealId, rows] of rowsByDeal) {
     const ftChannel = firstTouchByDeal.get(dealId) ?? null;
     if (!ftChannel) continue;
-    // Region: use the HPP row's region as the deal's region, falling
-    // back to the earliest row when no HPP row exists.
-    const hpp = rows.find((r) => r.stage_key === 'hpp');
-    const dealRegion =
-      hpp?.region ??
-      [...rows].sort((a, b) =>
-        a.stage_entered_at.localeCompare(b.stage_entered_at),
-      )[0]?.region ??
-      null;
-    if (!regionMatches(dealRegion, regions)) continue;
+    // Region: derive from the earliest stage row by
+    // REGION_STAGE_PRIORITY so every deal-level surface reads the
+    // same region for the same deal.
+    const dealRegion = deriveDealRegion(rows);
+    if (!matchesRegionFilter(dealRegion, regions)) continue;
 
     const cohort = dealCohortDate(rows);
     if (!cohort || cohort < period.start || cohort > period.end) continue;

@@ -22,12 +22,16 @@ import type {
 import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
 import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
 
-// Tab driving which deals are visible on the Opportunity Influence
-// section. 'all' has no period scope; a year string (e.g. '2025')
-// uses the "any stage activity in year" semantic; 'closeWon' /
-// 'closeLost' span all time and only show deals with that terminal
-// row. The Region filter applies across every tab.
-export type InfluenceTab = 'all' | 'closeWon' | 'closeLost' | string;
+// Two independent multi-select filter axes for the Opportunity
+// Influence section: a Set<number> of selected years, and a
+// Set<InfluenceStatus> of selected statuses. Region and Channel
+// rows live inside this component and compose on top via AND.
+//
+// Empty set on either axis is treated as "no filter on that axis"
+// (mirrors the Region row's empty-set semantics). A full set
+// covering every option is also treated as "no filter" so toggling
+// the last pill off and then back on is a no-op.
+export type InfluenceStatus = 'open' | 'closeWon' | 'closeLost';
 
 // "Feb 3, 2026" formatter for the stage-entry-date sub-label under each
 // stage node. Returns '' for an empty/invalid ISO so the renderer can
@@ -52,16 +56,20 @@ interface CampaignInfluenceViewProps {
   attributions: Attribution[];
   attributionTouches: AttributionTouch[];
   channels: Channel[];
-  // Tab-driven scope:
-  //   'all'        — every deal in the system
-  //   '2025' etc.  — deals with any stage activity in that year
-  //   'closeWon'   — deals with a closeWon row (all time)
-  //   'closeLost'  — deals with a closeLost row (all time)
-  //
-  // Region and Channel filters are now section-local (managed
-  // internally below) so the user can narrow Opportunity Influence
-  // without disturbing the rest of the page.
-  influenceTab: InfluenceTab;
+  // Year axis: a chain matches when at least one of its rows falls
+  // in a selected year. Empty set or a set covering every available
+  // year means "no year filter".
+  yearFilter: Set<number>;
+  // Status axis: a chain matches when its derived status is in the
+  // selected set. Empty set or full set means "no status filter".
+  // Status semantics:
+  //   open       — at least one HPP/Opp/Pursuit row, no closeWon/closeLost.
+  //   closeWon   — at least one closeWon row.
+  //   closeLost  — at least one closeLost row.
+  statusFilter: Set<InfluenceStatus>;
+  // Reference set of available years, used to detect the "full set
+  // = no filter" sentinel without re-deriving from attributions.
+  allYearsSet: Set<number>;
 }
 
 // ---------- DataVis-shape adapter types ----------
@@ -446,27 +454,24 @@ export default function CampaignInfluenceView({
   attributions,
   attributionTouches,
   channels,
-  influenceTab,
+  yearFilter,
+  statusFilter,
+  allYearsSet,
 }: CampaignInfluenceViewProps) {
   const [showAll, setShowAll] = useState(false);
 
   // Section-local filter state. Defaults match what the spec calls
   // out: Region defaults to "all five selected"; Channel defaults to
   // empty (treated as "no explicit selection = include everything").
-  // Both reset whenever the tab changes since each tab can have a
-  // different deal population (and therefore a different set of
-  // relevant chips).
+  // Year/Status are independent upstream axes; toggling them no
+  // longer wipes Region/Channel (multi-select is incremental, not a
+  // mode switch).
   const [influenceRegions, setInfluenceRegions] = useState<Set<RegionKey>>(
     () => new Set(REGIONS),
   );
   const [influenceParentChannels, setInfluenceParentChannels] = useState<
     Set<string>
   >(() => new Set());
-  useEffect(() => {
-    setInfluenceRegions(new Set(REGIONS));
-    setInfluenceParentChannels(new Set());
-    setShowAll(false);
-  }, [influenceTab]);
 
   // Adapter: join attribution_touches onto each attribution by attribution_id
   // so the ported buildDealJourneySankeyData can iterate `touches` inline.
@@ -591,42 +596,42 @@ export default function CampaignInfluenceView({
     return [...groupMap.values()];
   }, [opportunityAttributions]);
 
-  // Apply tab filter only. This is the base set for both the Region
-  // chip counts and the next narrowing step.
-  //
-  // Non-terminal tabs (All / year) exclude any deal whose chain has
-  // a closeWon or closeLost row. Closed deals live exclusively on the
-  // dedicated Close-Won and Close-Lost tabs, so the in-flight surface
-  // doesn't double-show them.
+  // Apply Year and Status filters. This is the base set for the
+  // Region chip counts and the next narrowing steps. Each axis uses
+  // the empty-set OR full-set "no filter" sentinel so toggling all
+  // pills off (or all on) is equivalent to "everything".
   const tabFilteredGroups = useMemo(() => {
-    const isOpenDeal = (g: DealGroup): boolean =>
-      !g.attributions.some(
-        (a) => a.stageKey === 'closeWon' || a.stageKey === 'closeLost',
-      );
-    if (influenceTab === 'closeWon') {
-      return allGroups.filter((g) =>
-        g.attributions.some((a) => a.stageKey === 'closeWon'),
-      );
-    }
-    if (influenceTab === 'closeLost') {
-      return allGroups.filter((g) =>
-        g.attributions.some((a) => a.stageKey === 'closeLost'),
-      );
-    }
-    if (influenceTab === 'all') return allGroups.filter(isOpenDeal);
-    // Year tab: '2025', '2026', etc.
-    const yearNum = parseInt(influenceTab, 10);
-    if (!Number.isFinite(yearNum)) return allGroups.filter(isOpenDeal);
-    const start = `${yearNum}-01-01`;
-    const end = `${yearNum}-12-31`;
-    return allGroups.filter(
-      (g) =>
-        isOpenDeal(g) &&
-        g.attributions.some(
-          (a) => a.stageEnteredAt >= start && a.stageEnteredAt <= end,
-        ),
-    );
-  }, [allGroups, influenceTab]);
+    const yearActive =
+      yearFilter.size > 0 && yearFilter.size < allYearsSet.size;
+    const statusActive = statusFilter.size > 0 && statusFilter.size < 3;
+    return allGroups.filter((g) => {
+      if (yearActive) {
+        const yearOk = g.attributions.some((a) => yearFilter.has(a.year));
+        if (!yearOk) return false;
+      }
+      if (statusActive) {
+        const hasOpen = g.attributions.some(
+          (a) =>
+            a.stageKey === 'hpp' ||
+            a.stageKey === 'opp' ||
+            a.stageKey === 'pursuit',
+        );
+        const hasWon = g.attributions.some((a) => a.stageKey === 'closeWon');
+        const hasLost = g.attributions.some((a) => a.stageKey === 'closeLost');
+        // Open = hpp/opp/pursuit present AND no closeWon/closeLost.
+        // Matches the isDealOpen contract used by the Opportunities
+        // donuts so the section reconciles with the page's other
+        // open-pipeline surfaces.
+        const isOpen = hasOpen && !hasWon && !hasLost;
+        const ok =
+          (statusFilter.has('open') && isOpen) ||
+          (statusFilter.has('closeWon') && hasWon) ||
+          (statusFilter.has('closeLost') && hasLost);
+        if (!ok) return false;
+      }
+      return true;
+    });
+  }, [allGroups, yearFilter, statusFilter, allYearsSet]);
 
   // Region chip counts: for each region R, how many tab-in-scope
   // deals have any attribution in R. Drives the chip's enabled/
