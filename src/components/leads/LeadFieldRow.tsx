@@ -6,11 +6,7 @@ import {
   LEAD_FIELD_LABELS,
 } from '../../constants/leadFields';
 import { STAGE_LABELS, STAGE_ORDER } from '../../constants/stages';
-import {
-  REGIONS,
-  REGION_LABELS,
-  type RegionKey,
-} from '../../constants/regions';
+import { REGIONS, type RegionKey } from '../../constants/regions';
 import {
   EVENT_ACTIVATION_VALUES,
   type EventActivation,
@@ -165,7 +161,7 @@ export default function LeadFieldRow({
           <option value="">(none)</option>
           {REGIONS.map((r) => (
             <option key={r} value={r}>
-              {r} — {REGION_LABELS[r]}
+              {r}
             </option>
           ))}
         </select>

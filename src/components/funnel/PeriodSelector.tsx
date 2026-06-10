@@ -83,7 +83,7 @@ export default function PeriodSelector({
           );
         })}
       </div>
-      <div className="flex items-center gap-1">
+      <div className="flex flex-wrap items-center gap-1">
         <span className="text-xs text-slate-muted mr-1">Region</span>
         <button
           type="button"

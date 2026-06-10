@@ -13,7 +13,7 @@ import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type { UseAttributionTouchesResult, NewTouchInput } from '../../hooks/useAttributionTouches';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
-import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
+import { REGIONS, type RegionKey } from '../../constants/regions';
 import {
   checkForDuplicates,
   type DupeCheckResult,
@@ -407,7 +407,7 @@ export default function CreateHPPModal({
               >
                 {REGIONS.map((r) => (
                   <option key={r} value={r}>
-                    {r} — {REGION_LABELS[r]}
+                    {r}
                   </option>
                 ))}
               </select>

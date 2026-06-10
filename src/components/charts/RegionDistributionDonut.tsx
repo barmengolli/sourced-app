@@ -30,7 +30,12 @@ function fmtUsdCompact(n: number): string {
 // Deterministic color per region. We pick by REGIONS order rather than
 // donut-slice order so a region's color stays stable across periods
 // (NA is always indigo, even when it's not the largest slice).
-const REGION_ORDER: RegionKey[] = ['NA', 'EMEA', 'APAC', 'LATAM', 'Other'];
+const REGION_ORDER: RegionKey[] = [
+  'NA',
+  'EMEA cont & LATAM',
+  'UK&IRE, ME, Japan',
+  'Other',
+];
 function colorForRegion(region: RegionKey): string {
   const idx = REGION_ORDER.indexOf(region);
   return CHART_PALETTE[idx % CHART_PALETTE.length];

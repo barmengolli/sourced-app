@@ -245,7 +245,7 @@ export default function FunnelComparePage({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1 ml-auto">
+        <div className="flex flex-wrap items-center gap-1 ml-auto">
           <span className="text-xs text-slate-muted mr-1">Region</span>
           <button
             type="button"
