@@ -22,6 +22,10 @@ import { readJson, writeJson } from './lib/storage';
 import { currentIsoWeek, currentQuarter } from './lib/dates';
 import type { PeriodFilter } from './lib/compute';
 import { REGIONS, type RegionKey } from './constants/regions';
+import {
+  OUTREACH_REGIONS,
+  type OutreachRegionKey,
+} from './constants/outreachRegions';
 
 export type PageKey =
   | 'funnel-data'
@@ -76,12 +80,12 @@ export interface OutreachSubPageProps {
   year: number;
   quarter: 1 | 2 | 3 | 4;
   week: number;
-  regions: Set<RegionKey>;
+  regions: Set<OutreachRegionKey>;
   selectedSequences: Set<number>;
   onYearChange: (y: number) => void;
   onQuarterChange: (q: 1 | 2 | 3 | 4) => void;
   onWeekChange: (w: number) => void;
-  onRegionsChange: (next: Set<RegionKey>) => void;
+  onRegionsChange: (next: Set<OutreachRegionKey>) => void;
   onSelectedSequencesChange: (next: Set<number>) => void;
   // Snapshots are loaded once at the App level (via useOutreachSnapshots
   // there) and threaded down so the three sub-pages share one query and
@@ -172,9 +176,9 @@ export default function App() {
     initialOutreachQuarter,
   );
   const [outreachWeek, setOutreachWeek] = useState<number>(initialIso.week);
-  const [outreachRegions, setOutreachRegions] = useState<Set<RegionKey>>(
-    () => new Set<RegionKey>(REGIONS),
-  );
+  const [outreachRegions, setOutreachRegions] = useState<
+    Set<OutreachRegionKey>
+  >(() => new Set<OutreachRegionKey>(OUTREACH_REGIONS));
   // Empty set = "All Sequences". The dashboard's multi-select treats empty
   // and full-selected identically.
   const [outreachSelectedSequences, setOutreachSelectedSequences] = useState<

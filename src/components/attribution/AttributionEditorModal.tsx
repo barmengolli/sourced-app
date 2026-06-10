@@ -16,7 +16,7 @@ import type {
   UseAttributionTouchesResult,
 } from '../../hooks/useAttributionTouches';
 import { ChannelSelect } from './CreateHPPModal';
-import { REGIONS, REGION_LABELS, type RegionKey } from '../../constants/regions';
+import { REGIONS, type RegionKey } from '../../constants/regions';
 import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
@@ -374,6 +374,19 @@ export default function AttributionEditorModal({
         }));
       await touchesHook.setTouches(attributionId, newTouches);
 
+      // Region is deal-level: one deal, one region. Propagate the edited
+      // region to every row in the deal chain so derived per-deal region
+      // (DealVelocity.region reads the HPP/earliest row) stays consistent
+      // regardless of which stage row the user edited from.
+      if (hasDealChain && attribution?.deal_id) {
+        for (const row of dealRowsByStage.values()) {
+          if (row.id === attributionId) continue;
+          if ((row.region ?? null) !== region) {
+            await attributionsHook.update(row.id, { region });
+          }
+        }
+      }
+
       // Other-stage rows: CREATE / UPDATE / DELETE per slot based on
       // what was entered vs what already existed. Inherits the
       // primary row's EDITED metadata for any new rows so a label
@@ -421,7 +434,8 @@ export default function AttributionEditorModal({
           } else if (iso && existing) {
             // UPDATE only when the date changed. Preserves any
             // per-stage customization the user made earlier
-            // (channel, label, amount, region, touches).
+            // (channel, label, amount, touches). Region is deal-level
+            // and already synced across the chain above.
             if (existing.stage_entered_at !== iso) {
               await attributionsHook.update(existing.id, {
                 stage_entered_at: iso,
@@ -513,7 +527,7 @@ export default function AttributionEditorModal({
               >
                 {REGIONS.map((r) => (
                   <option key={r} value={r}>
-                    {r} — {REGION_LABELS[r]}
+                    {r}
                   </option>
                 ))}
               </select>

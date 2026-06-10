@@ -63,6 +63,7 @@ const TRANSITIONS: { key: string; label: string }[] = [
 type SortColumn =
   | 'label'
   | 'account'
+  | 'region'
   | 'currentStage'
   | 'daysInCurrentStage'
   | 'daysSinceHpp'
@@ -320,6 +321,39 @@ export default function FunnelVelocityPage({
         </div>
       </section>
 
+      {/* Opportunity Influence — one Sankey per deal, showing the
+          full touch flow into the deal's stage chain. This section
+          owns its own Region + Channel filters so the user can
+          narrow the influence view without disturbing the velocity
+          cards, donuts, or Active Deals table below (which still
+          read the page-level Region toggle). */}
+      <ChartCard
+        title="Opportunity Influence"
+        subtitle="Every deal's full touch flow. Use the filters below to narrow this section."
+      >
+        <div className="space-y-3">
+          <InfluenceYearStatusFilters
+            yearOptions={yearOptions}
+            years={influenceYears}
+            statuses={influenceStatuses}
+            allYearsSet={allYearsSet}
+            onYearsChange={setInfluenceYears}
+            onStatusesChange={setInfluenceStatuses}
+          />
+          <CampaignInfluenceView
+            attributions={attributionsHook.attributions}
+            attributionTouches={touchesHook.touches}
+            // Full channels list so cross-year attribution references
+            // (e.g. a 2026 HPP attributed to a 2025 channel) still
+            // resolve to a real name instead of "Unknown".
+            channels={channels}
+            yearFilter={influenceYears}
+            statusFilter={influenceStatuses}
+            allYearsSet={allYearsSet}
+          />
+        </div>
+      </ChartCard>
+
       {/* Active deals table */}
       <section className="space-y-2">
         <h2 className="text-sm font-medium text-charcoal">
@@ -340,6 +374,9 @@ export default function FunnelVelocityPage({
                   </Th>
                   <Th col="account" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
                     Account
+                  </Th>
+                  <Th col="region" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
+                    Region
                   </Th>
                   <Th col="currentStage" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
                     Current stage
@@ -395,6 +432,9 @@ export default function FunnelVelocityPage({
                     <td className="px-3 py-2 text-slate-muted">
                       {d.account ?? '—'}
                     </td>
+                    <td className="px-3 py-2 text-slate-muted">
+                      {d.region ?? '—'}
+                    </td>
                     <td className="px-3 py-2 text-charcoal">
                       {FUNNEL_STAGE_LABELS[d.currentStage as AttributionStageKey]}
                     </td>
@@ -420,39 +460,6 @@ export default function FunnelVelocityPage({
           </div>
         )}
       </section>
-
-      {/* Opportunity Influence — one Sankey per deal, showing the
-          full touch flow into the deal's stage chain. This section
-          owns its own Region + Channel filters so the user can
-          narrow the influence view without disturbing the velocity
-          cards, donuts, or Active Deals table above (which still
-          read the page-level Region toggle). */}
-      <ChartCard
-        title="Opportunity Influence"
-        subtitle="Every deal's full touch flow. Use the filters below to narrow this section."
-      >
-        <div className="space-y-3">
-          <InfluenceYearStatusFilters
-            yearOptions={yearOptions}
-            years={influenceYears}
-            statuses={influenceStatuses}
-            allYearsSet={allYearsSet}
-            onYearsChange={setInfluenceYears}
-            onStatusesChange={setInfluenceStatuses}
-          />
-          <CampaignInfluenceView
-            attributions={attributionsHook.attributions}
-            attributionTouches={touchesHook.touches}
-            // Full channels list so cross-year attribution references
-            // (e.g. a 2026 HPP attributed to a 2025 channel) still
-            // resolve to a real name instead of "Unknown".
-            channels={channels}
-            yearFilter={influenceYears}
-            statusFilter={influenceStatuses}
-            allYearsSet={allYearsSet}
-          />
-        </div>
-      </ChartCard>
 
       {editingAttributionId && (
         <AttributionEditorModal
@@ -654,6 +661,8 @@ function compareDeals(
       return a.label.localeCompare(b.label);
     case 'account':
       return (a.account ?? '').localeCompare(b.account ?? '');
+    case 'region':
+      return (a.region ?? '').localeCompare(b.region ?? '');
     case 'currentStage':
       return a.currentStage.localeCompare(b.currentStage);
     case 'daysInCurrentStage':

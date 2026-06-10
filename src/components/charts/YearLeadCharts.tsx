@@ -3,22 +3,22 @@
 // page's quarter selector; respects the region filter (via the
 // already-filtered MonthlyLeadsForYear that the caller computes).
 //
-// LEFT and RIGHT cards share a single multi-select channel state
+// MIDDLE and RIGHT cards share a single multi-select channel state
 // (lifted here). The user picks any combination of (year, channel)
-// pairs from a checkbox dropdown rendered above the LEFT card:
+// pairs from a checkbox dropdown rendered above the MIDDLE card:
 //
-//   - LEFT  ("Total Leads per Year by Channel"): one bar per
+//   - LEFT   ("Total Leads per Month"): current-year bars with
+//     optional prior-year YoY overlay.
+//   - MIDDLE ("Total Leads per Year by Channel"): one bar per
 //     selected channel, total leads for that channel on Y axis,
 //     channel name on X.
-//   - RIGHT ("Leads by Channel per Month"): grouped bars per month,
+//   - RIGHT  ("Leads by Channel per Month"): grouped bars per month,
 //     one Bar per selected channel id.
 //
 // Channels are year-scoped in the data model: the 2025 "Sales" row
 // and the 2026 "Sales" row are distinct rows with distinct ids.
 // channels.name now contains the year prefix ("2025 - Sales"), so
 // every (year, channel) pair is an addressable entity by name.
-// MIDDLE card ("Total Leads per Month") is unchanged: current-year
-// bars with optional prior-year YoY overlay.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -42,14 +42,14 @@ import ChartCard from './ChartCard';
 interface YearLeadChartsProps {
   data: MonthlyLeadsForYear;
   year: number;
-  // YoY overlay for the MIDDLE card only. When both are provided,
+  // YoY overlay for the LEFT card only. When both are provided,
   // render a second muted bar per month for the prior year and add
   // a legend.
   priorYearTotals?: number[];
   priorYear?: number;
   // Per-channel prior-year breakdown. The shared multi-select
   // dropdown lists the UNION of current and prior channels (e.g.
-  // both "2025 - Events" and "2026 - Events"), and the LEFT and
+  // both "2025 - Events" and "2026 - Events"), and the MIDDLE and
   // RIGHT cards read each selected channel's perMonth array from
   // whichever side carries it.
   priorYearByChannel?: MonthlyChannelLeads[];
@@ -133,29 +133,64 @@ export default function YearLeadCharts({
     return m;
   }, [mergedChannels]);
 
-  // Default: top 2 channels by current-year total. If fewer than 2
-  // current-year channels exist, fall back to "everything available".
+  // Default: the same base channel paired across both years, so the
+  // YoY comparison is apples-to-apples. Pick the highest-volume
+  // current-year channel whose base name (year prefix stripped) also
+  // exists on the prior-year side, and select both. Fallback chain:
+  // no pairable channel -> top 2 current-year channels; fewer than 2
+  // current-year channels -> everything available.
   const channelKey = useMemo(
     () => mergedChannels.map((c) => c.channelId).join('|'),
     [mergedChannels],
   );
   const computeDefault = (): Set<string> => {
     const currentOnly = mergedChannels.filter((c) => c.isCurrent);
-    const ranked =
-      currentOnly.length >= 2
-        ? [...currentOnly].sort((a, b) => b.total - a.total).slice(0, 2)
-        : mergedChannels;
-    return new Set(ranked.map((c) => c.channelId));
+    const priorOnly = mergedChannels.filter((c) => !c.isCurrent);
+
+    // Base name = channel name with any "YYYY - " prefix stripped.
+    const baseName = (name: string) => name.replace(/^\d{4} - /, '');
+
+    // Highest-volume current-year channel that has a prior-year
+    // counterpart with the same base name. Pair them.
+    const rankedCurrent = [...currentOnly].sort((a, b) => b.total - a.total);
+    for (const cur of rankedCurrent) {
+      const twin = priorOnly.find(
+        (p) => baseName(p.channelName) === baseName(cur.channelName),
+      );
+      if (twin) return new Set([cur.channelId, twin.channelId]);
+    }
+
+    // Fallback 1: no pairable channel (or no prior-year data) ->
+    // top 2 current-year channels (previous behavior).
+    if (currentOnly.length >= 2) {
+      return new Set(rankedCurrent.slice(0, 2).map((c) => c.channelId));
+    }
+
+    // Fallback 2: fewer than 2 current-year channels -> everything.
+    return new Set(mergedChannels.map((c) => c.channelId));
   };
   const [selectedChannelIds, setSelectedChannelIds] = useState<Set<string>>(
     () => computeDefault(),
   );
-  // Re-anchor selection to the new default whenever the union
-  // changes AND every previously-selected id has fallen out (e.g.
-  // year switch with completely different channel set). When only a
-  // subset of the user's selections falls out, prune in place — the
-  // user keeps any selection that's still valid.
+  // True once the user has manually changed the channel selection.
+  // Until then, the selection tracks computeDefault() as data for the
+  // two years streams in (they load at different times, so a one-shot
+  // default fires too early and lands on the wrong fallback).
+  const userTouchedSelection = useRef(false);
   useEffect(() => {
+    // Until the user touches the selection, keep tracking the computed
+    // default. Current-year and prior-year channels load at different
+    // times; recomputing on every union change means we converge on the
+    // paired default once both sides are in.
+    if (!userTouchedSelection.current) {
+      if (mergedChannels.length > 0) {
+        setSelectedChannelIds(computeDefault());
+      }
+      return;
+    }
+    // After first interaction: existing behavior. Prune invalid ids in
+    // place; if the entire selection became invalid (e.g. year switch),
+    // re-anchor to the default.
     const valid = new Set(mergedChannels.map((c) => c.channelId));
     let dropped = false;
     const pruned = new Set<string>();
@@ -191,7 +226,7 @@ export default function YearLeadCharts({
     });
   }, [selectedChannels]);
 
-  // Per-channel totals for the LEFT card.
+  // Per-channel totals for the MIDDLE card.
   const totalsByChannel = useMemo(() => {
     return selectedChannels.map((c) => ({
       channelId: c.channelId,
@@ -218,6 +253,7 @@ export default function YearLeadCharts({
   const priorYearKey = hasPriorYear ? String(priorYear) : '';
 
   const toggleChannel = (id: string) => {
+    userTouchedSelection.current = true;
     setSelectedChannelIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -225,12 +261,111 @@ export default function YearLeadCharts({
       return next;
     });
   };
-  const selectAll = () =>
+  const selectAll = () => {
+    userTouchedSelection.current = true;
     setSelectedChannelIds(new Set(mergedChannels.map((c) => c.channelId)));
-  const clearAll = () => setSelectedChannelIds(new Set());
+  };
+  const clearAll = () => {
+    userTouchedSelection.current = true;
+    setSelectedChannelIds(new Set());
+  };
 
   return (
     <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <ChartCard title="Total Leads per Month" subtitle={totalsSubtitle}>
+        {data.byChannel.length > 0 ? (
+          <ResponsiveContainer width="100%" height={320}>
+            <BarChart
+              data={totalsData}
+              margin={{ top: 16, right: 12, left: 0, bottom: 0 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.border} />
+              <XAxis
+                dataKey="month"
+                tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
+                axisLine={{ stroke: CHART_COLORS.border }}
+                tickLine={{ stroke: CHART_COLORS.border }}
+              />
+              <YAxis
+                tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
+                axisLine={{ stroke: CHART_COLORS.border }}
+                tickLine={{ stroke: CHART_COLORS.border }}
+                tickFormatter={(v) =>
+                  typeof v === 'number' ? v.toLocaleString() : String(v)
+                }
+                width={48}
+                allowDecimals={false}
+              />
+              {hasPriorYear ? (
+                <Tooltip
+                  contentStyle={{
+                    fontSize: 11,
+                    border: `1px solid ${CHART_COLORS.border}`,
+                    borderRadius: 6,
+                  }}
+                  labelStyle={{
+                    color: CHART_COLORS.charcoal,
+                    fontWeight: 600,
+                  }}
+                  content={
+                    <YoYTooltip
+                      currentYearKey={currentYearKey}
+                      priorYearKey={priorYearKey}
+                    />
+                  }
+                />
+              ) : (
+                <Tooltip
+                  contentStyle={{
+                    fontSize: 11,
+                    border: `1px solid ${CHART_COLORS.border}`,
+                    borderRadius: 6,
+                  }}
+                  labelStyle={{
+                    color: CHART_COLORS.charcoal,
+                    fontWeight: 600,
+                  }}
+                  formatter={(v) => {
+                    const n = typeof v === 'number' ? v : Number(v);
+                    return Number.isFinite(n) ? n.toLocaleString() : String(v);
+                  }}
+                />
+              )}
+              {hasPriorYear && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              <Bar
+                dataKey="total"
+                name={currentYearKey}
+                fill={CHART_COLORS.indigo}
+                radius={[3, 3, 0, 0]}
+                label={{
+                  position: 'top',
+                  fill: CHART_COLORS.charcoal,
+                  fontSize: 11,
+                  formatter: (v) => {
+                    const n = typeof v === 'number' ? v : Number(v);
+                    return Number.isFinite(n) && n !== 0
+                      ? n.toLocaleString()
+                      : '';
+                  },
+                }}
+              />
+              {hasPriorYear && (
+                <Bar
+                  dataKey="priorTotal"
+                  name={priorYearKey}
+                  fill={CHART_COLORS.slateMuted}
+                  radius={[3, 3, 0, 0]}
+                />
+              )}
+            </BarChart>
+          </ResponsiveContainer>
+        ) : (
+          <p className="text-xs text-slate-muted italic h-[280px] flex items-center justify-center">
+            No leads in {year} matching the region filter.
+          </p>
+        )}
+      </ChartCard>
+
       <ChartCard
         title="Total Leads per Year by Channel"
         subtitle={channelCountSubtitle}
@@ -327,100 +462,6 @@ export default function YearLeadCharts({
         )}
       </ChartCard>
 
-      <ChartCard title="Total Leads per Month" subtitle={totalsSubtitle}>
-        {data.byChannel.length > 0 ? (
-          <ResponsiveContainer width="100%" height={320}>
-            <BarChart
-              data={totalsData}
-              margin={{ top: 16, right: 12, left: 0, bottom: 0 }}
-            >
-              <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.border} />
-              <XAxis
-                dataKey="month"
-                tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
-                axisLine={{ stroke: CHART_COLORS.border }}
-                tickLine={{ stroke: CHART_COLORS.border }}
-              />
-              <YAxis
-                tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
-                axisLine={{ stroke: CHART_COLORS.border }}
-                tickLine={{ stroke: CHART_COLORS.border }}
-                tickFormatter={(v) =>
-                  typeof v === 'number' ? v.toLocaleString() : String(v)
-                }
-                width={48}
-                allowDecimals={false}
-              />
-              {hasPriorYear ? (
-                <Tooltip
-                  contentStyle={{
-                    fontSize: 11,
-                    border: `1px solid ${CHART_COLORS.border}`,
-                    borderRadius: 6,
-                  }}
-                  labelStyle={{
-                    color: CHART_COLORS.charcoal,
-                    fontWeight: 600,
-                  }}
-                  content={
-                    <YoYTooltip
-                      currentYearKey={currentYearKey}
-                      priorYearKey={priorYearKey}
-                    />
-                  }
-                />
-              ) : (
-                <Tooltip
-                  contentStyle={{
-                    fontSize: 11,
-                    border: `1px solid ${CHART_COLORS.border}`,
-                    borderRadius: 6,
-                  }}
-                  labelStyle={{
-                    color: CHART_COLORS.charcoal,
-                    fontWeight: 600,
-                  }}
-                  formatter={(v) => {
-                    const n = typeof v === 'number' ? v : Number(v);
-                    return Number.isFinite(n) ? n.toLocaleString() : String(v);
-                  }}
-                />
-              )}
-              {hasPriorYear && <Legend wrapperStyle={{ fontSize: 11 }} />}
-              <Bar
-                dataKey="total"
-                name={currentYearKey}
-                fill={CHART_COLORS.indigo}
-                radius={[3, 3, 0, 0]}
-                label={{
-                  position: 'top',
-                  fill: CHART_COLORS.charcoal,
-                  fontSize: 11,
-                  formatter: (v) => {
-                    const n = typeof v === 'number' ? v : Number(v);
-                    return Number.isFinite(n) && n !== 0
-                      ? n.toLocaleString()
-                      : '';
-                  },
-                }}
-              />
-              {hasPriorYear && (
-                <Bar
-                  dataKey="priorTotal"
-                  name={priorYearKey}
-                  fill={CHART_COLORS.slateMuted}
-                  radius={[3, 3, 0, 0]}
-                />
-              )}
-            </BarChart>
-          </ResponsiveContainer>
-        ) : (
-          <p className="text-xs text-slate-muted italic h-[280px] flex items-center justify-center">
-            No leads in {year} matching the region filter.
-          </p>
-        )}
-      </ChartCard>
-
       <ChartCard
         title="Leads by Channel per Month"
         subtitle={channelCountSubtitle}
@@ -433,7 +474,7 @@ export default function YearLeadCharts({
             />
             {selectedChannels.length === 0 ? (
               <p className="text-xs text-slate-muted italic h-[280px] flex items-center justify-center">
-                Select channels from the dropdown on the left card.
+                Select channels from the dropdown on the middle card.
               </p>
             ) : (
               <ResponsiveContainer width="100%" height={320}>
@@ -639,7 +680,7 @@ function ChannelMultiSelect({
 }
 
 // Read-only summary above the RIGHT card. Points the user at the
-// left card's dropdown rather than rendering a second control,
+// middle card's dropdown rather than rendering a second control,
 // keeping channel selection state single-sourced.
 function ChannelSelectionSummary({
   selectedCount,
@@ -651,12 +692,12 @@ function ChannelSelectionSummary({
   return (
     <p className="text-xs text-slate-muted">
       Showing {selectedCount} of {totalCount} channels. Edit the selection
-      on the left card.
+      on the middle card.
     </p>
   );
 }
 
-// ---------- Custom tooltip for the MIDDLE card ----------
+// ---------- Custom tooltip for the LEFT card ----------
 //
 // Shows current, prior, and the delta (current minus prior) for the
 // hovered month. Number formatting matches the rest of the card

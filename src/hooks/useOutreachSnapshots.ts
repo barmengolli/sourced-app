@@ -12,7 +12,7 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { OutreachSnapshot } from '../types/db';
 import type { PeriodIndex } from '../types/db';
-import type { RegionKey } from '../constants/regions';
+import type { OutreachRegionKey } from '../constants/outreachRegions';
 import { inferRegionFromSequenceName } from '../lib/outreach';
 
 const PAGE = 1000;
@@ -44,7 +44,7 @@ export interface UseOutreachSnapshotsResult {
   byWeek: (year: number, week: number) => OutreachSnapshot[];
   byQuarter: (year: number, q: PeriodIndex) => OutreachSnapshot[];
   bySequence: (id: number) => OutreachSnapshot[];
-  byRegion: (region: RegionKey) => OutreachSnapshot[];
+  byRegion: (region: OutreachRegionKey) => OutreachSnapshot[];
 }
 
 // ISO week → calendar quarter mapping for the byQuarter helper. We don't
@@ -154,7 +154,7 @@ export function useOutreachSnapshots(): UseOutreachSnapshotsResult {
     [snapshots],
   );
   const byRegion = useCallback(
-    (region: RegionKey) =>
+    (region: OutreachRegionKey) =>
       snapshots.filter(
         (s) => inferRegionFromSequenceName(s.sequence_name) === region,
       ),

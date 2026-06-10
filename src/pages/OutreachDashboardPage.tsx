@@ -16,10 +16,10 @@ import {
   type IsoWeek,
 } from '../lib/dates';
 import {
-  REGIONS,
-  REGION_LABELS,
-  type RegionKey,
-} from '../constants/regions';
+  OUTREACH_REGIONS,
+  OUTREACH_REGION_LABELS,
+  type OutreachRegionKey,
+} from '../constants/outreachRegions';
 import { inferRegionFromSequenceName } from '../lib/outreach';
 import type { OutreachSnapshot } from '../types/db';
 import type { OutreachSubPageProps } from '../App';
@@ -88,7 +88,7 @@ export default function OutreachDashboardPage({
   // Pre-filter snapshots for the active year + region + sequences set.
   // Empty selectedSequences = "All Sequences" (DataVis convention).
   const scopedSnapshots = useMemo(() => {
-    const allRegionsOn = regions.size === REGIONS.length;
+    const allRegionsOn = regions.size === OUTREACH_REGIONS.length;
     const allSeqs =
       selectedSequences.size === 0 ||
       selectedSequences.size === sequenceOptions.length;
@@ -113,8 +113,8 @@ export default function OutreachDashboardPage({
     return scopedSnapshots.filter((s) => s.week_number === prevWeek.week);
   }, [scopedSnapshots, prevWeek]);
 
-  const allRegionsOn = regions.size === REGIONS.length;
-  const toggleRegion = (r: RegionKey) => {
+  const allRegionsOn = regions.size === OUTREACH_REGIONS.length;
+  const toggleRegion = (r: OutreachRegionKey) => {
     const next = new Set(regions);
     if (next.has(r)) next.delete(r);
     else next.add(r);
@@ -210,20 +210,20 @@ export default function OutreachDashboardPage({
           <button
             type="button"
             onClick={() =>
-              onRegionsChange(allRegionsOn ? new Set() : new Set(REGIONS))
+              onRegionsChange(allRegionsOn ? new Set() : new Set(OUTREACH_REGIONS))
             }
             className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
           >
             {allRegionsOn ? 'Clear' : 'All'}
           </button>
-          {REGIONS.map((r) => {
+          {OUTREACH_REGIONS.map((r) => {
             const on = regions.has(r);
             return (
               <button
                 key={r}
                 type="button"
                 onClick={() => toggleRegion(r)}
-                title={REGION_LABELS[r]}
+                title={OUTREACH_REGION_LABELS[r]}
                 className={
                   'text-xs px-2 py-1 rounded-full border transition-colors ' +
                   (on
@@ -412,7 +412,7 @@ function RegionPerformanceCard({
   prevWeek: IsoWeek | null;
 }) {
   const data = useMemo(() => {
-    const targetRegions: RegionKey[] = ['NA', 'EMEA'];
+    const targetRegions: OutreachRegionKey[] = ['NA', 'EMEA'];
     return targetRegions.map((region) => ({
       region,
       current: aggregate(

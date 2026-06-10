@@ -775,7 +775,7 @@ export default function CampaignInfluenceView({
               onClick={() => toggleRegion(r)}
               title={
                 empty
-                  ? `${REGION_LABELS[r]} — no deals in this tab`
+                  ? `${REGION_LABELS[r]}: no deals in this tab`
                   : REGION_LABELS[r]
               }
               className={`text-xs px-2 py-1 rounded-full border transition-colors ${cls}`}
