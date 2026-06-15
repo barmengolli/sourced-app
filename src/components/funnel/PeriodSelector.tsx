@@ -17,6 +17,12 @@ interface PeriodSelectorProps {
   // computeGrid (null-region rows excluded too).
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+  // Which controls to render. 'full' (default) shows Year + period buttons +
+  // Region, the shared layout every Funnel tab uses. The Leads & MQLs tab
+  // splits the bar by scope: 'global' (Year + Region, page-wide) in the
+  // header, and 'period' (the Year/Q1-Q4 buttons) above the period-specific
+  // charts, so placement matches what each control actually filters.
+  variant?: 'full' | 'global' | 'period';
 }
 
 const FILTERS: { value: PeriodFilter; label: string }[] = [
@@ -35,6 +41,7 @@ export default function PeriodSelector({
   onFilterChange,
   regions,
   onRegionsChange,
+  variant = 'full',
 }: PeriodSelectorProps) {
   const allOn = regions.size === REGIONS.length;
   const toggleRegion = (r: RegionKey) => {
@@ -47,42 +54,54 @@ export default function PeriodSelector({
     onRegionsChange(all ? new Set(REGIONS) : new Set());
   };
 
+  const showYear = variant !== 'period';
+  const showPeriodButtons = variant !== 'global';
+  const showRegion = variant !== 'period';
+
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <label className="flex items-center gap-2 text-xs text-slate-muted">
-        Year
-        <select
-          value={year}
-          onChange={(e) => onYearChange(parseInt(e.target.value, 10))}
-          className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-        >
-          {yearOptions.map((y) => (
-            <option key={y} value={y}>
-              {y}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="flex items-center gap-1">
-        {FILTERS.map((f) => {
-          const active = f.value === filter;
-          return (
-            <button
-              key={f.value}
-              type="button"
-              onClick={() => onFilterChange(f.value)}
-              className={
-                'text-xs px-2 py-1 rounded border transition-colors ' +
-                (active
-                  ? 'bg-indigo text-white border-indigo'
-                  : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-              }
-            >
-              {f.label}
-            </button>
-          );
-        })}
-      </div>
+      {showYear && (
+        <label className="flex items-center gap-2 text-xs text-slate-muted">
+          Year
+          <select
+            value={year}
+            onChange={(e) => onYearChange(parseInt(e.target.value, 10))}
+            className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
+          >
+            {yearOptions.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {showPeriodButtons && (
+        <div className="flex items-center gap-1">
+          {variant === 'period' && (
+            <span className="text-xs text-slate-muted mr-1">Period</span>
+          )}
+          {FILTERS.map((f) => {
+            const active = f.value === filter;
+            return (
+              <button
+                key={f.value}
+                type="button"
+                onClick={() => onFilterChange(f.value)}
+                className={
+                  'text-xs px-2 py-1 rounded border transition-colors ' +
+                  (active
+                    ? 'bg-indigo text-white border-indigo'
+                    : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+                }
+              >
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {showRegion && (
       <div className="flex flex-wrap items-center gap-1">
         <span className="text-xs text-slate-muted mr-1">Region</span>
         <button
@@ -112,6 +131,7 @@ export default function PeriodSelector({
           );
         })}
       </div>
+      )}
     </div>
   );
 }

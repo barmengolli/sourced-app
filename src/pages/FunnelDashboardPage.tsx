@@ -234,6 +234,10 @@ export default function FunnelDashboardPage({
             a point-in-time snapshot of current funnel volumes.
           </p>
         </div>
+        {/* Page-wide filters only (Year + Region). The quarter buttons live
+            lower, above the period-specific charts they actually filter, so
+            the top annual charts aren't sitting under a control that doesn't
+            affect them. */}
         <PeriodSelector
           year={year}
           filter={filter}
@@ -242,6 +246,7 @@ export default function FunnelDashboardPage({
           onFilterChange={onFilterChange}
           regions={regions}
           onRegionsChange={onRegionsChange}
+          variant="global"
         />
       </header>
 
@@ -265,6 +270,25 @@ export default function FunnelDashboardPage({
           priorYear={year - 1}
           loading={leadsLoading || actualsHook.loading}
         />
+        {/* Period (quarter) selector for the charts below only. The three
+            annual charts above span the full year and ignore it; placing it
+            here makes that scope visible. */}
+        <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border">
+          <PeriodSelector
+            year={year}
+            filter={filter}
+            yearOptions={yearOptions}
+            onYearChange={onYearChange}
+            onFilterChange={onFilterChange}
+            regions={regions}
+            onRegionsChange={onRegionsChange}
+            variant="period"
+          />
+          <span className="text-xs text-slate-muted">
+            Applies to the charts below. The three charts above cover the full
+            year.
+          </span>
+        </div>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <ChartCard title="Actuals vs Projections">
             <BarChartView

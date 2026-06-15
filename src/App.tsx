@@ -15,8 +15,12 @@ import FunnelVelocityPage from './pages/FunnelVelocityPage';
 import OutreachDataPage from './pages/OutreachDataPage';
 import OutreachDashboardPage from './pages/OutreachDashboardPage';
 import OutreachComparePage from './pages/OutreachComparePage';
+import SixSenseDashboardPage from './pages/SixSenseDashboardPage';
+import SixSenseImportPage from './pages/SixSenseImportPage';
 import { useOutreachSnapshots } from './hooks/useOutreachSnapshots';
-import type { OutreachSnapshot } from './types/db';
+import { useSixSenseSnapshots } from './hooks/useSixSenseSnapshots';
+import type { OutreachSnapshot, SixSenseSnapshot } from './types/db';
+import type { SixSenseSnapshotInput } from './lib/sixsense';
 import { sectionForPage, SIDEBAR_SECTIONS } from './constants/sidebar';
 import { readJson, writeJson } from './lib/storage';
 import { currentIsoWeek, currentQuarter } from './lib/dates';
@@ -37,6 +41,8 @@ export type PageKey =
   | 'outreach-data'
   | 'outreach-dashboard'
   | 'outreach-compare'
+  | 'sixsense-dashboard'
+  | 'sixsense-import'
   | 'leads'
   | 'channels'
   | 'funnel-import'
@@ -94,16 +100,29 @@ export interface OutreachSubPageProps {
   loading: boolean;
 }
 
+// 6sense sub-tabs (Dashboard + Import) share one snapshot query and realtime
+// subscription, mounted once at App level. There are no shared period/region
+// selectors: the Dashboard owns its own snapshot-date picker and the Import
+// page is standalone, so this carries just the data and the upsert writer.
+export interface SixSenseSubPageProps {
+  snapshots: SixSenseSnapshot[];
+  loading: boolean;
+  upsertSnapshot: (input: SixSenseSnapshotInput) => Promise<SixSenseSnapshot>;
+  onNavigate: (p: PageKey) => void;
+}
+
 function PageBody({
   page,
   onNavigate,
   funnelProps,
   outreachProps,
+  sixSenseProps,
 }: {
   page: PageKey;
   onNavigate: (p: PageKey) => void;
   funnelProps: FunnelSubPageProps;
   outreachProps: OutreachSubPageProps;
+  sixSenseProps: SixSenseSubPageProps;
 }) {
   switch (page) {
     case 'funnel-data':
@@ -124,6 +143,10 @@ function PageBody({
       return <OutreachDashboardPage {...outreachProps} />;
     case 'outreach-compare':
       return <OutreachComparePage {...outreachProps} />;
+    case 'sixsense-dashboard':
+      return <SixSenseDashboardPage {...sixSenseProps} />;
+    case 'sixsense-import':
+      return <SixSenseImportPage {...sixSenseProps} />;
     case 'funnel-import':
       return <FunnelImportPage />;
     case 'leads':
@@ -192,6 +215,14 @@ export default function App() {
   const outreachWeekTouched = useRef(false);
   const { snapshots: outreachSnapshots, loading: outreachLoading } =
     useOutreachSnapshots();
+
+  // 6sense snapshots: one shared query + realtime subscription for the
+  // Dashboard and Import sub-tabs.
+  const {
+    snapshots: sixSenseSnapshots,
+    loading: sixSenseLoading,
+    upsertSnapshot: upsertSixSenseSnapshot,
+  } = useSixSenseSnapshots();
   useEffect(() => {
     if (outreachWeekTouched.current) return;
     if (outreachSnapshots.length === 0) return;
@@ -265,6 +296,13 @@ export default function App() {
     loading: outreachLoading,
   };
 
+  const sixSenseProps: SixSenseSubPageProps = {
+    snapshots: sixSenseSnapshots,
+    loading: sixSenseLoading,
+    upsertSnapshot: upsertSixSenseSnapshot,
+    onNavigate: navigate,
+  };
+
   return (
     <PasswordGate>
       <div className="min-h-screen flex">
@@ -275,6 +313,7 @@ export default function App() {
             onNavigate={navigate}
             funnelProps={funnelProps}
             outreachProps={outreachProps}
+            sixSenseProps={sixSenseProps}
           />
         </main>
       </div>
