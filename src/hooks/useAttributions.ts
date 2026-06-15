@@ -28,6 +28,10 @@ export interface NewAttributionInput {
   // shape so legacy callers that don't pass a date keep working — the
   // hook defaults to today before insert.
   stage_entered_at?: string;
+  // Only meaningful on closeLost rows; see Attribution.lost_reason.
+  lost_reason?: string | null;
+  // Deal-level BDR credit; see Attribution.bdr_name.
+  bdr_name?: string | null;
 }
 
 function todayIso(): string {
@@ -75,7 +79,7 @@ export interface UseAttributionsResult {
   // period contract as promote.
   markLost: (
     id: string,
-    args: { stage_entered_at: string },
+    args: { stage_entered_at: string; lost_reason?: string | null },
   ) => Promise<Attribution>;
 }
 
@@ -414,7 +418,7 @@ export function useAttributions(): UseAttributionsResult {
   const markLost = useCallback(
     async (
       id: string,
-      args: { stage_entered_at: string },
+      args: { stage_entered_at: string; lost_reason?: string | null },
     ): Promise<Attribution> => {
       const source = attributionsRef.current.find((a) => a.id === id);
       if (!source) throw new Error('Attribution not found');
@@ -436,6 +440,7 @@ export function useAttributions(): UseAttributionsResult {
         deal_id: source.deal_id,
         lead_id: source.lead_id,
         stage_entered_at: args.stage_entered_at,
+        lost_reason: args.lost_reason ?? null,
       };
       const { data: inserted, error: insErr } = await supabase
         .from('attributions')

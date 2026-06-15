@@ -67,6 +67,20 @@ export const TERMINAL_STAGES: AttributionStageKey[] = [
   'closeLost',
 ];
 
+// Reason a deal was closed-lost. Required (at the UI layer) whenever a deal
+// is newly marked lost. Stored verbatim in attributions.lost_reason; the
+// column is plain TEXT so this list can grow without a migration.
+export type LostReason =
+  | 'Closed-Lost to Competitor'
+  | 'Closed-Lost In-House'
+  | 'Closed-Disqualified';
+
+export const LOST_REASONS: LostReason[] = [
+  'Closed-Lost to Competitor',
+  'Closed-Lost In-House',
+  'Closed-Disqualified',
+];
+
 export interface ConversionPair {
   from: FunnelStageKey;
   to: FunnelStageKey;

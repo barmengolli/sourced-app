@@ -350,6 +350,10 @@ export default function FunnelVelocityPage({
             yearFilter={influenceYears}
             statusFilter={influenceStatuses}
             allYearsSet={allYearsSet}
+            // Reuse the Active deals edit handler + the already-mounted
+            // AttributionEditorModal so close-lost deals can be opened and
+            // their lost reason set from here.
+            onEditDeal={onEditDeal}
           />
         </div>
       </ChartCard>

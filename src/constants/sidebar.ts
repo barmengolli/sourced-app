@@ -60,6 +60,17 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     ],
   },
   {
+    id: 'bdr-quota',
+    label: 'BDR Quota',
+    defaultChild: 'bdr-quota-dashboard',
+    lastTabStorageKey: 'sourced.bdrquota.lastTab',
+    expandedStorageKey: 'sourced.sidebar.expanded.bdrquota',
+    children: [
+      { key: 'bdr-quota-dashboard', label: 'Dashboard', beta: true },
+      { key: 'bdr-quota-quotas', label: 'Quotas' },
+    ],
+  },
+  {
     id: 'outreach',
     label: 'Outreach',
     defaultChild: 'outreach-data',

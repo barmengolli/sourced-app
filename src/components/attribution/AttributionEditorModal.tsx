@@ -17,7 +17,11 @@ import type {
 } from '../../hooks/useAttributionTouches';
 import { ChannelSelect } from './CreateHPPModal';
 import { REGIONS, type RegionKey } from '../../constants/regions';
-import { FUNNEL_STAGE_LABELS } from '../../constants/funnelStages';
+import { BDRS } from '../../constants/bdr';
+import {
+  FUNNEL_STAGE_LABELS,
+  LOST_REASONS,
+} from '../../constants/funnelStages';
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 
@@ -58,6 +62,9 @@ export default function AttributionEditorModal({
   const [sfLink, setSfLink] = useState('');
   const [channelId, setChannelId] = useState('');
   const [region, setRegion] = useState<RegionKey>('NA');
+  // BDR credit for the deal (BDR Quota tracker). Deal-level: propagated across
+  // the chain on save like region. '' = untagged.
+  const [bdrName, setBdrName] = useState<string>('');
   // Year + period_index are derived from stage_entered_at at save time.
   // No standalone year/quarter controls in the editor anymore. The
   // row's stage_key is fixed at whatever the row was created as;
@@ -78,6 +85,11 @@ export default function AttributionEditorModal({
   const [otherPursuit, setOtherPursuit] = useState<string>('');
   const [otherCloseWon, setOtherCloseWon] = useState<string>('');
   const [otherCloseLost, setOtherCloseLost] = useState<string>('');
+  // Reason attached to the deal's closeLost row (whether that's the primary
+  // row being edited or a chain row). Hydrated from the existing row so the
+  // user can fill in / correct it on a previously-lost deal. Required only
+  // when a closeLost row is actually present in the save.
+  const [lostReason, setLostReason] = useState<string>('');
   const [showOtherStages, setShowOtherStages] = useState(false);
 
   const maxDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -103,6 +115,7 @@ export default function AttributionEditorModal({
     );
     setSfLink(attribution.sf_link ?? '');
     setRegion((attribution.region as RegionKey) ?? 'NA');
+    setBdrName(attribution.bdr_name ?? '');
     setChannelId(attribution.channel_id ?? '');
     setStageEnteredAt(attribution.stage_entered_at);
   }, [attribution]);
@@ -142,6 +155,13 @@ export default function AttributionEditorModal({
     setOtherPursuit(dateFor('pursuit'));
     setOtherCloseWon(dateFor('closeWon'));
     setOtherCloseLost(dateFor('closeLost'));
+    // Lost reason lives on the deal's closeLost row, which may be the primary
+    // row being edited or a chain row.
+    const lostRow =
+      attribution.stage_key === 'closeLost'
+        ? attribution
+        : dealRowsByStage.get('closeLost');
+    setLostReason(lostRow?.lost_reason ?? '');
   }, [attribution, dealRowsByStage]);
 
   useEffect(() => {
@@ -346,6 +366,14 @@ export default function AttributionEditorModal({
       );
       return;
     }
+    // A closeLost row is in this save if the primary row is closeLost or the
+    // chain's closeLost slot has a date. When so, a reason is required.
+    const primaryIsLost = stageKey === 'closeLost';
+    const willHaveLostRow = primaryIsLost || otherCloseLost !== '';
+    if (willHaveLostRow && lostReason === '') {
+      setErr('Select a lost reason for the close-lost stage.');
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
@@ -359,11 +387,15 @@ export default function AttributionEditorModal({
         amount: parsedAmount,
         sf_link: sfLink.trim() || null,
         region,
+        bdr_name: bdrName || null,
         channel_id: channelId,
         stage_key: stageKey,
         // year + period_index get derived from stage_entered_at inside
         // the hook, so don't pass them here.
         stage_entered_at: stageEnteredAt,
+        // Set the reason on the primary row only when it IS the lost row;
+        // otherwise clear it (a non-lost stage shouldn't carry a reason).
+        lost_reason: primaryIsLost ? lostReason : null,
       });
       const newTouches: NewTouchInput[] = touches
         .filter((t) => t.channel_id !== '')
@@ -374,15 +406,20 @@ export default function AttributionEditorModal({
         }));
       await touchesHook.setTouches(attributionId, newTouches);
 
-      // Region is deal-level: one deal, one region. Propagate the edited
-      // region to every row in the deal chain so derived per-deal region
-      // (DealVelocity.region reads the HPP/earliest row) stays consistent
-      // regardless of which stage row the user edited from.
+      // Region and BDR are deal-level: one deal, one value each. Propagate the
+      // edited values to every row in the deal chain so derived per-deal
+      // values stay consistent regardless of which stage row the user edited
+      // from (DealVelocity.region reads the HPP/earliest row; the BDR quota
+      // compute reads any row's bdr_name).
+      const nextBdr = bdrName || null;
       if (hasDealChain && attribution?.deal_id) {
         for (const row of dealRowsByStage.values()) {
           if (row.id === attributionId) continue;
-          if ((row.region ?? null) !== region) {
-            await attributionsHook.update(row.id, { region });
+          const patch: Partial<Attribution> = {};
+          if ((row.region ?? null) !== region) patch.region = region;
+          if ((row.bdr_name ?? null) !== nextBdr) patch.bdr_name = nextBdr;
+          if (Object.keys(patch).length > 0) {
+            await attributionsHook.update(row.id, patch);
           }
         }
       }
@@ -422,8 +459,11 @@ export default function AttributionEditorModal({
               amount: parsedAmount,
               sf_link: sfLink.trim() || null,
               region,
+              bdr_name: nextBdr,
               deal_id: attribution.deal_id ?? null,
               stage_entered_at: iso,
+              // Only the closeLost row carries a reason.
+              lost_reason: stage_key === 'closeLost' ? lostReason : null,
             });
             // Touch propagation: new downstream rows inherit the
             // primary row's touch list (consistent with how Promote
@@ -432,13 +472,20 @@ export default function AttributionEditorModal({
               await touchesHook.setTouches(newRow.id, newTouches);
             }
           } else if (iso && existing) {
-            // UPDATE only when the date changed. Preserves any
-            // per-stage customization the user made earlier
-            // (channel, label, amount, touches). Region is deal-level
-            // and already synced across the chain above.
-            if (existing.stage_entered_at !== iso) {
+            // UPDATE only when something changed. Preserves any per-stage
+            // customization the user made earlier (channel, label, amount,
+            // touches). Region is deal-level and synced above. The closeLost
+            // row also gets its reason updated (this is the backfill path for
+            // deals lost before the reason field existed).
+            const reasonChanged =
+              stage_key === 'closeLost' &&
+              (existing.lost_reason ?? '') !== lostReason;
+            if (existing.stage_entered_at !== iso || reasonChanged) {
               await attributionsHook.update(existing.id, {
                 stage_entered_at: iso,
+                ...(stage_key === 'closeLost'
+                  ? { lost_reason: lostReason }
+                  : {}),
               });
             }
           } else if (!iso && existing) {
@@ -532,6 +579,21 @@ export default function AttributionEditorModal({
                 ))}
               </select>
             </Field>
+            <Field label="BDR (for quota tracking)">
+              <select
+                value={bdrName}
+                onChange={(e) => setBdrName(e.target.value)}
+                disabled={busy}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+              >
+                <option value="">None</option>
+                {BDRS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </Field>
           </section>
 
           <section className="space-y-2">
@@ -571,6 +633,13 @@ export default function AttributionEditorModal({
               <p className="text-xs text-slate-muted italic">
                 {cascadeNoteFor(stageKey)}
               </p>
+            )}
+            {stageKey === 'closeLost' && (
+              <LostReasonField
+                value={lostReason}
+                onChange={setLostReason}
+                disabled={busy}
+              />
             )}
           </section>
 
@@ -662,9 +731,19 @@ export default function AttributionEditorModal({
                     <OtherDateField
                       label="Close-Lost entered on"
                       value={otherCloseLost}
-                      onChange={setOtherCloseLost}
+                      onChange={(v) => {
+                        setOtherCloseLost(v);
+                        if (!v) setLostReason('');
+                      }}
                       min={minDate}
                       max={maxDate}
+                      disabled={busy}
+                    />
+                  )}
+                  {stageKey !== 'closeLost' && otherCloseLost !== '' && (
+                    <LostReasonField
+                      value={lostReason}
+                      onChange={setLostReason}
                       disabled={busy}
                     />
                   )}
@@ -869,6 +948,37 @@ function Field({
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+// Required dropdown shown wherever a closeLost row is being set or edited.
+// "No reason set" is selectable only as the empty placeholder so existing
+// reason-less deals don't silently look chosen.
+function LostReasonField({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Field label="Lost reason (required)">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+      >
+        <option value="">Select a reason…</option>
+        {LOST_REASONS.map((r) => (
+          <option key={r} value={r}>
+            {r}
+          </option>
+        ))}
+      </select>
+    </Field>
   );
 }
 

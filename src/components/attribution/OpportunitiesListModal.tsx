@@ -15,6 +15,7 @@ import { formatDate } from '../../lib/dates';
 import {
   FUNNEL_STAGE_LABELS,
   LOSS_ELIGIBLE_STAGES,
+  LOST_REASONS,
 } from '../../constants/funnelStages';
 import { describePeriodFromIso } from '../../lib/dates';
 
@@ -297,10 +298,11 @@ export default function OpportunitiesListModal({
                   {isClosingLost && lossEligible && !hasDownstreamLostRow && (
                     <CloseLostPanel
                       onCancel={() => setCloseLostFor(null)}
-                      onConfirm={async (enteredAt) => {
+                      onConfirm={async (enteredAt, lostReason) => {
                         await wrap(a.id, async () => {
                           await attributionsHook.markLost(a.id, {
                             stage_entered_at: enteredAt,
+                            lost_reason: lostReason,
                           });
                           setCloseLostFor(null);
                         });
@@ -419,15 +421,17 @@ function CloseLostPanel({
   sourceStageLabel,
 }: {
   onCancel: () => void;
-  onConfirm: (stageEnteredAt: string) => Promise<void>;
+  onConfirm: (stageEnteredAt: string, lostReason: string) => Promise<void>;
   busy: boolean;
   sourceStageLabel: string;
 }) {
   const [enteredAt, setEnteredAt] = useState<string>(todayIso());
+  const [reason, setReason] = useState<string>('');
   const max = todayIso();
   const min = minDateIso();
   const derived = describePeriodFromIso(enteredAt);
-  const valid = enteredAt >= min && enteredAt <= max && derived !== '';
+  const valid =
+    enteredAt >= min && enteredAt <= max && derived !== '' && reason !== '';
   return (
     <div className="ml-4 p-3 border border-danger/40 rounded-md bg-danger/5 space-y-2">
       <p className="text-xs text-charcoal">
@@ -446,6 +450,22 @@ function CloseLostPanel({
           className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
         />
       </label>
+      <label className="block text-xs text-slate-muted space-y-1">
+        <span>Lost reason (required)</span>
+        <select
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          disabled={busy}
+          className="block text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal"
+        >
+          <option value="">Select a reason…</option>
+          {LOST_REASONS.map((r) => (
+            <option key={r} value={r}>
+              {r}
+            </option>
+          ))}
+        </select>
+      </label>
       <p className="text-xs text-slate-muted">
         Will count as:{' '}
         <span className="text-charcoal font-medium">{derived || '—'}</span>
@@ -453,7 +473,7 @@ function CloseLostPanel({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => void onConfirm(enteredAt)}
+          onClick={() => void onConfirm(enteredAt, reason)}
           disabled={busy || !valid}
           className="text-xs px-3 py-1 rounded bg-danger text-white disabled:opacity-40"
         >
