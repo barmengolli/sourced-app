@@ -42,12 +42,13 @@ ORDER BY tbl, region;
 SELECT TRIM(country) AS country, COUNT(*) AS n
 FROM leads
 WHERE TRIM(COALESCE(country, '')) NOT IN (
-  'United States','Canada','Mexico',
+  'United States','Canada','Mexico','Bermuda',
   'France','Germany','Switzerland','Belgium','Netherlands','Italy',
-  'Spain','Finland','Sweden','Norway','Denmark','Portugal',
+  'Spain','Finland','Sweden','Norway','Denmark','Portugal','Poland',
   'South Africa','Brazil','Argentina','Chile','Colombia',
-  'United Kingdom','Ireland','United Arab Emirates','Japan','India',
-  'China','Australia','New Zealand','Singapore','Malaysia'
+  'United Kingdom','Ireland','United Arab Emirates','Saudi Arabia',
+  'Japan','India','China','Australia','New Zealand','Singapore',
+  'Malaysia','Fiji'
 )
 GROUP BY TRIM(country)
 ORDER BY n DESC;
@@ -61,16 +62,17 @@ BEGIN;
 UPDATE leads
 SET region = CASE
   WHEN TRIM(COALESCE(country, '')) IN
-    ('United States','Canada','Mexico')
+    ('United States','Canada','Mexico','Bermuda')
     THEN 'NA'
   WHEN TRIM(COALESCE(country, '')) IN
     ('France','Germany','Switzerland','Belgium','Netherlands','Italy',
-     'Spain','Finland','Sweden','Norway','Denmark','Portugal',
+     'Spain','Finland','Sweden','Norway','Denmark','Portugal','Poland',
      'South Africa','Brazil','Argentina','Chile','Colombia')
     THEN 'EMEA cont & LATAM'
   WHEN TRIM(COALESCE(country, '')) IN
-    ('United Kingdom','Ireland','United Arab Emirates','Japan','India',
-     'China','Australia','New Zealand','Singapore','Malaysia')
+    ('United Kingdom','Ireland','United Arab Emirates','Saudi Arabia',
+     'Japan','India','China','Australia','New Zealand','Singapore',
+     'Malaysia','Fiji')
     THEN 'UK&IRE, ME, Japan'
   ELSE 'Other'
 END;

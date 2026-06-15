@@ -25,6 +25,7 @@ export const COUNTRY_TO_REGION: Record<string, RegionKey> = {
   'United States': 'NA',
   Canada: 'NA',
   Mexico: 'NA',
+  Bermuda: 'NA',
   France: 'EMEA cont & LATAM',
   Germany: 'EMEA cont & LATAM',
   Switzerland: 'EMEA cont & LATAM',
@@ -37,6 +38,7 @@ export const COUNTRY_TO_REGION: Record<string, RegionKey> = {
   Norway: 'EMEA cont & LATAM',
   Denmark: 'EMEA cont & LATAM',
   Portugal: 'EMEA cont & LATAM',
+  Poland: 'EMEA cont & LATAM',
   'South Africa': 'EMEA cont & LATAM',
   Brazil: 'EMEA cont & LATAM',
   Argentina: 'EMEA cont & LATAM',
@@ -45,6 +47,7 @@ export const COUNTRY_TO_REGION: Record<string, RegionKey> = {
   'United Kingdom': 'UK&IRE, ME, Japan',
   Ireland: 'UK&IRE, ME, Japan',
   'United Arab Emirates': 'UK&IRE, ME, Japan',
+  'Saudi Arabia': 'UK&IRE, ME, Japan',
   Japan: 'UK&IRE, ME, Japan',
   India: 'UK&IRE, ME, Japan',
   China: 'UK&IRE, ME, Japan',
@@ -52,6 +55,7 @@ export const COUNTRY_TO_REGION: Record<string, RegionKey> = {
   'New Zealand': 'UK&IRE, ME, Japan',
   Singapore: 'UK&IRE, ME, Japan',
   Malaysia: 'UK&IRE, ME, Japan',
+  Fiji: 'UK&IRE, ME, Japan',
 };
 
 export function regionForCountry(
