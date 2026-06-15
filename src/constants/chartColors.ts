@@ -25,6 +25,18 @@ export const CHART_PALETTE = [
   '#64748B', // slate-muted
 ] as const;
 
+// Lighten a hex color toward white. Used for prior-year series tints
+// in YearLeadCharts (same hue family, visibly distinct).
+export function tintColor(hex: string, amount: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  const mix = (c: number) => Math.round(c + (255 - c) * amount);
+  const to2 = (c: number) => mix(c).toString(16).padStart(2, '0');
+  return `#${to2(r)}${to2(g)}${to2(b)}`;
+}
+
 // Stage gradient for the funnel chart: indigo at top descending into teal,
 // six tonal stops to match the six funnel stages.
 export const FUNNEL_STAGE_BARS = [

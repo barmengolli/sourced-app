@@ -32,7 +32,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { CHART_COLORS, CHART_PALETTE } from '../../constants/chartColors';
+import {
+  CHART_COLORS,
+  CHART_PALETTE,
+  tintColor,
+} from '../../constants/chartColors';
 import type {
   MonthlyChannelLeads,
   MonthlyLeadsForYear,
@@ -53,6 +57,11 @@ interface YearLeadChartsProps {
   // RIGHT cards read each selected channel's perMonth array from
   // whichever side carries it.
   priorYearByChannel?: MonthlyChannelLeads[];
+  // True while either source (leads, funnel_actuals fallback) is
+  // still loading. The cards render placeholders and the default
+  // channel selection is deferred until this flips false, so the
+  // incomplete union never flashes a wrong selection.
+  loading?: boolean;
 }
 
 const MONTH_AXIS_LABELS = [
@@ -64,12 +73,36 @@ function sumPerMonth(perMonth: number[]): number {
   return perMonth.reduce((a, b) => a + (b ?? 0), 0);
 }
 
+// Base name = channel name with any "YYYY - " prefix stripped. Shared
+// by the paired-default selection and the per-base color assignment so
+// "2025 - BDR" and "2026 - BDR" resolve to the same base channel.
+function baseName(name: string): string {
+  return name.replace(/^\d{4} - /, '');
+}
+
+// Shown inside each card while source data is loading. Fixed height
+// matching the chart area so the layout doesn't jump when the real
+// chart mounts.
+function LoadingPlaceholder({ tall = false }: { tall?: boolean }) {
+  return (
+    <p
+      className={
+        'text-xs text-slate-muted italic flex items-center justify-center ' +
+        (tall ? 'h-[320px]' : 'h-[280px]')
+      }
+    >
+      Loading…
+    </p>
+  );
+}
+
 export default function YearLeadCharts({
   data,
   year,
   priorYearTotals,
   priorYear,
   priorYearByChannel,
+  loading = false,
 }: YearLeadChartsProps) {
   const hasPriorYear =
     Array.isArray(priorYearTotals) && typeof priorYear === 'number';
@@ -124,12 +157,67 @@ export default function YearLeadCharts({
     return out;
   }, [data.byChannel, priorYearByChannel]);
 
-  // Stable color per channel id across both cards (acceptance #4).
+  // Stable color per channel id, shared by the middle and right cards.
+  // One hue per BASE channel (year prefix stripped), tint per year:
+  // the newest year of a base renders the raw palette hue, each older
+  // year a lighter tint of the same hue. Indexing the raw palette over
+  // the full two-year union used to land same-base year pairs exactly
+  // a palette-length apart, i.e. the identical color (Monday
+  // 12247764794).
   const colorById = useMemo(() => {
     const m = new Map<string, string>();
-    mergedChannels.forEach((c, idx) => {
-      m.set(c.channelId, CHART_PALETTE[idx % CHART_PALETTE.length]);
-    });
+    // Palette slot per distinct base name, in first-appearance order
+    // of the merged sort, so the busiest channels keep the lead slots.
+    const slotByBase = new Map<string, number>();
+    const entriesByBase = new Map<string, typeof mergedChannels>();
+    for (const c of mergedChannels) {
+      const base = baseName(c.channelName);
+      if (!slotByBase.has(base)) slotByBase.set(base, slotByBase.size);
+      const list = entriesByBase.get(base);
+      if (list) list.push(c);
+      else entriesByBase.set(base, [c]);
+    }
+    // Tint amount by age rank within a base: newest year raw, then
+    // progressively lighter. Only two years exist today; the third
+    // stop is future-proofing.
+    const TINTS = [0, 0.45, 0.65];
+    const used = new Set<string>();
+    // Collision guard: with 7+ distinct base names the palette wraps,
+    // so two bases can share a hue. Bump the later claimant to a
+    // slightly tinted variant, then a free palette slot, then walk
+    // tints until unique. No two entries may share a final hex.
+    const pickUnique = (preferred: string, hue: string): string => {
+      if (!used.has(preferred)) return preferred;
+      const bumped = tintColor(hue, 0.25);
+      if (!used.has(bumped)) return bumped;
+      for (const slot of CHART_PALETTE) {
+        if (!used.has(slot)) return slot;
+      }
+      let amount = 0.1;
+      let candidate = tintColor(hue, amount);
+      while (used.has(candidate) && amount < 0.95) {
+        amount += 0.05;
+        candidate = tintColor(hue, amount);
+      }
+      return candidate;
+    };
+    for (const [base, entries] of entriesByBase) {
+      const hue =
+        CHART_PALETTE[slotByBase.get(base)! % CHART_PALETTE.length];
+      // Newest year first: the current side is `year`, the prior side
+      // `priorYear`, so isCurrent ordering is age ordering. Evergreen
+      // channels (no prefix) appear once and take the raw hue.
+      const ordered = [...entries].sort(
+        (a, b) => Number(b.isCurrent) - Number(a.isCurrent),
+      );
+      ordered.forEach((c, i) => {
+        const tint = TINTS[Math.min(i, TINTS.length - 1)];
+        const preferred = tint === 0 ? hue : tintColor(hue, tint);
+        const color = pickUnique(preferred, hue);
+        used.add(color);
+        m.set(c.channelId, color);
+      });
+    }
     return m;
   }, [mergedChannels]);
 
@@ -146,9 +234,6 @@ export default function YearLeadCharts({
   const computeDefault = (): Set<string> => {
     const currentOnly = mergedChannels.filter((c) => c.isCurrent);
     const priorOnly = mergedChannels.filter((c) => !c.isCurrent);
-
-    // Base name = channel name with any "YYYY - " prefix stripped.
-    const baseName = (name: string) => name.replace(/^\d{4} - /, '');
 
     // Highest-volume current-year channel that has a prior-year
     // counterpart with the same base name. Pair them.
@@ -178,6 +263,12 @@ export default function YearLeadCharts({
   // default fires too early and lands on the wrong fallback).
   const userTouchedSelection = useRef(false);
   useEffect(() => {
+    // While source data is still streaming in, don't compute or prune
+    // anything: the channel union is incomplete and any default chosen
+    // now would flash the wrong selection (e.g. prior-year-only
+    // channels) before converging. The effect re-runs when loading
+    // flips false and computes the default exactly once, on full data.
+    if (loading) return;
     // Until the user touches the selection, keep tracking the computed
     // default. Current-year and prior-year channels load at different
     // times; recomputing on every union change means we converge on the
@@ -204,7 +295,7 @@ export default function YearLeadCharts({
       setSelectedChannelIds(pruned);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelKey]);
+  }, [channelKey, loading]);
 
   // Channels selected for rendering, in the same sort order as the
   // dropdown so colors and bar order match across both cards.
@@ -273,7 +364,9 @@ export default function YearLeadCharts({
   return (
     <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <ChartCard title="Total Leads per Month" subtitle={totalsSubtitle}>
-        {data.byChannel.length > 0 ? (
+        {loading ? (
+          <LoadingPlaceholder tall />
+        ) : data.byChannel.length > 0 ? (
           <ResponsiveContainer width="100%" height={320}>
             <BarChart
               data={totalsData}
@@ -370,7 +463,9 @@ export default function YearLeadCharts({
         title="Total Leads per Year by Channel"
         subtitle={channelCountSubtitle}
       >
-        {hasAnyData ? (
+        {loading ? (
+          <LoadingPlaceholder />
+        ) : hasAnyData ? (
           <div className="space-y-2">
             <ChannelMultiSelect
               channels={mergedChannels}
@@ -466,7 +561,9 @@ export default function YearLeadCharts({
         title="Leads by Channel per Month"
         subtitle={channelCountSubtitle}
       >
-        {hasAnyData ? (
+        {loading ? (
+          <LoadingPlaceholder tall />
+        ) : hasAnyData ? (
           <div className="space-y-2">
             <ChannelSelectionSummary
               selectedCount={selectedChannels.length}

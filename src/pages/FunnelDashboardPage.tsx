@@ -44,7 +44,7 @@ export default function FunnelDashboardPage({
   // compiler's no-unused-locals check without emitting any runtime
   // work; remove this line when the card is restored.
   void FunnelSankeyView;
-  const { leads } = useLeads();
+  const { leads, loading: leadsLoading } = useLeads();
   const channels = useChannels();
   const projectionsHook = useFunnelProjections();
   const actualsHook = useFunnelActuals();
@@ -190,6 +190,33 @@ export default function FunnelDashboardPage({
     regions,
   ]);
 
+  // Prior-year per-quarter totals for the trend chart's YoY compare
+  // lines. Mirrors `quarterly` with (year - 1) and that year's
+  // channel set; quarter-over-quarter alignment happens in the chart.
+  const quarterlyPrior = useMemo(() => {
+    return ([1, 2, 3, 4] as const).map((q) => ({
+      quarter: q,
+      totals: computeGrid({
+        leads,
+        channels: priorYearChannels,
+        projections: projectionsHook.projections,
+        manualActuals: actualsHook.actuals,
+        attributions: attributionsHook.attributions,
+        year: year - 1,
+        filter: `Q${q}` as PeriodFilter,
+        regions,
+      }).totals,
+    }));
+  }, [
+    leads,
+    priorYearChannels,
+    projectionsHook.projections,
+    actualsHook.actuals,
+    attributionsHook.attributions,
+    year,
+    regions,
+  ]);
+
   return (
     <div className="p-8 space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -236,6 +263,7 @@ export default function FunnelDashboardPage({
           priorYearTotals={priorYearLeads.monthTotals}
           priorYearByChannel={priorYearLeads.byChannel}
           priorYear={year - 1}
+          loading={leadsLoading || actualsHook.loading}
         />
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <ChartCard title="Actuals vs Projections">
@@ -255,8 +283,13 @@ export default function FunnelDashboardPage({
               channels={visibleChannels}
             />
           </ChartCard>
-          <ChartCard title={`${year} Quarterly Trend`}>
-            <TrendLineChartView quarterly={quarterly} />
+          <ChartCard title="Quarterly Trend">
+            <TrendLineChartView
+              quarterly={quarterly}
+              quarterlyPrior={quarterlyPrior}
+              year={year}
+              priorYear={year - 1}
+            />
           </ChartCard>
         </div>
         {/* Funnel Flow Sankey hidden 2026-05-21: visual rendering is
