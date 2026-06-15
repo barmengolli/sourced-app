@@ -47,6 +47,19 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     ],
   },
   {
+    // UI label uses the brand spelling "6Sense"; PageKeys use the
+    // `sixsense-` prefix since identifiers can't lead with a digit.
+    id: 'sixsense',
+    label: '6Sense',
+    defaultChild: 'sixsense-dashboard',
+    lastTabStorageKey: 'sourced.sixsense.lastTab',
+    expandedStorageKey: 'sourced.sidebar.expanded.sixsense',
+    children: [
+      { key: 'sixsense-dashboard', label: 'Dashboard', beta: true },
+      { key: 'sixsense-import', label: 'Import' },
+    ],
+  },
+  {
     id: 'outreach',
     label: 'Outreach',
     defaultChild: 'outreach-data',

@@ -310,6 +310,60 @@ CREATE INDEX idx_outreach_sequence ON outreach_snapshots(sequence_id);
 CREATE INDEX idx_outreach_export_date ON outreach_snapshots(export_date DESC);
 
 -- =============================================================
+-- 6sense snapshots
+-- =============================================================
+-- "Activities By Source" summary snapshot. EIS has no 6sense API access, so
+-- the summary view is exported manually and imported via the in-app 6sense
+-- CSV importer (an n8n + Google Sheet path may write here later, tagged via
+-- `source`). One row per import, keyed by the analysis-window end date.
+-- Re-importing the same window upserts. Only raw counts are stored; reach %
+-- and engagement % (count / total_accounts) and week-over-week deltas are
+-- computed in-app. Metrics 6sense shows as "--" (e.g. unlicensed G2 /
+-- TrustRadius intent) are stored NULL.
+
+CREATE TABLE sixsense_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  snapshot_date DATE NOT NULL,
+  window_start DATE,
+  window_end DATE,
+  year INTEGER NOT NULL,
+  week_number INTEGER NOT NULL,
+  total_accounts INTEGER DEFAULT 0,
+  accounts_with_activity INTEGER DEFAULT 0,
+  no_activity INTEGER DEFAULT 0,
+  reach INTEGER DEFAULT 0,
+  intent INTEGER DEFAULT 0,
+  engagement INTEGER DEFAULT 0,
+  crm_map_campaigns_reached INTEGER DEFAULT 0,
+  sales_reached INTEGER DEFAULT 0,
+  sixsense_campaigns_reached INTEGER DEFAULT 0,
+  external_campaigns_reached INTEGER DEFAULT 0,
+  linkedin_campaigns_reached INTEGER DEFAULT 0,
+  ai_emails_reached INTEGER DEFAULT 0,
+  sixsense_keyword_research INTEGER DEFAULT 0,
+  bombora_topics INTEGER DEFAULT 0,
+  g2_intent INTEGER,
+  trustradius_intent INTEGER,
+  anonymous_web_engaged INTEGER DEFAULT 0,
+  known_web_engaged INTEGER DEFAULT 0,
+  crm_map_campaigns_engaged INTEGER DEFAULT 0,
+  sales_engaged INTEGER DEFAULT 0,
+  sixsense_campaigns_engaged INTEGER DEFAULT 0,
+  external_campaigns_engaged INTEGER DEFAULT 0,
+  linkedin_campaigns_engaged INTEGER DEFAULT 0,
+  attended_webinars INTEGER DEFAULT 0,
+  attended_trade_shows INTEGER DEFAULT 0,
+  attended_field_events INTEGER DEFAULT 0,
+  ai_emails_engaged INTEGER DEFAULT 0,
+  source TEXT DEFAULT 'csv-import',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(snapshot_date)
+);
+
+CREATE INDEX idx_sixsense_year_week ON sixsense_snapshots(year, week_number);
+CREATE INDEX idx_sixsense_snapshot_date ON sixsense_snapshots(snapshot_date DESC);
+
+-- =============================================================
 -- Updated-at triggers
 -- =============================================================
 
@@ -346,6 +400,7 @@ ALTER TABLE funnel_actuals          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cell_comments           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cell_links              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outreach_snapshots      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sixsense_snapshots      ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
@@ -354,7 +409,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'channels','leads','attributions','attribution_touches','campaign_costs',
     'funnel_projections','funnel_actuals','cell_comments','cell_links',
-    'outreach_snapshots'
+    'outreach_snapshots','sixsense_snapshots'
   ]
   LOOP
     EXECUTE format('CREATE POLICY "Allow public read" ON %I FOR SELECT USING (true);', t);
@@ -376,5 +431,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE campaign_costs;
 ALTER PUBLICATION supabase_realtime ADD TABLE funnel_projections;
 ALTER PUBLICATION supabase_realtime ADD TABLE funnel_actuals;
 ALTER PUBLICATION supabase_realtime ADD TABLE outreach_snapshots;
+ALTER PUBLICATION supabase_realtime ADD TABLE sixsense_snapshots;
 
 -- Done.

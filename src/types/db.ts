@@ -168,6 +168,49 @@ export interface OutreachSnapshot {
   created_at: string;
 }
 
+// One 6sense "Activities By Source" summary snapshot per import, keyed by
+// snapshot_date (the analysis-window end). Only raw counts are stored;
+// reach % / engagement % and week-over-week deltas are computed in-app.
+// Metrics 6sense shows as "--" (e.g. unlicensed G2 / TrustRadius intent)
+// arrive NULL, hence the `number | null` on those two.
+export interface SixSenseSnapshot {
+  id: string;
+  snapshot_date: string;          // ISO date (YYYY-MM-DD), window end
+  window_start: string | null;
+  window_end: string | null;
+  year: number;
+  week_number: number;
+  total_accounts: number;
+  accounts_with_activity: number;
+  no_activity: number;
+  reach: number;
+  intent: number;
+  engagement: number;
+  crm_map_campaigns_reached: number;
+  sales_reached: number;
+  sixsense_campaigns_reached: number;
+  external_campaigns_reached: number;
+  linkedin_campaigns_reached: number;
+  ai_emails_reached: number;
+  sixsense_keyword_research: number;
+  bombora_topics: number;
+  g2_intent: number | null;
+  trustradius_intent: number | null;
+  anonymous_web_engaged: number;
+  known_web_engaged: number;
+  crm_map_campaigns_engaged: number;
+  sales_engaged: number;
+  sixsense_campaigns_engaged: number;
+  external_campaigns_engaged: number;
+  linkedin_campaigns_engaged: number;
+  attended_webinars: number;
+  attended_trade_shows: number;
+  attended_field_events: number;
+  ai_emails_engaged: number;
+  source: string;
+  created_at: string;
+}
+
 // Date-range budget per channel. Multiple rows per channel are
 // allowed: each contract / line item gets its own row. The Spend
 // report pro-rates each row to the selected period based on the
