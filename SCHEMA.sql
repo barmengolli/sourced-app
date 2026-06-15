@@ -129,6 +129,17 @@ CREATE TABLE attributions (
   -- to today when the user does not override.
   stage_entered_at DATE NOT NULL,
 
+  -- Why a deal was closed-lost. Only set on closeLost rows. The UI offers a
+  -- required dropdown ("Closed-Lost to Competitor", "Close-Lost In-House");
+  -- plain TEXT so the option list can change without a migration. NULL on
+  -- pre-existing lost rows until edited.
+  lost_reason TEXT,
+
+  -- Which BDR a deal is credited to, for the BDR Quota tracker. Set per deal
+  -- in the editor (propagated across the deal's rows like region). Plain TEXT
+  -- matching the app's fixed roster. NULL until tagged.
+  bdr_name TEXT,
+
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -140,6 +151,7 @@ CREATE INDEX idx_attributions_period ON attributions(year, period_index);
 CREATE INDEX idx_attributions_channel ON attributions(channel_id);
 CREATE INDEX idx_attributions_region ON attributions(region);
 CREATE INDEX idx_attributions_stage_entered_at ON attributions(stage_entered_at);
+CREATE INDEX idx_attributions_bdr_name ON attributions(bdr_name);
 
 -- Defense-in-depth against duplicate downstream rows. UI guard in
 -- OpportunitiesListModal prevents most cases; this constraint catches
@@ -364,6 +376,29 @@ CREATE INDEX idx_sixsense_year_week ON sixsense_snapshots(year, week_number);
 CREATE INDEX idx_sixsense_snapshot_date ON sixsense_snapshots(snapshot_date DESC);
 
 -- =============================================================
+-- BDR quotas
+-- =============================================================
+-- Annual BDR (sales-development rep) quotas for the BDR Quota tracker. One
+-- row per (bdr_name, year, stage_key) holding the target count. Actuals are
+-- NOT stored: they're computed live from attributions (deals whose first-touch
+-- top-level channel is "Marketing SDR" and whose bdr_name matches). stage_key
+-- is 'hpp' (HPP/SQL) or 'opp' (Opp/SAO). bdr_name matches attributions.bdr_name
+-- verbatim, so the actual-to-quota join is exact.
+
+CREATE TABLE bdr_quotas (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  bdr_name TEXT NOT NULL,
+  year INTEGER NOT NULL,
+  stage_key TEXT NOT NULL CHECK (stage_key IN ('hpp','opp')),
+  quota INTEGER,
+  edited_at TIMESTAMPTZ DEFAULT NOW(),
+  edited_by TEXT,
+  UNIQUE(bdr_name, year, stage_key)
+);
+
+CREATE INDEX idx_bdr_quotas_year ON bdr_quotas(year);
+
+-- =============================================================
 -- Updated-at triggers
 -- =============================================================
 
@@ -401,6 +436,7 @@ ALTER TABLE cell_comments           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cell_links              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outreach_snapshots      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sixsense_snapshots      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bdr_quotas              ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
@@ -409,7 +445,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'channels','leads','attributions','attribution_touches','campaign_costs',
     'funnel_projections','funnel_actuals','cell_comments','cell_links',
-    'outreach_snapshots','sixsense_snapshots'
+    'outreach_snapshots','sixsense_snapshots','bdr_quotas'
   ]
   LOOP
     EXECUTE format('CREATE POLICY "Allow public read" ON %I FOR SELECT USING (true);', t);
@@ -432,5 +468,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE funnel_projections;
 ALTER PUBLICATION supabase_realtime ADD TABLE funnel_actuals;
 ALTER PUBLICATION supabase_realtime ADD TABLE outreach_snapshots;
 ALTER PUBLICATION supabase_realtime ADD TABLE sixsense_snapshots;
+ALTER PUBLICATION supabase_realtime ADD TABLE bdr_quotas;
 
 -- Done.

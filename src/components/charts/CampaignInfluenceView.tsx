@@ -70,6 +70,9 @@ interface CampaignInfluenceViewProps {
   // Reference set of available years, used to detect the "full set
   // = no filter" sentinel without re-deriving from attributions.
   allYearsSet: Set<number>;
+  // When provided, each deal card shows an edit pencil that opens the deal
+  // editor with the given attribution id. Omit to keep the view read-only.
+  onEditDeal?: (attributionId: string) => void;
 }
 
 // ---------- DataVis-shape adapter types ----------
@@ -345,12 +348,13 @@ interface DealGroup {
 
 // Mini Sankey card for a deal journey (one or more stages)
 function DealJourneySankeyCard({
-  deal, index, getChannelParts, channelNameMap,
+  deal, index, getChannelParts, channelNameMap, onEditDeal,
 }: {
   deal: DealGroup;
   index: number;
   getChannelParts: (id: string) => { parentName: string; subName?: string; fullKey: string };
   channelNameMap: Map<string, string>;
+  onEditDeal?: (attributionId: string) => void;
 }) {
   const [hoveredLinkIdx, setHoveredLinkIdx] = useState<number | null>(null);
 
@@ -421,6 +425,17 @@ function DealJourneySankeyCard({
             <span className="text-[10px] text-gray-400">{cellChannel} — Q{deal.earliestAttr.periodIndex}</span>
           )}
         </div>
+        {onEditDeal && (
+          <button
+            type="button"
+            onClick={() => onEditDeal(deal.earliestAttr.id)}
+            title="Edit deal"
+            aria-label="Edit deal"
+            className="inline-flex items-center justify-center w-6 h-6 rounded text-slate-muted hover:bg-muted hover:text-charcoal flex-shrink-0"
+          >
+            <span className="text-sm">✎</span>
+          </button>
+        )}
       </div>
       <div className="w-full">
         <ResponsiveContainer
@@ -457,6 +472,7 @@ export default function CampaignInfluenceView({
   yearFilter,
   statusFilter,
   allYearsSet,
+  onEditDeal,
 }: CampaignInfluenceViewProps) {
   const [showAll, setShowAll] = useState(false);
 
@@ -847,6 +863,7 @@ export default function CampaignInfluenceView({
           index={idx}
           getChannelParts={getChannelParts}
           channelNameMap={channelNameMap}
+          onEditDeal={onEditDeal}
         />
       ))}
       {displayedGroups.length > PAGE && (

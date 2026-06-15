@@ -14,6 +14,7 @@ import type { UseAttributionTouchesResult, NewTouchInput } from '../../hooks/use
 import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 import { REGIONS, type RegionKey } from '../../constants/regions';
+import { LOST_REASONS } from '../../constants/funnelStages';
 import {
   checkForDuplicates,
   type DupeCheckResult,
@@ -165,6 +166,9 @@ export default function CreateHPPModal({
   const [pursuitEnteredAt, setPursuitEnteredAt] = useState<string>('');
   const [closeWonEnteredAt, setCloseWonEnteredAt] = useState<string>('');
   const [closeLostEnteredAt, setCloseLostEnteredAt] = useState<string>('');
+  // Required when a Close-Lost downstream date is entered. See
+  // Attribution.lost_reason.
+  const [lostReason, setLostReason] = useState<string>('');
   const [showDownstream, setShowDownstream] = useState(false);
 
   const [additional, setAdditional] = useState<TouchDraft[]>([]);
@@ -231,6 +235,9 @@ export default function CreateHPPModal({
     closeLostEnteredAt,
   ].filter(Boolean).length;
 
+  // A Close-Lost downstream date requires a reason.
+  const lostReasonOk = closeLostEnteredAt === '' || lostReason !== '';
+
   const valid =
     label.trim().length > 0 &&
     firstChannelId !== '' &&
@@ -238,6 +245,7 @@ export default function CreateHPPModal({
     stageEnteredAt <= maxDate &&
     derivedPeriodLabel !== '' &&
     downstreamOrderOk &&
+    lostReasonOk &&
     dupeResult.exactMatch === null;
 
   const submit = async () => {
@@ -317,6 +325,8 @@ export default function CreateHPPModal({
           region,
           deal_id: dealId,
           stage_entered_at: row.iso,
+          // Only the closeLost row carries a reason.
+          lost_reason: row.stage_key === 'closeLost' ? lostReason : null,
         });
         // Touch propagation: each downstream row inherits the HPP row's
         // touch list, matching how Promote carries touches forward
@@ -503,11 +513,32 @@ export default function CreateHPPModal({
                 <DownstreamDateField
                   label="Close-Lost entered on (optional)"
                   value={closeLostEnteredAt}
-                  onChange={setCloseLostEnteredAt}
+                  onChange={(v) => {
+                    setCloseLostEnteredAt(v);
+                    if (!v) setLostReason('');
+                  }}
                   min={closeMin}
                   max={maxDate}
                   disabled={busy}
                 />
+                {closeLostEnteredAt !== '' && (
+                  <label className="block text-xs text-slate-muted space-y-1">
+                    <span>Lost reason (required)</span>
+                    <select
+                      value={lostReason}
+                      onChange={(e) => setLostReason(e.target.value)}
+                      disabled={busy}
+                      className="block text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+                    >
+                      <option value="">Select a reason…</option>
+                      {LOST_REASONS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {downstreamError && (
                   <p className="text-xs text-danger">{downstreamError}</p>
                 )}

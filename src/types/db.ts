@@ -113,8 +113,29 @@ export interface Attribution {
   // ISO date (YYYY-MM-DD) the deal entered THIS stage. Drives velocity
   // computations on the Marketing Funnel: Velocity sub-tab.
   stage_entered_at: string;
+  // Why the deal was closed-lost. Only meaningful on closeLost rows; null on
+  // every other stage and on pre-existing lost rows until edited. One of the
+  // LOST_REASONS values (constants/funnelStages.ts).
+  lost_reason?: string | null;
+  // Which BDR a deal is credited to (BDR Quota tracker). Deal-level: the same
+  // value across every row of a deal_id. One of the BDRS roster strings
+  // (constants/bdr.ts), or null when untagged.
+  bdr_name?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// Annual BDR quota target. One row per (bdr_name, year, stage_key) where
+// stage_key is 'hpp' (HPP/SQL) or 'opp' (Opp/SAO). Actuals are computed from
+// attributions, not stored here.
+export interface BdrQuota {
+  id: string;
+  bdr_name: string;
+  year: number;
+  stage_key: 'hpp' | 'opp';
+  quota: number | null;
+  edited_at: string;
+  edited_by?: string | null;
 }
 
 export interface AttributionTouch {

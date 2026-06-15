@@ -2,6 +2,7 @@ import type {
   Attribution,
   AttributionStageKey,
   AttributionTouch,
+  BdrQuota,
   CampaignCost,
   Channel,
   FunnelActual,
@@ -9,6 +10,12 @@ import type {
   Lead,
   PeriodIndex,
 } from '../types/db';
+import {
+  BDRS,
+  BDR_STAGES,
+  MARKETING_SDR_BASE_NAME,
+  type BdrStage,
+} from '../constants/bdr';
 import { type RegionKey } from '../constants/regions';
 import {
   REGION_STAGE_PRIORITY,
@@ -2502,4 +2509,198 @@ export function computeChannelSpend(
   for (const channel of channels) rollupRow(channel.id);
 
   return out;
+}
+
+// =============================================================
+// BDR quota progress
+// =============================================================
+// A deal counts toward a BDR's HPP/SAO actuals when BOTH:
+//   (a) its first-touch top-level channel's base name == "Marketing SDR"
+//       (any sub-campaign under Marketing SDR qualifies), AND
+//   (b) its bdr_name matches the BDR.
+// Actuals are counts of the deal's hpp / opp stage rows whose year matches the
+// selected year (a deal can contribute to both HPP and SAO). Quotas come from
+// the bdr_quotas rows. Program totals sum across the roster.
+
+export interface BdrMatchedDeal {
+  dealId: string;
+  label: string;
+  account: string | null;
+  stageKey: BdrStage;
+  stageEnteredAt: string;
+  // An attribution row id for this deal, so the UI can open the editor.
+  attributionId: string;
+}
+
+export interface BdrStageProgress {
+  stageKey: BdrStage;
+  actual: number;
+  quota: number | null;
+  // actual / quota as a 0..1 fraction; null when no quota set.
+  pct: number | null;
+  deals: BdrMatchedDeal[];
+}
+
+export interface BdrProgressRow {
+  // bdr_name, or 'Program' for the roll-up row.
+  bdrName: string;
+  isProgram: boolean;
+  stages: Record<BdrStage, BdrStageProgress>;
+}
+
+export interface ComputeBdrQuotaProgressInput {
+  attributions: Attribution[];
+  attributionTouches: AttributionTouch[];
+  channels: Channel[];
+  quotas: BdrQuota[];
+  year: number;
+}
+
+function bdrBaseName(name: string): string {
+  return name.replace(/^\d{4} - /, '');
+}
+
+export function computeBdrQuotaProgress(
+  input: ComputeBdrQuotaProgressInput,
+): BdrProgressRow[] {
+  const { attributions, attributionTouches, channels, quotas, year } = input;
+  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+
+  // Group rows + touches by deal, mirroring the first-touch derivation used
+  // by computeChannelSpend.
+  const rowsByDeal = new Map<string, Attribution[]>();
+  for (const a of attributions) {
+    if (!a.deal_id) continue;
+    const arr = rowsByDeal.get(a.deal_id) ?? [];
+    arr.push(a);
+    rowsByDeal.set(a.deal_id, arr);
+  }
+  const touchesByAttribution = new Map<string, AttributionTouch[]>();
+  for (const t of attributionTouches) {
+    const arr = touchesByAttribution.get(t.attribution_id) ?? [];
+    arr.push(t);
+    touchesByAttribution.set(t.attribution_id, arr);
+  }
+
+  // First-touch channel per deal (earliest touched_at, nulls last; tie ->
+  // smallest touch_order; fall back to the HPP row's channel). Identical to
+  // computeChannelSpend's logic.
+  const firstTouchByDeal = new Map<string, string | null>();
+  for (const [dealId, rows] of rowsByDeal) {
+    let best: AttributionTouch | null = null;
+    for (const r of rows) {
+      for (const t of touchesByAttribution.get(r.id) ?? []) {
+        if (!t.channel_id) continue;
+        if (best === null) {
+          best = t;
+          continue;
+        }
+        const aNull = !t.touched_at;
+        const bNull = !best.touched_at;
+        if (aNull && !bNull) continue;
+        if (!aNull && bNull) {
+          best = t;
+          continue;
+        }
+        if (!aNull && !bNull) {
+          if (t.touched_at! < best.touched_at!) {
+            best = t;
+            continue;
+          }
+          if (t.touched_at! > best.touched_at!) continue;
+        }
+        if (t.touch_order < best.touch_order) best = t;
+      }
+    }
+    if (best) {
+      firstTouchByDeal.set(dealId, best.channel_id ?? null);
+      continue;
+    }
+    const hpp = rows.find((r) => r.stage_key === 'hpp');
+    firstTouchByDeal.set(dealId, hpp?.channel_id ?? null);
+  }
+
+  // Is a deal's first-touch top-level channel "Marketing SDR"?
+  const isMarketingSdrDeal = (dealId: string): boolean => {
+    const ftChannelId = firstTouchByDeal.get(dealId);
+    if (!ftChannelId) return false;
+    const topId = resolveTopLevelChannelId(ftChannelId, channelById);
+    const top = channelById.get(topId);
+    if (!top) return false;
+    return bdrBaseName(top.name) === MARKETING_SDR_BASE_NAME;
+  };
+
+  // Quota lookup: (bdr_name, stage) -> quota for the selected year.
+  const quotaByKey = new Map<string, number | null>();
+  for (const q of quotas) {
+    if (q.year !== year) continue;
+    quotaByKey.set(`${q.bdr_name}|${q.stage_key}`, q.quota);
+  }
+
+  // Seed an empty result for every roster BDR + the program row, so a BDR
+  // with no matching deals still renders (at 0 / quota).
+  const emptyStages = (): Record<BdrStage, BdrStageProgress> => {
+    const out = {} as Record<BdrStage, BdrStageProgress>;
+    for (const s of BDR_STAGES) {
+      out[s] = { stageKey: s, actual: 0, quota: null, pct: null, deals: [] };
+    }
+    return out;
+  };
+
+  const byBdr = new Map<string, BdrProgressRow>();
+  for (const bdr of BDRS) {
+    byBdr.set(bdr, { bdrName: bdr, isProgram: false, stages: emptyStages() });
+  }
+
+  // Walk qualifying deals and count their hpp/opp rows in the selected year.
+  const roster = new Set<string>(BDRS);
+  for (const [dealId, rows] of rowsByDeal) {
+    const bdr = rows.find((r) => r.bdr_name)?.bdr_name ?? null;
+    if (!bdr || !roster.has(bdr)) continue;
+    if (!isMarketingSdrDeal(dealId)) continue;
+    const row = byBdr.get(bdr)!;
+    for (const r of rows) {
+      if (r.stage_key !== 'hpp' && r.stage_key !== 'opp') continue;
+      if (r.year !== year) continue;
+      const stage = r.stage_key as BdrStage;
+      const sp = row.stages[stage];
+      sp.actual += 1;
+      sp.deals.push({
+        dealId,
+        label: r.label ?? '(unnamed deal)',
+        account: r.account ?? null,
+        stageKey: stage,
+        stageEnteredAt: r.stage_entered_at,
+        attributionId: r.id,
+      });
+    }
+  }
+
+  // Attach quotas + pct, and build the program roll-up.
+  const program: BdrProgressRow = {
+    bdrName: 'Program',
+    isProgram: true,
+    stages: emptyStages(),
+  };
+  const rows: BdrProgressRow[] = [];
+  for (const bdr of BDRS) {
+    const row = byBdr.get(bdr)!;
+    for (const s of BDR_STAGES) {
+      const sp = row.stages[s];
+      sp.quota = quotaByKey.get(`${bdr}|${s}`) ?? null;
+      sp.pct = sp.quota && sp.quota > 0 ? sp.actual / sp.quota : null;
+      // Roll into program.
+      const ps = program.stages[s];
+      ps.actual += sp.actual;
+      ps.quota = (ps.quota ?? 0) + (sp.quota ?? 0);
+      ps.deals.push(...sp.deals);
+    }
+    rows.push(row);
+  }
+  for (const s of BDR_STAGES) {
+    const ps = program.stages[s];
+    ps.pct = ps.quota && ps.quota > 0 ? ps.actual / ps.quota : null;
+  }
+
+  return [program, ...rows];
 }
