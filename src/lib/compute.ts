@@ -12,8 +12,8 @@ import type {
 } from '../types/db';
 import {
   BDRS,
+  BDR_OPTIONS,
   BDR_STAGES,
-  MARKETING_SDR_BASE_NAME,
   type BdrStage,
 } from '../constants/bdr';
 import { type RegionKey } from '../constants/regions';
@@ -2548,26 +2548,37 @@ export interface BdrProgressRow {
   stages: Record<BdrStage, BdrStageProgress>;
 }
 
-export interface ComputeBdrQuotaProgressInput {
-  attributions: Attribution[];
-  attributionTouches: AttributionTouch[];
-  channels: Channel[];
-  quotas: BdrQuota[];
-  year: number;
+// One quarter's HPP-created counts for the year-over-year chart.
+export interface BdrQuarterlyCreated {
+  quarter: PeriodIndex;     // 1..4
+  currentYear: number;      // HPPs created in the selected year's quarter
+  priorYear: number;        // HPPs created in (year - 1)'s quarter
 }
 
-function bdrBaseName(name: string): string {
-  return name.replace(/^\d{4} - /, '');
+export interface BdrQuotaProgress {
+  rows: BdrProgressRow[];          // [program, ...per-BDR]
+  quarterly: BdrQuarterlyCreated[]; // 4 entries, Q1..Q4 (year vs year-1)
+}
+
+export interface ComputeBdrQuotaProgressInput {
+  attributions: Attribution[];
+  quotas: BdrQuota[];
+  year: number;
+  // Gauge scope: 'year' counts the whole year; 'Q1'..'Q4' counts only deals
+  // whose HPP (created) date falls in that quarter. The quarterly chart
+  // ignores this and always shows all four quarters.
+  filter: PeriodFilter;
 }
 
 export function computeBdrQuotaProgress(
   input: ComputeBdrQuotaProgressInput,
-): BdrProgressRow[] {
-  const { attributions, attributionTouches, channels, quotas, year } = input;
-  const channelById = new Map(channels.map((c) => [c.id, c] as const));
+): BdrQuotaProgress {
+  const { attributions, quotas, year, filter } = input;
 
-  // Group rows + touches by deal, mirroring the first-touch derivation used
-  // by computeChannelSpend.
+  // A deal counts toward a BDR purely by its bdr_name tag — independent of
+  // channel / first touch. (An earlier version also required first-touch =
+  // Marketing SDR, but that silently excluded tagged deals; per product
+  // decision the bdr_name field alone decides.)
   const rowsByDeal = new Map<string, Attribution[]>();
   for (const a of attributions) {
     if (!a.deal_id) continue;
@@ -2575,60 +2586,6 @@ export function computeBdrQuotaProgress(
     arr.push(a);
     rowsByDeal.set(a.deal_id, arr);
   }
-  const touchesByAttribution = new Map<string, AttributionTouch[]>();
-  for (const t of attributionTouches) {
-    const arr = touchesByAttribution.get(t.attribution_id) ?? [];
-    arr.push(t);
-    touchesByAttribution.set(t.attribution_id, arr);
-  }
-
-  // First-touch channel per deal (earliest touched_at, nulls last; tie ->
-  // smallest touch_order; fall back to the HPP row's channel). Identical to
-  // computeChannelSpend's logic.
-  const firstTouchByDeal = new Map<string, string | null>();
-  for (const [dealId, rows] of rowsByDeal) {
-    let best: AttributionTouch | null = null;
-    for (const r of rows) {
-      for (const t of touchesByAttribution.get(r.id) ?? []) {
-        if (!t.channel_id) continue;
-        if (best === null) {
-          best = t;
-          continue;
-        }
-        const aNull = !t.touched_at;
-        const bNull = !best.touched_at;
-        if (aNull && !bNull) continue;
-        if (!aNull && bNull) {
-          best = t;
-          continue;
-        }
-        if (!aNull && !bNull) {
-          if (t.touched_at! < best.touched_at!) {
-            best = t;
-            continue;
-          }
-          if (t.touched_at! > best.touched_at!) continue;
-        }
-        if (t.touch_order < best.touch_order) best = t;
-      }
-    }
-    if (best) {
-      firstTouchByDeal.set(dealId, best.channel_id ?? null);
-      continue;
-    }
-    const hpp = rows.find((r) => r.stage_key === 'hpp');
-    firstTouchByDeal.set(dealId, hpp?.channel_id ?? null);
-  }
-
-  // Is a deal's first-touch top-level channel "Marketing SDR"?
-  const isMarketingSdrDeal = (dealId: string): boolean => {
-    const ftChannelId = firstTouchByDeal.get(dealId);
-    if (!ftChannelId) return false;
-    const topId = resolveTopLevelChannelId(ftChannelId, channelById);
-    const top = channelById.get(topId);
-    if (!top) return false;
-    return bdrBaseName(top.name) === MARKETING_SDR_BASE_NAME;
-  };
 
   // Quota lookup: (bdr_name, stage) -> quota for the selected year.
   const quotaByKey = new Map<string, number | null>();
@@ -2652,16 +2609,65 @@ export function computeBdrQuotaProgress(
     byBdr.set(bdr, { bdrName: bdr, isProgram: false, stages: emptyStages() });
   }
 
-  // Walk qualifying deals and count their hpp/opp rows in the selected year.
-  const roster = new Set<string>(BDRS);
+  // The deal's "created" quarter = the quarter of its HPP row's date (fall
+  // back to the earliest stage_entered_at if there's no HPP row). Used both to
+  // scope the gauges by the quarter filter and to bucket the YoY chart.
+  const createdQtrByDeal = new Map<
+    string,
+    { year: number; quarter: PeriodIndex } | null
+  >();
+  for (const [dealId, rows] of rowsByDeal) {
+    const hpp = rows.find((r) => r.stage_key === 'hpp');
+    const anchor =
+      hpp?.stage_entered_at ??
+      [...rows]
+        .map((r) => r.stage_entered_at)
+        .filter(Boolean)
+        .sort()[0];
+    createdQtrByDeal.set(dealId, quarterOfIsoDate(anchor) ?? null);
+  }
+
+  // Selected quarter from the filter ('year' = no quarter scoping).
+  const selectedQuarter: PeriodIndex | null =
+    filter === 'year' ? null : (Number(filter.slice(1)) as PeriodIndex);
+
+  // YoY HPP-created series: per quarter, count BDR-tagged deals whose HPP
+  // landed in that quarter, for `year` and `year - 1`. Always all 4 quarters.
+  const quarterlyCurrent = [0, 0, 0, 0];
+  const quarterlyPrior = [0, 0, 0, 0];
+
+  // Two scopes:
+  //   - `chartRoster` (active BDRs + 'Other') feeds the YoY created chart, so
+  //     deals from departed reps still show in the trend.
+  //   - `gaugeRoster` (active BDRs only) feeds the gauge cards + Program total;
+  //     'Other' has no card and no quota, so it's excluded there.
+  const chartRoster = new Set<string>(BDR_OPTIONS);
+  const gaugeRoster = new Set<string>(BDRS);
   for (const [dealId, rows] of rowsByDeal) {
     const bdr = rows.find((r) => r.bdr_name)?.bdr_name ?? null;
-    if (!bdr || !roster.has(bdr)) continue;
-    if (!isMarketingSdrDeal(dealId)) continue;
+    if (!bdr || !chartRoster.has(bdr)) continue;
+    const created = createdQtrByDeal.get(dealId) ?? null;
+
+    // YoY chart: bucket the deal's HPP-created quarter for this/prior year.
+    // Includes 'Other'.
+    const hasHpp = rows.some((r) => r.stage_key === 'hpp');
+    if (created && hasHpp) {
+      if (created.year === year) quarterlyCurrent[created.quarter - 1] += 1;
+      else if (created.year === year - 1)
+        quarterlyPrior[created.quarter - 1] += 1;
+    }
+
+    // Gauges: active BDRs only. Scope by the deal's CREATED quarter/year (HPP
+    // date), so a deal created in Q2 counts both its HPP and SAO under Q2 —
+    // matching "use the HPP date as the created date".
+    if (!gaugeRoster.has(bdr)) continue;
+    if (!created || created.year !== year) continue;
+    if (selectedQuarter !== null && created.quarter !== selectedQuarter) {
+      continue;
+    }
     const row = byBdr.get(bdr)!;
     for (const r of rows) {
       if (r.stage_key !== 'hpp' && r.stage_key !== 'opp') continue;
-      if (r.year !== year) continue;
       const stage = r.stage_key as BdrStage;
       const sp = row.stages[stage];
       sp.actual += 1;
@@ -2702,5 +2708,11 @@ export function computeBdrQuotaProgress(
     ps.pct = ps.quota && ps.quota > 0 ? ps.actual / ps.quota : null;
   }
 
-  return [program, ...rows];
+  const quarterly: BdrQuarterlyCreated[] = [1, 2, 3, 4].map((q) => ({
+    quarter: q as PeriodIndex,
+    currentYear: quarterlyCurrent[q - 1],
+    priorYear: quarterlyPrior[q - 1],
+  }));
+
+  return { rows: [program, ...rows], quarterly };
 }

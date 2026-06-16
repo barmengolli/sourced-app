@@ -1,25 +1,45 @@
 // BDR Dashboard: progress gauges for each BDR and the whole program, for a
-// selected year. Actuals are computed from deals whose first-touch top-level
-// channel is "Marketing SDR" and whose bdr_name matches; quotas come from the
-// bdr_quotas table. Each gauge lists its matched named deals, openable in the
-// deal editor (reuses the same onEditDeal handler as Opportunity Influence).
+// selected year (optionally scoped to a quarter by the deal's HPP/created
+// date). Actuals are computed from deals tagged with that BDR (bdr_name);
+// quotas come from the bdr_quotas table. A year-over-year line chart up top
+// shows HPPs created per quarter, this year vs last. Each gauge lists its
+// matched named deals, openable in the deal editor.
 
 import { useMemo, useState } from 'react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import type { PageKey } from '../App';
-import type { Attribution, AttributionTouch, BdrQuota, Channel } from '../types/db';
+import type { Attribution, BdrQuota } from '../types/db';
 import {
   computeBdrQuotaProgress,
   type BdrProgressRow,
+  type BdrQuarterlyCreated,
   type BdrStageProgress,
+  type PeriodFilter,
 } from '../lib/compute';
 import { BDR_STAGES, BDR_STAGE_LABELS } from '../constants/bdr';
+import { CHART_COLORS } from '../constants/chartColors';
 import ChartCard from '../components/charts/ChartCard';
 import GaugeChart from '../components/charts/GaugeChart';
 
+const FILTERS: { value: PeriodFilter; label: string }[] = [
+  { value: 'year', label: 'Year' },
+  { value: 'Q1', label: 'Q1' },
+  { value: 'Q2', label: 'Q2' },
+  { value: 'Q3', label: 'Q3' },
+  { value: 'Q4', label: 'Q4' },
+];
+
 interface BdrDashboardPageProps {
   attributions: Attribution[];
-  attributionTouches: AttributionTouch[];
-  channels: Channel[];
   quotas: BdrQuota[];
   loading: boolean;
   onNavigate: (p: PageKey) => void;
@@ -38,8 +58,6 @@ function fmtDate(iso: string): string {
 
 export default function BdrDashboardPage({
   attributions,
-  attributionTouches,
-  channels,
   quotas,
   loading,
   onNavigate,
@@ -53,37 +71,37 @@ export default function BdrDashboardPage({
   }, [quotas, attributions]);
 
   const [year, setYear] = useState<number>(() => new Date().getFullYear());
+  const [filter, setFilter] = useState<PeriodFilter>('year');
 
   const progress = useMemo(
     () =>
       computeBdrQuotaProgress({
         attributions,
-        attributionTouches,
-        channels,
         quotas,
         year,
+        filter,
       }),
-    [attributions, attributionTouches, channels, quotas, year],
+    [attributions, quotas, year, filter],
   );
 
-  const program = progress.find((r) => r.isProgram) ?? null;
-  const bdrRows = progress.filter((r) => !r.isProgram);
+  const program = progress.rows.find((r) => r.isProgram) ?? null;
+  const bdrRows = progress.rows.filter((r) => !r.isProgram);
 
   return (
     <div className="p-8 space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-charcoal">
-            BDR quota tracking
+            BDR Quota Tracker
           </h1>
           <p className="mt-1 text-sm text-slate-muted">
             HPP (SQL) and Opp (SAO) progress vs annual quota, per BDR and
-            program-wide. Actuals are deals whose first touch is Marketing SDR,
-            credited to a BDR. Set quotas on the Quotas tab; tag deals to a BDR
-            in the deal editor.
+            program-wide. Actuals are deals tagged to a BDR; deals bucket into a
+            quarter by their HPP (created) date. Set quotas on the Quotas tab;
+            tag deals to a BDR in the deal editor.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-slate-muted">
             Year
             <select
@@ -98,6 +116,26 @@ export default function BdrDashboardPage({
               ))}
             </select>
           </label>
+          <div className="flex items-center gap-1">
+            {FILTERS.map((f) => {
+              const active = f.value === filter;
+              return (
+                <button
+                  key={f.value}
+                  type="button"
+                  onClick={() => setFilter(f.value)}
+                  className={
+                    'text-xs px-2 py-1 rounded border transition-colors ' +
+                    (active
+                      ? 'bg-indigo text-white border-indigo'
+                      : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+                  }
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
           <button
             type="button"
             onClick={() => onNavigate('bdr-quota-quotas')}
@@ -111,20 +149,107 @@ export default function BdrDashboardPage({
       {loading ? (
         <p className="text-sm text-slate-muted italic">Loading…</p>
       ) : (
-        <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          {program && (
-            <ChartCard title="Program" subtitle="All BDRs combined">
-              <StageGauges row={program} onEditDeal={onEditDeal} />
-            </ChartCard>
-          )}
-          {bdrRows.map((row) => (
-            <ChartCard key={row.bdrName} title={row.bdrName}>
-              <StageGauges row={row} onEditDeal={onEditDeal} />
-            </ChartCard>
-          ))}
-        </section>
+        <>
+          {/* Year-over-year HPPs created per quarter. Always all four
+              quarters; not affected by the quarter filter (which scopes the
+              gauges below). */}
+          <CreatedTrendChart
+            quarterly={progress.quarterly}
+            year={year}
+            priorYear={year - 1}
+          />
+
+          <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {program && (
+              <ChartCard
+                title="Program"
+                subtitle={
+                  filter === 'year'
+                    ? 'All BDRs combined'
+                    : `All BDRs combined · ${filter} (by HPP date)`
+                }
+              >
+                <StageGauges row={program} onEditDeal={onEditDeal} />
+              </ChartCard>
+            )}
+            {bdrRows.map((row) => (
+              <ChartCard key={row.bdrName} title={row.bdrName}>
+                <StageGauges row={row} onEditDeal={onEditDeal} />
+              </ChartCard>
+            ))}
+          </section>
+        </>
       )}
     </div>
+  );
+}
+
+// Year-over-year line chart: HPPs created per quarter, selected year vs prior.
+function CreatedTrendChart({
+  quarterly,
+  year,
+  priorYear,
+}: {
+  quarterly: BdrQuarterlyCreated[];
+  year: number;
+  priorYear: number;
+}) {
+  const data = quarterly.map((q) => ({
+    quarter: `Q${q.quarter}`,
+    [String(year)]: q.currentYear,
+    [String(priorYear)]: q.priorYear,
+  }));
+  return (
+    <ChartCard
+      title="Opportunities Created by Quarter"
+      subtitle={`HPPs created per quarter, ${year} vs ${priorYear} (BDR-tagged deals)`}
+    >
+      <ResponsiveContainer width="100%" height={240}>
+        <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.border} />
+          <XAxis
+            dataKey="quarter"
+            tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
+            axisLine={{ stroke: CHART_COLORS.border }}
+            tickLine={{ stroke: CHART_COLORS.border }}
+          />
+          <YAxis
+            allowDecimals={false}
+            tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
+            axisLine={{ stroke: CHART_COLORS.border }}
+            tickLine={{ stroke: CHART_COLORS.border }}
+            width={36}
+          />
+          <Tooltip
+            contentStyle={{
+              fontSize: 11,
+              border: `1px solid ${CHART_COLORS.border}`,
+              borderRadius: 6,
+            }}
+            labelStyle={{ color: CHART_COLORS.charcoal, fontWeight: 600 }}
+          />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          <Line
+            type="monotone"
+            dataKey={String(year)}
+            stroke={CHART_COLORS.indigo}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            activeDot={{ r: 5 }}
+            isAnimationActive={false}
+          />
+          <Line
+            type="monotone"
+            dataKey={String(priorYear)}
+            stroke={CHART_COLORS.slateMuted}
+            strokeWidth={2}
+            strokeDasharray="5 4"
+            dot={{ r: 2 }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </ChartCard>
   );
 }
 

@@ -15,7 +15,7 @@ import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 import { REGIONS, type RegionKey } from '../../constants/regions';
 import { LOST_REASONS } from '../../constants/funnelStages';
-import { BDRS } from '../../constants/bdr';
+import { BDR_OPTIONS } from '../../constants/bdr';
 import {
   checkForDuplicates,
   type DupeCheckResult,
@@ -436,7 +436,7 @@ export default function CreateHPPModal({
                 className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
               >
                 <option value="">None</option>
-                {BDRS.map((b) => (
+                {BDR_OPTIONS.map((b) => (
                   <option key={b} value={b}>
                     {b}
                   </option>
