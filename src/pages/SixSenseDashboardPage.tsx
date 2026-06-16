@@ -7,6 +7,16 @@
 // Data is read-only here; imports happen on the 6sense Import sub-tab.
 
 import { useEffect, useMemo, useState } from 'react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import type { PageKey } from '../App';
 import type { SixSenseSnapshot } from '../types/db';
 import {
@@ -15,6 +25,8 @@ import {
   intentPct,
   reachPct,
 } from '../lib/sixsense';
+import { OVERALL_SEGMENT, orderSegments } from '../constants/sixsense';
+import { CHART_COLORS } from '../constants/chartColors';
 import ChartCard from '../components/charts/ChartCard';
 
 interface SixSenseDashboardPageProps {
@@ -45,47 +57,21 @@ export default function SixSenseDashboardPage({
   loading,
   onNavigate,
 }: SixSenseDashboardPageProps) {
-  // Which snapshot is on screen. Default to the latest; let the user step back
-  // through history. Re-anchor to the latest whenever the set changes and the
-  // current pick is gone (e.g. first load, or a delete elsewhere).
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (snapshots.length === 0) {
-      setSelectedDate(null);
-      return;
+  // Group snapshots by segment, then order: overall ('Target Accounts in CRM')
+  // first, campaigns after alphabetically. Each segment renders its own
+  // stacked section with its own week selector + prior-week compare.
+  const sections = useMemo(() => {
+    const bySegment = new Map<string, SixSenseSnapshot[]>();
+    for (const s of snapshots) {
+      const arr = bySegment.get(s.segment) ?? [];
+      arr.push(s);
+      bySegment.set(s.segment, arr);
     }
-    setSelectedDate((prev) =>
-      prev && snapshots.some((s) => s.snapshot_date === prev)
-        ? prev
-        : snapshots[0].snapshot_date,
-    );
+    return orderSegments([...bySegment.keys()]).map((segment) => ({
+      segment,
+      snapshots: bySegment.get(segment) ?? [],
+    }));
   }, [snapshots]);
-
-  const current = useMemo(
-    () => snapshots.find((s) => s.snapshot_date === selectedDate) ?? null,
-    [snapshots, selectedDate],
-  );
-
-  // Imported weeks oldest-to-newest, for the W## pill row (snapshots arrive
-  // newest-first). 6sense weeks are whatever has been imported, not a fixed
-  // quarter calendar, so the pills come from the data.
-  const orderedWeeks = useMemo(
-    () =>
-      [...snapshots].sort((a, b) =>
-        a.snapshot_date < b.snapshot_date ? -1 : 1,
-      ),
-    [snapshots],
-  );
-
-  // Auto-compare to the snapshot immediately older than the selected one,
-  // matching the Outreach Dashboard's "vs prior week" behavior.
-  const prior = useMemo(() => {
-    if (!current) return null;
-    return (
-      snapshots.find((s) => s.snapshot_date < current.snapshot_date) ?? null
-    );
-  }, [snapshots, current]);
 
   if (loading) {
     return (
@@ -95,7 +81,7 @@ export default function SixSenseDashboardPage({
     );
   }
 
-  if (!current) {
+  if (sections.length === 0) {
     return (
       <div className="p-8 space-y-4">
         <Header onNavigate={onNavigate} />
@@ -117,18 +103,82 @@ export default function SixSenseDashboardPage({
     );
   }
 
+  return (
+    <div className="p-8 space-y-8">
+      <Header onNavigate={onNavigate} />
+      {sections.map(({ segment, snapshots: segSnaps }) => (
+        <SegmentSection
+          key={segment}
+          // The overall segment is titled "All Target Accounts"; campaigns
+          // are titled by their segment name.
+          title={segment === OVERALL_SEGMENT ? 'All Target Accounts' : segment}
+          snapshots={segSnaps}
+        />
+      ))}
+    </div>
+  );
+}
+
+// One segment's dashboard: week pills + KPI cards + breakdown panels, with its
+// own selected week and prior-week comparison, scoped to the passed-in slice.
+function SegmentSection({
+  title,
+  snapshots,
+}: {
+  title: string;
+  snapshots: SixSenseSnapshot[];
+}) {
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (snapshots.length === 0) {
+      setSelectedDate(null);
+      return;
+    }
+    setSelectedDate((prev) =>
+      prev && snapshots.some((s) => s.snapshot_date === prev)
+        ? prev
+        : snapshots[0].snapshot_date,
+    );
+  }, [snapshots]);
+
+  const current = useMemo(
+    () => snapshots.find((s) => s.snapshot_date === selectedDate) ?? null,
+    [snapshots, selectedDate],
+  );
+
+  const orderedWeeks = useMemo(
+    () =>
+      [...snapshots].sort((a, b) =>
+        a.snapshot_date < b.snapshot_date ? -1 : 1,
+      ),
+    [snapshots],
+  );
+
+  const prior = useMemo(() => {
+    if (!current) return null;
+    return (
+      snapshots.find((s) => s.snapshot_date < current.snapshot_date) ?? null
+    );
+  }, [snapshots, current]);
+
+  if (!current) return null;
+
   const windowLabel =
     current.window_start && current.window_end
       ? `${fmtDate(current.window_start)} to ${fmtDate(current.window_end)}`
       : `Window ending ${fmtDate(current.snapshot_date)}`;
 
   return (
-    <div className="p-8 space-y-4">
-      <Header onNavigate={onNavigate} />
+    <section className="space-y-3">
+      <h2 className="text-lg font-semibold text-charcoal">{title}</h2>
+
+      {/* Reach & engagement % trend across all of this segment's weeks. */}
+      <ReachEngagementTrend weeks={orderedWeeks} />
 
       {/* Week pills, mirroring the Outreach Dashboard. Selecting a week shows
           its metrics and auto-compares to the prior imported week. */}
-      <section className="flex flex-wrap items-center gap-1">
+      <div className="flex flex-wrap items-center gap-1">
         <span className="text-xs text-slate-muted mr-1">Week</span>
         {orderedWeeks.map((s) => {
           const active = s.snapshot_date === current.snapshot_date;
@@ -154,7 +204,7 @@ export default function SixSenseDashboardPage({
             vs W{prior.week_number}
           </span>
         )}
-      </section>
+      </div>
 
       <p className="text-xs text-slate-muted">
         Analysis timeframe: {windowLabel}.
@@ -167,7 +217,7 @@ export default function SixSenseDashboardPage({
           used to compute by hand, plus the supporting totals. auto-fit grid
           spreads the cards across the full page width and reflows as the
           window resizes; each card stays square via aspect-square. */}
-      <section
+      <div
         className="grid gap-4"
         style={{
           gridTemplateColumns: 'repeat(auto-fit, minmax(11rem, 1fr))',
@@ -200,13 +250,13 @@ export default function SixSenseDashboardPage({
         <KpiCard
           label="Total accounts"
           primary={fmtInt(current.total_accounts)}
-          secondary="Target accounts in CRM"
+          secondary="Target accounts"
           delta={countDelta(prior?.total_accounts ?? null, current.total_accounts)}
         />
-      </section>
+      </div>
 
       {/* Source breakdowns, mirroring the three-column 6sense layout. */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <ChartCard title="Reach" subtitle={`${fmtInt(current.reach)} accounts`}>
           <BreakdownList
             current={current}
@@ -257,8 +307,80 @@ export default function SixSenseDashboardPage({
             ]}
           />
         </ChartCard>
-      </section>
-    </div>
+      </div>
+    </section>
+  );
+}
+
+// Full-width line chart at the top of each section: Reach % and Engagement %
+// across all the segment's weeks (oldest -> newest). Independent of the week
+// pill selection below; always shows the full trend.
+function ReachEngagementTrend({ weeks }: { weeks: SixSenseSnapshot[] }) {
+  const data = useMemo(
+    () =>
+      weeks.map((s) => ({
+        week: `W${s.week_number}`,
+        reach: Math.round(reachPct(s) * 10) / 10,
+        engagement: Math.round(engagementPct(s) * 10) / 10,
+      })),
+    [weeks],
+  );
+
+  // A single week can't show a trend; skip the chart until there are 2+.
+  if (data.length < 2) return null;
+
+  return (
+    <ChartCard title="Reach & Engagement Trend" subtitle="% of accounts, by week">
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.border} />
+          <XAxis
+            dataKey="week"
+            tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
+            axisLine={{ stroke: CHART_COLORS.border }}
+            tickLine={{ stroke: CHART_COLORS.border }}
+          />
+          <YAxis
+            tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
+            axisLine={{ stroke: CHART_COLORS.border }}
+            tickLine={{ stroke: CHART_COLORS.border }}
+            tickFormatter={(v) => `${v}%`}
+            domain={[0, 100]}
+            width={44}
+          />
+          <Tooltip
+            formatter={(v) => `${v}%`}
+            contentStyle={{
+              fontSize: 11,
+              border: `1px solid ${CHART_COLORS.border}`,
+              borderRadius: 6,
+            }}
+            labelStyle={{ color: CHART_COLORS.charcoal, fontWeight: 600 }}
+          />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          <Line
+            type="monotone"
+            dataKey="reach"
+            name="Reach"
+            stroke={CHART_COLORS.indigo}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            activeDot={{ r: 5 }}
+            isAnimationActive={false}
+          />
+          <Line
+            type="monotone"
+            dataKey="engagement"
+            name="Engagement"
+            stroke={CHART_COLORS.teal}
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            activeDot={{ r: 5 }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </ChartCard>
   );
 }
 

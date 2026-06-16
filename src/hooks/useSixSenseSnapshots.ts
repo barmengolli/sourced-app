@@ -138,16 +138,24 @@ export function useSixSenseSnapshots(): UseSixSenseSnapshotsResult {
     async (input: SixSenseSnapshotInput): Promise<SixSenseSnapshot> => {
       const { data, error: upsertError } = await supabase
         .from('sixsense_snapshots')
-        .upsert(input, { onConflict: 'snapshot_date' })
+        .upsert(input, { onConflict: 'snapshot_date,segment' })
         .select()
         .single();
       if (upsertError) throw upsertError;
       const saved = data as SixSenseSnapshot;
-      // Optimistic local merge; realtime will also fire but may lag.
+      // Optimistic local merge; realtime will also fire but may lag. Dedupe on
+      // (snapshot_date, segment) so importing one segment doesn't evict
+      // another segment's row for the same week.
       setSnapshots((prev) =>
         sortByDateDesc([
           saved,
-          ...prev.filter((s) => s.snapshot_date !== saved.snapshot_date),
+          ...prev.filter(
+            (s) =>
+              !(
+                s.snapshot_date === saved.snapshot_date &&
+                s.segment === saved.segment
+              ),
+          ),
         ]),
       );
       return saved;

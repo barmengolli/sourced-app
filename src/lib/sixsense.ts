@@ -19,6 +19,7 @@ export type SixSenseCounts = Omit<
   | 'id'
   | 'created_at'
   | 'source'
+  | 'segment'
   | 'snapshot_date'
   | 'window_start'
   | 'window_end'
@@ -26,9 +27,10 @@ export type SixSenseCounts = Omit<
   | 'week_number'
 >;
 
-// Full row passed to the upsert. snapshot_date is the natural key.
+// Full row passed to the upsert. (snapshot_date, segment) is the natural key.
 export interface SixSenseSnapshotInput extends SixSenseCounts {
   snapshot_date: string;
+  segment: string;
   window_start: string | null;
   window_end: string | null;
   year: number;
@@ -141,6 +143,7 @@ export function toSnapshotInput(
   counts: SixSenseCounts,
   opts: {
     snapshotDate: string;
+    segment: string;
     windowStart?: string | null;
     windowEnd?: string | null;
     source?: string;
@@ -150,6 +153,7 @@ export function toSnapshotInput(
   return {
     ...counts,
     snapshot_date: opts.snapshotDate,
+    segment: opts.segment,
     window_start: opts.windowStart ?? null,
     window_end: opts.windowEnd ?? opts.snapshotDate,
     year: iso?.year ?? new Date(opts.snapshotDate).getFullYear(),

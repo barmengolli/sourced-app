@@ -16,9 +16,14 @@ import {
   type SixSenseCounts,
   type SixSenseSnapshotInput,
 } from '../lib/sixsense';
+import { OVERALL_SEGMENT, orderSegments } from '../constants/sixsense';
 import DropZone from '../components/import/DropZone';
 
+// Sentinel value for the "Add new segment…" option in the segment dropdown.
+const ADD_NEW = '__add_new__';
+
 interface SixSenseImportPageProps {
+  snapshots: SixSenseSnapshot[];
   upsertSnapshot: (input: SixSenseSnapshotInput) => Promise<SixSenseSnapshot>;
   onNavigate: (p: PageKey) => void;
 }
@@ -38,6 +43,7 @@ function todayYmd(): string {
 }
 
 export default function SixSenseImportPage({
+  snapshots,
   upsertSnapshot,
   onNavigate,
 }: SixSenseImportPageProps) {
@@ -48,6 +54,20 @@ export default function SixSenseImportPage({
   const [windowStart, setWindowStart] = useState<string>('');
   const [windowEnd, setWindowEnd] = useState<string>(todayYmd());
   const [error, setError] = useState<string | null>(null);
+  // Segment selection. `segment` holds the chosen value; when the user picks
+  // "Add new segment…", `addingNew` reveals a text input feeding `newSegment`.
+  const [segment, setSegment] = useState<string>(OVERALL_SEGMENT);
+  const [addingNew, setAddingNew] = useState<boolean>(false);
+  const [newSegment, setNewSegment] = useState<string>('');
+
+  // Existing segments from the data (overall first), for the dropdown.
+  const existingSegments = useMemo(
+    () => orderSegments([OVERALL_SEGMENT, ...snapshots.map((s) => s.segment)]),
+    [snapshots],
+  );
+
+  // The effective segment to import under.
+  const effectiveSegment = addingNew ? newSegment.trim() : segment;
 
   const onParsed = (parsed: ParsedCsv, file: File) => {
     setError(null);
@@ -87,11 +107,16 @@ export default function SixSenseImportPage({
       setError('Set the analysis-window end date before importing.');
       return;
     }
+    if (!effectiveSegment) {
+      setError('Choose a segment (or type a new one) before importing.');
+      return;
+    }
     setError(null);
     setStep('saving');
     try {
       const input = toSnapshotInput(counts, {
         snapshotDate: windowEnd,
+        segment: effectiveSegment,
         windowStart: windowStart || null,
         windowEnd: windowEnd,
       });
@@ -146,6 +171,45 @@ export default function SixSenseImportPage({
               map in src/lib/sixsense.ts needs updating.
             </div>
           )}
+
+          {/* Segment: which account set this report covers. Existing segments
+              plus an "Add new segment…" option for a brand-new campaign. */}
+          <div className="flex flex-wrap items-end gap-4">
+            <label className="flex flex-col gap-1 text-xs text-slate-muted">
+              Segment
+              <select
+                value={addingNew ? ADD_NEW : segment}
+                onChange={(e) => {
+                  if (e.target.value === ADD_NEW) {
+                    setAddingNew(true);
+                  } else {
+                    setAddingNew(false);
+                    setSegment(e.target.value);
+                  }
+                }}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
+              >
+                {existingSegments.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+                <option value={ADD_NEW}>Add new segment…</option>
+              </select>
+            </label>
+            {addingNew && (
+              <label className="flex flex-col gap-1 text-xs text-slate-muted">
+                New segment name
+                <input
+                  type="text"
+                  value={newSegment}
+                  onChange={(e) => setNewSegment(e.target.value)}
+                  placeholder="e.g. Life & Annuities"
+                  className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
+                />
+              </label>
+            )}
+          </div>
 
           {/* Window dates. End date is the snapshot key; start is optional
               context for display. */}
@@ -221,7 +285,7 @@ export default function SixSenseImportPage({
       {step === 'done' && (
         <div className="space-y-4">
           <div className="text-sm text-success border border-success/40 bg-success/5 rounded px-3 py-2">
-            Snapshot imported for window ending {windowEnd}.
+            Imported {effectiveSegment} for window ending {windowEnd}.
           </div>
           <div className="flex items-center gap-3">
             <button
