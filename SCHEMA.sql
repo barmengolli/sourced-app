@@ -336,6 +336,10 @@ CREATE INDEX idx_outreach_export_date ON outreach_snapshots(export_date DESC);
 CREATE TABLE sixsense_snapshots (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   snapshot_date DATE NOT NULL,
+  -- Which account set this report covers. 'Target Accounts in CRM' is the
+  -- overall report; campaigns (e.g. 'Life & Annuities') are their own values,
+  -- chosen on import. Natural key is (snapshot_date, segment).
+  segment TEXT NOT NULL DEFAULT 'Target Accounts in CRM',
   window_start DATE,
   window_end DATE,
   year INTEGER NOT NULL,
@@ -369,11 +373,12 @@ CREATE TABLE sixsense_snapshots (
   ai_emails_engaged INTEGER DEFAULT 0,
   source TEXT DEFAULT 'csv-import',
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(snapshot_date)
+  UNIQUE(snapshot_date, segment)
 );
 
 CREATE INDEX idx_sixsense_year_week ON sixsense_snapshots(year, week_number);
 CREATE INDEX idx_sixsense_snapshot_date ON sixsense_snapshots(snapshot_date DESC);
+CREATE INDEX idx_sixsense_segment_date ON sixsense_snapshots(segment, snapshot_date DESC);
 
 -- =============================================================
 -- BDR quotas

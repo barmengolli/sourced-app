@@ -81,15 +81,24 @@ export function isoWeekOf(iso: string | null | undefined): IsoWeek | null {
 function isoWeekOfDate(date: Date): IsoWeek {
   // Copy as UTC so the math is timezone-independent.
   const target = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  // Shift to nearest Thursday: ISO weeks are numbered by their Thursday.
+  // Shift to the Thursday of this week: ISO weeks are numbered by their
+  // Thursday, and the ISO year is that Thursday's calendar year.
   const day = target.getUTCDay() || 7; // Sun=0 → 7
   target.setUTCDate(target.getUTCDate() + 4 - day);
   const isoYear = target.getUTCFullYear();
-  // Start of ISO year = Jan 4's week's Monday.
-  const yearStart = new Date(Date.UTC(isoYear, 0, 4));
-  const week = Math.ceil(
-    ((target.getTime() - yearStart.getTime()) / 86400000 + 1) / 7,
-  );
+  // Week number = Thursday-to-Thursday distance from week 1's Thursday. Week 1
+  // is the week containing Jan 4, so its Thursday is Jan 4 shifted to Thursday.
+  // (Measuring from Jan 4 itself is wrong: Jan 4's weekday varies, so the count
+  // came out one low — e.g. 2026-01-04 returned W0.)
+  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const firstThursday = new Date(jan4);
+  firstThursday.setUTCDate(jan4.getUTCDate() + 4 - jan4Day);
+  const week =
+    1 +
+    Math.round(
+      (target.getTime() - firstThursday.getTime()) / (7 * 86400000),
+    );
   return { year: isoYear, week };
 }
 

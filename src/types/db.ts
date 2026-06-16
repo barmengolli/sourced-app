@@ -197,6 +197,10 @@ export interface OutreachSnapshot {
 export interface SixSenseSnapshot {
   id: string;
   snapshot_date: string;          // ISO date (YYYY-MM-DD), window end
+  // Account set this report covers. 'Target Accounts in CRM' = overall;
+  // campaigns (e.g. 'Life & Annuities') are their own values. Part of the
+  // natural key with snapshot_date.
+  segment: string;
   window_start: string | null;
   window_end: string | null;
   year: number;
