@@ -15,6 +15,7 @@ import { describePeriodFromIso, quarterOfIsoDate } from '../../lib/dates';
 import { validateDealStageDates } from '../../lib/dealStageValidation';
 import { REGIONS, type RegionKey } from '../../constants/regions';
 import { LOST_REASONS } from '../../constants/funnelStages';
+import { BDRS } from '../../constants/bdr';
 import {
   checkForDuplicates,
   type DupeCheckResult,
@@ -138,6 +139,9 @@ export default function CreateHPPModal({
   const [amount, setAmount] = useState('');
   const [sfLink, setSfLink] = useState('');
   const [region, setRegion] = useState<RegionKey>('NA');
+  // BDR credit for the new deal (BDR Quota tracker); applied to the HPP row
+  // and any downstream rows created in the same pass. '' = untagged.
+  const [bdrName, setBdrName] = useState<string>('');
 
   const [firstChannelId, setFirstChannelId] = useState('');
   // Period (year + quarter) is derived from stage_entered_at at submit
@@ -276,6 +280,7 @@ export default function CreateHPPModal({
         amount: parsedAmount,
         sf_link: sfLink.trim() || null,
         region,
+        bdr_name: bdrName || null,
         deal_id: dealId,
         stage_entered_at: stageEnteredAt,
       });
@@ -323,6 +328,7 @@ export default function CreateHPPModal({
           amount: parsedAmount,
           sf_link: sfLink.trim() || null,
           region,
+          bdr_name: bdrName || null,
           deal_id: dealId,
           stage_entered_at: row.iso,
           // Only the closeLost row carries a reason.
@@ -418,6 +424,21 @@ export default function CreateHPPModal({
                 {REGIONS.map((r) => (
                   <option key={r} value={r}>
                     {r}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="BDR (for quota tracking)">
+              <select
+                value={bdrName}
+                onChange={(e) => setBdrName(e.target.value)}
+                disabled={busy}
+                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
+              >
+                <option value="">None</option>
+                {BDRS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
                   </option>
                 ))}
               </select>
