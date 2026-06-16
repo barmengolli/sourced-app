@@ -17,7 +17,7 @@ import type {
 } from '../../hooks/useAttributionTouches';
 import { ChannelSelect } from './CreateHPPModal';
 import { REGIONS, type RegionKey } from '../../constants/regions';
-import { BDRS } from '../../constants/bdr';
+import { BDR_OPTIONS } from '../../constants/bdr';
 import {
   FUNNEL_STAGE_LABELS,
   LOST_REASONS,
@@ -587,7 +587,7 @@ export default function AttributionEditorModal({
                 className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal w-full"
               >
                 <option value="">None</option>
-                {BDRS.map((b) => (
+                {BDR_OPTIONS.map((b) => (
                   <option key={b} value={b}>
                     {b}
                   </option>

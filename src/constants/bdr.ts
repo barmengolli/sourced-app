@@ -6,8 +6,17 @@
 // match. Changing the roster here changes the dropdown; existing rows keep
 // whatever string they were saved with.
 
+// Active BDRs: each gets a gauge card and rolls into the Program total.
 export const BDRS = ['Dave Cummins', 'Garrett McNally'] as const;
 export type Bdr = (typeof BDRS)[number];
+
+// Catch-all for deals from BDRs who have left the company. Selectable in the
+// editor and counted in the year-over-year "created" chart, but it does NOT
+// get its own gauge card and is NOT in the Program roll-up (no quota to hit).
+export const OTHER_BDR = 'Other';
+
+// Everything offered in the BDR dropdown: active roster + the Other bucket.
+export const BDR_OPTIONS: string[] = [...BDRS, OTHER_BDR];
 
 // The two metrics the BDR Qualification sheet tracks, as attribution stage
 // keys: HPP = 'hpp' (HPP/SQL), SAO = 'opp' (Opp/SAO).

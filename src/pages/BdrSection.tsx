@@ -46,8 +46,6 @@ function BdrSectionInner({ page, onNavigate }: BdrSectionProps) {
       {page === 'bdr-quota-dashboard' ? (
         <BdrDashboardPage
           attributions={attributionsHook.attributions}
-          attributionTouches={touchesHook.touches}
-          channels={channels}
           quotas={quotas}
           loading={loading}
           onNavigate={onNavigate}
