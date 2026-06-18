@@ -4,6 +4,7 @@ import {
   COMPUTED_STAGES,
   FUNNEL_STAGES,
   FUNNEL_STAGE_LABELS,
+  PROJ_ROLLUP_STAGES,
   type FunnelStageKey,
 } from '../../constants/funnelStages';
 import {
@@ -289,7 +290,14 @@ interface RowCellsProps {
   cells: Record<FunnelStageKey, CellValues>;
   onProjectionChange?: (stage: FunnelStageKey, value: number | null) => Promise<void>;
   onActualChange?: (stage: AttributionStageKey, value: number | null) => Promise<void>;
+  // Whether this row can edit projections at all (false only for the Totals
+  // row). On parent rows, per-stage gating below still applies: lead/mql roll
+  // up (read-only) while HPP/Opp/Pursuit stay editable.
   projectionsEditable: boolean;
+  // True when the row has sub-campaigns. Parents roll up lead/mql projections
+  // and all actuals, so those cells are read-only; HPP/Opp/Pursuit projections
+  // remain editable on the parent.
+  hasChildren: boolean;
   manualActualsEditable: boolean;
   // M7: per-stage attribution count for this row (leaves only). When > 0,
   // the ACT cell renders as a clickable badge that calls onAttributionClick.
@@ -301,16 +309,17 @@ interface RowCellsProps {
 }
 
 // Renders the 3 (Lead) + 4*5 (other stages) = 23 numeric/percent cells for a
-// single row. projectionsEditable is true for every node (every channel owns
-// its own projection independently in funnel_projections); only the totals
-// row sets it false. manualActualsEditable is true only for leaves (nodes
-// with no children) — non-leaf ACTs are recursive roll-ups.
+// single row. manualActualsEditable is true only for leaves (parent actuals
+// roll up). Projections: leaves edit every stage; parents edit only the
+// non-roll-up stages (HPP/Opp/Pursuit) while lead/mql roll up read-only; the
+// totals row edits nothing (projectionsEditable=false).
 function RowCells({
   rowId,
   cells,
   onProjectionChange,
   onActualChange,
   projectionsEditable,
+  hasChildren,
   manualActualsEditable,
   attributionCounts,
   onAttributionClick,
@@ -355,14 +364,22 @@ function RowCells({
         const otCol = baseCol + 2;
         const feCol = baseCol + 3;
 
+        // Per-stage projection editability. On a parent (hasChildren), lead/mql
+        // projections roll up from sub-campaigns and are read-only; the other
+        // stages (HPP/Opp/Pursuit) keep the parent's own editable projection.
+        // Leaves edit every stage. Totals row (projectionsEditable=false) none.
+        const projStageEditable =
+          projectionsEditable &&
+          (!hasChildren || !PROJ_ROLLUP_STAGES.has(stage));
+
         return (
           <>
             <NumericCell
               key={`${stage}-proj`}
               value={c.projection}
-              editable={projectionsEditable}
+              editable={projStageEditable}
               onCommit={
-                projectionsEditable && onProjectionChange
+                projStageEditable && onProjectionChange
                   ? (v) => onProjectionChange(stage, v)
                   : undefined
               }
@@ -668,6 +685,8 @@ export default function FunnelTable({
                 <RowCells
                   rowId={row.channelId}
                   cells={row.cells}
+                  // Always wired; RowCells gates per stage (parents edit only
+                  // HPP/Opp/Pursuit projections, lead/mql roll up read-only).
                   onProjectionChange={(stage, v) =>
                     onProjectionChange(row.channelId, stage, v)
                   }
@@ -677,6 +696,7 @@ export default function FunnelTable({
                       : (stage, v) => onActualChange(row.channelId, stage, v)
                   }
                   projectionsEditable={true}
+                  hasChildren={row.hasChildren}
                   manualActualsEditable={!row.hasChildren}
                   attributionCounts={
                     !attributionsByCell
@@ -725,6 +745,7 @@ export default function FunnelTable({
               rowId={TOTALS_ROW_ID}
               cells={grid.totals}
               projectionsEditable={false}
+              hasChildren={false}
               manualActualsEditable={false}
               focusedCell={focusedCell}
               onCellFocus={handleCellFocus}

@@ -17,6 +17,17 @@ export const FUNNEL_STAGES: FunnelStageKey[] = [
   'closeLost',
 ];
 
+// Stages whose PROJECTIONS roll up from a parent channel's sub-campaigns
+// (so the parent PROJ = sum of children). The remaining stages
+// (HPP/Opp/Pursuit/closed) keep the parent's own entered projection and stay
+// directly editable, since those late-funnel targets are set at the parent
+// level rather than attributed to a specific sub-campaign. Actuals always roll
+// up for every stage regardless of this set.
+export const PROJ_ROLLUP_STAGES: ReadonlySet<FunnelStageKey> = new Set([
+  'lead',
+  'mql',
+]);
+
 // User-facing labels mirror DataVis 1's dual-name convention so reports are
 // recognizable to readers used to the SFDC-side terminology.
 export const FUNNEL_STAGE_LABELS: Record<FunnelStageKey, string> = {
