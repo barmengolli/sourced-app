@@ -24,6 +24,7 @@ import {
 } from './regionFilter';
 import {
   FUNNEL_STAGES,
+  PROJ_ROLLUP_STAGES,
   type FunnelStageKey,
 } from '../constants/funnelStages';
 import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
@@ -314,11 +315,14 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     cell.projection = (cell.projection ?? 0) + p.projection;
   }
 
-  // 5. Tree rollup (recursive, N-level). Each node's actuals become own +
-  //    sum of children's rolled-up actuals, computed post-order. Projections
-  //    are NOT rolled up — parents own their projection independently in
-  //    funnel_projections (keyed by channel_id). OT% on a non-leaf is
-  //    `rolled-up actual / node's own projection`.
+  // 5. Tree rollup (recursive, N-level), computed post-order.
+  //    - ACTUALS roll up for every stage (a parent's actual = sum of its
+  //      sub-campaigns' rolled-up actuals).
+  //    - PROJECTIONS roll up ONLY for lead & mql (PROJ_ROLLUP_STAGES). For
+  //      HPP/Opp/Pursuit, a parent keeps its OWN entered projection: those
+  //      late-funnel targets are set at the parent level (e.g. you project
+  //      Events HPPs without attributing them to a specific sub-event), so
+  //      they must stay directly editable and are not summed from children.
   const childrenByParent = new Map<string, string[]>();
   for (const c of channels) {
     if (!c.parent_channel_id) continue;
@@ -328,25 +332,28 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   }
 
   const rolledUp = new Set<string>();
-  const rollupActuals = (nodeId: string): void => {
+  const rollup = (nodeId: string): void => {
     if (rolledUp.has(nodeId)) return;
     rolledUp.add(nodeId);
     const node = rowMap.get(nodeId);
     if (!node) return;
     const children = childrenByParent.get(nodeId) ?? [];
     for (const cid of children) {
-      rollupActuals(cid);
+      rollup(cid);
       const childRow = rowMap.get(cid);
       if (!childRow) continue;
       for (const stage of FUNNEL_STAGES) {
         const pc = node.cells[stage];
         const cc = childRow.cells[stage];
         if (cc.actual !== null) pc.actual = (pc.actual ?? 0) + cc.actual;
+        if (PROJ_ROLLUP_STAGES.has(stage) && cc.projection !== null) {
+          pc.projection = (pc.projection ?? 0) + cc.projection;
+        }
       }
     }
   };
   for (const c of channels) {
-    if (!c.parent_channel_id) rollupActuals(c.id);
+    if (!c.parent_channel_id) rollup(c.id);
   }
 
   // 6. Depth-first row ordering. Each root, then all of its descendants in
