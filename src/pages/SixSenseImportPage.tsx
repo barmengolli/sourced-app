@@ -1,5 +1,5 @@
 // 6sense Import: drop a 6sense "Activities By Source" CSV export, preview the
-// parsed KPIs, set the analysis-window end date, and upsert a weekly snapshot.
+// parsed KPIs, pick the snapshot month, and upsert a monthly snapshot.
 // Mirrors the Funnel importer's upload -> preview -> confirm flow but is a
 // single summary row, so there's no column-mapping or per-row diff step.
 
@@ -34,12 +34,32 @@ const fmtInt = (n: number | null): string =>
   n === null ? '—' : n.toLocaleString();
 const fmtPct = (n: number): string => `${(Math.round(n * 10) / 10).toFixed(1)}%`;
 
-// Today as YYYY-MM-DD in local time, for the default window-end value.
-function todayYmd(): string {
+// The last completed month as `YYYY-MM`, the default for the month picker
+// (e.g. on 2026-06-18 -> '2026-05').
+function lastCompletedMonth(): string {
   const d = new Date();
+  d.setDate(1); // avoid month-length rollover
+  d.setMonth(d.getMonth() - 1);
   const mo = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mo}-${day}`;
+  return `${d.getFullYear()}-${mo}`;
+}
+
+// "2026-05" -> "May 2026" for display.
+function fmtMonth(ym: string): string {
+  const [y, m] = ym.split('-').map(Number);
+  if (!y || !m) return ym;
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+// Last day of the given "YYYY-MM" month, as YYYY-MM-DD (for window_end).
+function monthEnd(ym: string): string {
+  const [y, m] = ym.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return `${ym}-${String(last).padStart(2, '0')}`;
 }
 
 export default function SixSenseImportPage({
@@ -51,8 +71,8 @@ export default function SixSenseImportPage({
   const [counts, setCounts] = useState<SixSenseCounts | null>(null);
   const [unknownMetrics, setUnknownMetrics] = useState<string[]>([]);
   const [fileName, setFileName] = useState<string>('');
-  const [windowStart, setWindowStart] = useState<string>('');
-  const [windowEnd, setWindowEnd] = useState<string>(todayYmd());
+  // Snapshot month as `YYYY-MM`. Defaults to the last completed month.
+  const [month, setMonth] = useState<string>(lastCompletedMonth());
   const [error, setError] = useState<string | null>(null);
   // Segment selection. `segment` holds the chosen value; when the user picks
   // "Add new segment…", `addingNew` reveals a text input feeding `newSegment`.
@@ -103,8 +123,8 @@ export default function SixSenseImportPage({
 
   const confirm = async () => {
     if (!counts) return;
-    if (!windowEnd) {
-      setError('Set the analysis-window end date before importing.');
+    if (!month) {
+      setError('Pick the snapshot month before importing.');
       return;
     }
     if (!effectiveSegment) {
@@ -114,11 +134,13 @@ export default function SixSenseImportPage({
     setError(null);
     setStep('saving');
     try {
+      // The snapshot is keyed to the first of the month; window start/end
+      // bracket the full month for display context.
       const input = toSnapshotInput(counts, {
-        snapshotDate: windowEnd,
+        snapshotDate: `${month}-01`,
         segment: effectiveSegment,
-        windowStart: windowStart || null,
-        windowEnd: windowEnd,
+        windowStart: `${month}-01`,
+        windowEnd: monthEnd(month),
       });
       await upsertSnapshot(input);
       setStep('done');
@@ -211,30 +233,23 @@ export default function SixSenseImportPage({
             )}
           </div>
 
-          {/* Window dates. End date is the snapshot key; start is optional
-              context for display. */}
+          {/* Snapshot month. 6Sense reporting is monthly; the row is keyed to
+              this month (per segment). */}
           <div className="flex flex-wrap items-end gap-4">
             <label className="flex flex-col gap-1 text-xs text-slate-muted">
-              Window start (optional)
+              Snapshot month
               <input
-                type="date"
-                value={windowStart}
-                onChange={(e) => setWindowStart(e.target.value)}
-                className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-muted">
-              Window end (snapshot date)
-              <input
-                type="date"
-                value={windowEnd}
-                onChange={(e) => setWindowEnd(e.target.value)}
+                type="month"
+                value={month}
+                onChange={(e) => setMonth(e.target.value)}
                 className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
               />
             </label>
           </div>
           <p className="text-xs text-slate-muted">
-            Importing the same window end date again replaces that snapshot.
+            Monthly snapshot for{' '}
+            <span className="text-charcoal font-medium">{fmtMonth(month)}</span>.
+            Importing the same month + segment again replaces that snapshot.
           </p>
 
           {/* Headline preview: the same reach/engagement % the dashboard shows. */}
@@ -285,7 +300,7 @@ export default function SixSenseImportPage({
       {step === 'done' && (
         <div className="space-y-4">
           <div className="text-sm text-success border border-success/40 bg-success/5 rounded px-3 py-2">
-            Imported {effectiveSegment} for window ending {windowEnd}.
+            Imported {effectiveSegment} for {fmtMonth(month)}.
           </div>
           <div className="flex items-center gap-3">
             <button

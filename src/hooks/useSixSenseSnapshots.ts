@@ -1,9 +1,9 @@
 // Access to the sixsense_snapshots table. Mirrors useOutreachSnapshots
 // (paged fetch past the PostgREST 1000-row cap, per-instance realtime
 // channel) but also writes: the in-app 6sense importer calls upsertSnapshot
-// to add or replace a weekly summary, keyed by snapshot_date.
+// to add or replace a monthly summary, keyed by snapshot_date.
 //
-// latest() / priorTo() back the dashboard's week-over-week delta: the current
+// latest() / priorTo() back the dashboard's month-over-month delta: the current
 // snapshot vs the one immediately before it in time.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -40,10 +40,13 @@ export interface UseSixSenseSnapshotsResult {
   byYear: (year: number) => SixSenseSnapshot[];
   // Most recent snapshot at or before `date` (defaults to the latest overall).
   latest: () => SixSenseSnapshot | null;
-  // The snapshot immediately before the given snapshot_date (for WoW deltas).
+  // The snapshot immediately before the given snapshot_date (for MoM deltas).
   priorTo: (snapshotDate: string) => SixSenseSnapshot | null;
   // Upsert on snapshot_date. Returns the saved row.
   upsertSnapshot: (input: SixSenseSnapshotInput) => Promise<SixSenseSnapshot>;
+  // Rename a segment across all its snapshot rows (fixes a typo). Throws if
+  // the target name already exists on another segment (would merge them).
+  renameSegment: (from: string, to: string) => Promise<void>;
 }
 
 export function useSixSenseSnapshots(): UseSixSenseSnapshotsResult {
@@ -163,6 +166,32 @@ export function useSixSenseSnapshots(): UseSixSenseSnapshotsResult {
     [],
   );
 
+  const renameSegment = useCallback(
+    async (from: string, to: string): Promise<void> => {
+      const trimmed = to.trim();
+      if (!trimmed || trimmed === from) return;
+      // Refuse to merge into an existing segment: the (snapshot_date, segment)
+      // unique key would collide for any shared month. A typo fix should target
+      // a brand-new name, not an occupied one.
+      const collision = snapshots.some((s) => s.segment === trimmed);
+      if (collision) {
+        throw new Error(
+          `A segment named "${trimmed}" already exists. Pick a different name.`,
+        );
+      }
+      const { error: updErr } = await supabase
+        .from('sixsense_snapshots')
+        .update({ segment: trimmed })
+        .eq('segment', from);
+      if (updErr) throw updErr;
+      // Optimistic local rename; realtime UPDATEs will reconcile.
+      setSnapshots((prev) =>
+        prev.map((s) => (s.segment === from ? { ...s, segment: trimmed } : s)),
+      );
+    },
+    [snapshots],
+  );
+
   return useMemo(
     () => ({
       snapshots,
@@ -173,8 +202,19 @@ export function useSixSenseSnapshots(): UseSixSenseSnapshotsResult {
       latest,
       priorTo,
       upsertSnapshot,
+      renameSegment,
     }),
-    [snapshots, loading, error, refresh, byYear, latest, priorTo, upsertSnapshot],
+    [
+      snapshots,
+      loading,
+      error,
+      refresh,
+      byYear,
+      latest,
+      priorTo,
+      upsertSnapshot,
+      renameSegment,
+    ],
   );
 }
 

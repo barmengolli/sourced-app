@@ -9,7 +9,6 @@
 // (v1 stores summary KPIs only).
 
 import type { SixSenseSnapshot } from '../types/db';
-import { isoWeekOf } from './dates';
 
 // Counts written on import. Excludes server-managed columns (id, created_at)
 // and `source` (defaulted by the importer). snapshot_date / year / week_number
@@ -137,8 +136,12 @@ export function parseActivitiesBySource(
   return { counts, unknownMetrics };
 }
 
-// Assemble the full upsert row from parsed counts + a chosen window end date.
-// year / week_number come from the ISO week of snapshotDate.
+// Assemble the full upsert row from parsed counts + a chosen snapshot date
+// (the first of the snapshot month). 6Sense reporting is monthly: `year` and
+// `week_number` come from that month. NOTE: the `week_number` COLUMN is
+// repurposed to store the month number (1-12) — the column is not renamed in
+// the DB (a rename would touch the schema and unrelated code), only its
+// meaning at this call site changed when reporting moved weekly -> monthly.
 export function toSnapshotInput(
   counts: SixSenseCounts,
   opts: {
@@ -149,15 +152,16 @@ export function toSnapshotInput(
     source?: string;
   },
 ): SixSenseSnapshotInput {
-  const iso = isoWeekOf(opts.snapshotDate);
+  // UTC parse so the first-of-month date doesn't drift across time zones.
+  const d = new Date(opts.snapshotDate + 'T00:00:00Z');
   return {
     ...counts,
     snapshot_date: opts.snapshotDate,
     segment: opts.segment,
     window_start: opts.windowStart ?? null,
     window_end: opts.windowEnd ?? opts.snapshotDate,
-    year: iso?.year ?? new Date(opts.snapshotDate).getFullYear(),
-    week_number: iso?.week ?? 0,
+    year: d.getUTCFullYear(),
+    week_number: d.getUTCMonth() + 1, // repurposed: month 1-12
     source: opts.source ?? 'csv-import',
   };
 }
