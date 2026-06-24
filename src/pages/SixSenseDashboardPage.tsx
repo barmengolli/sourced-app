@@ -1,6 +1,6 @@
 // 6sense Dashboard: the headline view that replaces the manual reach/
 // engagement math. Shows Reach % and Engagement % of total target accounts
-// for a chosen weekly snapshot, with week-over-week deltas vs the prior
+// for a chosen monthly snapshot, with month-over-month deltas vs the prior
 // snapshot, plus the three breakdown panels (Reach / Intent / Engagement)
 // matching the 6sense "Activities By Source" layout.
 //
@@ -32,6 +32,7 @@ import ChartCard from '../components/charts/ChartCard';
 interface SixSenseDashboardPageProps {
   snapshots: SixSenseSnapshot[]; // newest snapshot_date first
   loading: boolean;
+  renameSegment: (from: string, to: string) => Promise<void>;
   onNavigate: (p: PageKey) => void;
 }
 
@@ -40,26 +41,38 @@ const fmtInt = (n: number | null): string =>
 
 const fmtPct = (n: number): string => `${(Math.round(n * 10) / 10).toFixed(1)}%`;
 
-// Format an absolute date string (YYYY-MM-DD) as e.g. "Jun 6, 2026".
-function fmtDate(iso: string | null): string {
+const MONTHS_SHORT = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+// Snapshot date (YYYY-MM-DD, first of the month) -> "January 2026". 6Sense
+// reporting is monthly; snapshots are keyed to the first of their month.
+function fmtMonth(iso: string | null): string {
   if (!iso) return '—';
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  const m = /^(\d{4})-(\d{2})/.exec(iso);
   if (!m) return iso;
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
   ];
-  return `${months[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+  return `${months[Number(m[2]) - 1]} ${m[1]}`;
+}
+
+// Month number (1-12, stored in week_number) -> short month label for pills.
+function monthShort(monthNum: number): string {
+  return MONTHS_SHORT[monthNum - 1] ?? `M${monthNum}`;
 }
 
 export default function SixSenseDashboardPage({
   snapshots,
   loading,
+  renameSegment,
   onNavigate,
 }: SixSenseDashboardPageProps) {
   // Group snapshots by segment, then order: overall ('Target Accounts in CRM')
   // first, campaigns after alphabetically. Each segment renders its own
-  // stacked section with its own week selector + prior-week compare.
+  // stacked section with its own month selector + prior-month compare.
   const sections = useMemo(() => {
     const bySegment = new Map<string, SixSenseSnapshot[]>();
     for (const s of snapshots) {
@@ -109,9 +122,12 @@ export default function SixSenseDashboardPage({
       {sections.map(({ segment, snapshots: segSnaps }) => (
         <SegmentSection
           key={segment}
+          segment={segment}
           // The overall segment is titled "All Target Accounts"; campaigns
-          // are titled by their segment name.
+          // are titled by their segment name. Only campaigns are renamable.
           title={segment === OVERALL_SEGMENT ? 'All Target Accounts' : segment}
+          renamable={segment !== OVERALL_SEGMENT}
+          onRename={renameSegment}
           snapshots={segSnaps}
         />
       ))}
@@ -119,13 +135,21 @@ export default function SixSenseDashboardPage({
   );
 }
 
-// One segment's dashboard: week pills + KPI cards + breakdown panels, with its
-// own selected week and prior-week comparison, scoped to the passed-in slice.
+// One segment's dashboard: month pills + KPI cards + breakdown panels, with its
+// own selected month and prior-month comparison, scoped to the passed-in slice.
 function SegmentSection({
+  segment,
   title,
+  renamable,
+  onRename,
   snapshots,
 }: {
+  // The actual segment value (DB key); rename targets this. `title` is the
+  // display label (the overall segment shows a friendlier title).
+  segment: string;
   title: string;
+  renamable: boolean;
+  onRename: (from: string, to: string) => Promise<void>;
   snapshots: SixSenseSnapshot[];
 }) {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -147,7 +171,7 @@ function SegmentSection({
     [snapshots, selectedDate],
   );
 
-  const orderedWeeks = useMemo(
+  const orderedMonths = useMemo(
     () =>
       [...snapshots].sort((a, b) =>
         a.snapshot_date < b.snapshot_date ? -1 : 1,
@@ -164,29 +188,29 @@ function SegmentSection({
 
   if (!current) return null;
 
-  const windowLabel =
-    current.window_start && current.window_end
-      ? `${fmtDate(current.window_start)} to ${fmtDate(current.window_end)}`
-      : `Window ending ${fmtDate(current.snapshot_date)}`;
-
   return (
     <section className="space-y-3">
-      <h2 className="text-lg font-semibold text-charcoal">{title}</h2>
+      <SegmentTitle
+        segment={segment}
+        title={title}
+        renamable={renamable}
+        onRename={onRename}
+      />
 
-      {/* Reach & engagement % trend across all of this segment's weeks. */}
-      <ReachEngagementTrend weeks={orderedWeeks} />
+      {/* Reach & engagement % trend across all of this segment's months. */}
+      <ReachEngagementTrend months={orderedMonths} />
 
-      {/* Week pills, mirroring the Outreach Dashboard. Selecting a week shows
-          its metrics and auto-compares to the prior imported week. */}
+      {/* Month pills, mirroring the Outreach Dashboard. Selecting a month
+          shows its metrics and auto-compares to the prior imported month. */}
       <div className="flex flex-wrap items-center gap-1">
-        <span className="text-xs text-slate-muted mr-1">Week</span>
-        {orderedWeeks.map((s) => {
+        <span className="text-xs text-slate-muted mr-1">Month</span>
+        {orderedMonths.map((s) => {
           const active = s.snapshot_date === current.snapshot_date;
           return (
             <button
               key={s.id}
               type="button"
-              title={`${fmtDate(s.snapshot_date)} (W${s.week_number})`}
+              title={fmtMonth(s.snapshot_date)}
               onClick={() => setSelectedDate(s.snapshot_date)}
               className={
                 'text-xs px-2 py-1 rounded border transition-colors ' +
@@ -195,22 +219,22 @@ function SegmentSection({
                   : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
               }
             >
-              W{s.week_number}
+              {monthShort(s.week_number)}
             </button>
           );
         })}
         {prior && (
           <span className="text-xs text-slate-muted ml-2">
-            vs W{prior.week_number}
+            vs {monthShort(prior.week_number)}
           </span>
         )}
       </div>
 
       <p className="text-xs text-slate-muted">
-        Analysis timeframe: {windowLabel}.
+        {fmtMonth(current.snapshot_date)}.
         {prior
-          ? ` Change vs ${fmtDate(prior.snapshot_date)}.`
-          : ' No earlier week to compare.'}
+          ? ` Change vs ${fmtMonth(prior.snapshot_date)}.`
+          : ' No earlier month to compare.'}
       </p>
 
       {/* Headline KPI cards: the reach/engagement percentages the team
@@ -312,30 +336,134 @@ function SegmentSection({
   );
 }
 
+// Section heading with inline rename for campaign segments. Click the pencil
+// to edit; Enter or Save commits the rename across all the segment's rows,
+// Escape cancels. The overall segment (renamable=false) renders a plain title.
+function SegmentTitle({
+  segment,
+  title,
+  renamable,
+  onRename,
+}: {
+  segment: string;
+  title: string;
+  renamable: boolean;
+  onRename: (from: string, to: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const start = () => {
+    setDraft(title);
+    setError(null);
+    setEditing(true);
+  };
+  const cancel = () => {
+    setEditing(false);
+    setError(null);
+  };
+  const save = async () => {
+    const next = draft.trim();
+    if (!next || next === segment) {
+      cancel();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onRename(segment, next);
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Rename failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!renamable) {
+    return <h2 className="text-lg font-semibold text-charcoal">{title}</h2>;
+  }
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={draft}
+            autoFocus
+            disabled={busy}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void save();
+              if (e.key === 'Escape') cancel();
+            }}
+            className="text-lg font-semibold text-charcoal border border-border rounded px-2 py-0.5 focus:outline-none focus:ring-2 focus:ring-indigo"
+          />
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={busy}
+            className="text-xs px-2 py-1 rounded bg-indigo text-white hover:bg-indigo/90 disabled:opacity-50"
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            type="button"
+            onClick={cancel}
+            disabled={busy}
+            className="text-xs px-2 py-1 text-slate-muted hover:text-charcoal"
+          >
+            Cancel
+          </button>
+        </div>
+        {error && <p className="text-xs text-danger">{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 group">
+      <h2 className="text-lg font-semibold text-charcoal">{title}</h2>
+      <button
+        type="button"
+        onClick={start}
+        title="Rename segment"
+        aria-label="Rename segment"
+        className="inline-flex items-center justify-center w-6 h-6 rounded text-slate-muted hover:bg-muted hover:text-charcoal"
+      >
+        <span className="text-sm">✎</span>
+      </button>
+    </div>
+  );
+}
+
 // Full-width line chart at the top of each section: Reach % and Engagement %
-// across all the segment's weeks (oldest -> newest). Independent of the week
+// across all the segment's months (oldest -> newest). Independent of the month
 // pill selection below; always shows the full trend.
-function ReachEngagementTrend({ weeks }: { weeks: SixSenseSnapshot[] }) {
+function ReachEngagementTrend({ months }: { months: SixSenseSnapshot[] }) {
   const data = useMemo(
     () =>
-      weeks.map((s) => ({
-        week: `W${s.week_number}`,
+      months.map((s) => ({
+        month: monthShort(s.week_number),
         reach: Math.round(reachPct(s) * 10) / 10,
         engagement: Math.round(engagementPct(s) * 10) / 10,
       })),
-    [weeks],
+    [months],
   );
 
-  // A single week can't show a trend; skip the chart until there are 2+.
+  // A single month can't show a trend; skip the chart until there are 2+.
   if (data.length < 2) return null;
 
   return (
-    <ChartCard title="Reach & Engagement Trend" subtitle="% of accounts, by week">
+    <ChartCard title="Reach & Engagement Trend" subtitle="% of accounts, by month">
       <ResponsiveContainer width="100%" height={220}>
         <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.border} />
           <XAxis
-            dataKey="week"
+            dataKey="month"
             tick={{ fontSize: 11, fill: CHART_COLORS.slateMuted }}
             axisLine={{ stroke: CHART_COLORS.border }}
             tickLine={{ stroke: CHART_COLORS.border }}
@@ -399,7 +527,7 @@ function Header({
         </h1>
         <p className="mt-1 text-sm text-slate-muted">
           Target-account reach and engagement from the 6sense "Activities By
-          Source" summary. Import a new weekly export on the Import tab.
+          Source" summary. Import a new monthly export on the Import tab.
         </p>
       </div>
       <div className="flex items-center gap-3">
@@ -502,7 +630,7 @@ function KpiCard({
   );
 }
 
-// One breakdown panel's rows: label + count + WoW count delta. Reads the
+// One breakdown panel's rows: label + count + MoM count delta. Reads the
 // count fields off the snapshot by key.
 type CountField = {
   [K in keyof SixSenseSnapshot]: SixSenseSnapshot[K] extends number | null

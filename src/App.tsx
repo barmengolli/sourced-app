@@ -113,6 +113,7 @@ export interface SixSenseSubPageProps {
   snapshots: SixSenseSnapshot[];
   loading: boolean;
   upsertSnapshot: (input: SixSenseSnapshotInput) => Promise<SixSenseSnapshot>;
+  renameSegment: (from: string, to: string) => Promise<void>;
   onNavigate: (p: PageKey) => void;
 }
 
@@ -232,6 +233,7 @@ export default function App() {
     snapshots: sixSenseSnapshots,
     loading: sixSenseLoading,
     upsertSnapshot: upsertSixSenseSnapshot,
+    renameSegment: renameSixSenseSegment,
   } = useSixSenseSnapshots();
   useEffect(() => {
     if (outreachWeekTouched.current) return;
@@ -310,6 +312,7 @@ export default function App() {
     snapshots: sixSenseSnapshots,
     loading: sixSenseLoading,
     upsertSnapshot: upsertSixSenseSnapshot,
+    renameSegment: renameSixSenseSegment,
     onNavigate: navigate,
   };
 
