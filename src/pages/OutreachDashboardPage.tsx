@@ -21,6 +21,7 @@ import {
   type OutreachRegionKey,
 } from '../constants/outreachRegions';
 import { inferRegionFromSequenceName } from '../lib/outreach';
+import { monthOfExportDate } from '../hooks/useOutreachSnapshots';
 import type { OutreachSnapshot } from '../types/db';
 import type { OutreachSubPageProps } from '../App';
 import SequenceMultiSelect from '../components/outreach/SequenceMultiSelect';
@@ -38,15 +39,76 @@ function weekRangeLabel(w: IsoWeek): string {
   return `${fmtDate(mon)} – ${fmtDate(sun)}`;
 }
 
+const MONTH_LABELS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const;
+
+// The count columns are CUMULATIVE lifetime counters per sequence (verified:
+// every field is monotonically non-decreasing across all sequences). To report
+// per-period VOLUME we diff each snapshot against the sequence's previous
+// snapshot. Summing these consecutive deltas within a period telescopes to
+// (period-end cumulative − prior-period-end cumulative), i.e. the true volume,
+// so every existing per-period sum (aggregate, funnel, heatmap) stays correct.
+const CUMULATIVE_FIELDS = [
+  'total_sent', 'delivered', 'bounced', 'failed', 'opened', 'clicked',
+  'replied', 'positive_replies', 'neutral_replies', 'negative_replies',
+  'opted_out', 'contacted_prospects', 'replied_prospects', 'prospects_added',
+  'outbound_calls', 'linkedin_tasks_completed', 'total_tasks',
+] as const;
+
+// Convert cumulative snapshots into per-period-delta rows. Identity, dates,
+// week_number, rates and non-cumulative fields are preserved so period.match
+// and downstream filters work unchanged; only the cumulative counts are
+// replaced with (this − previous-for-this-sequence). The first snapshot of a
+// sequence keeps its value (it's the sequence's debut volume).
+function toDeltaSnapshots(snaps: OutreachSnapshot[]): OutreachSnapshot[] {
+  const bySeq = new Map<number, OutreachSnapshot[]>();
+  for (const s of snaps) {
+    (bySeq.get(s.sequence_id) ?? bySeq.set(s.sequence_id, []).get(s.sequence_id)!).push(s);
+  }
+  const out: OutreachSnapshot[] = [];
+  for (const rows of bySeq.values()) {
+    const sorted = [...rows].sort((a, b) =>
+      a.export_date < b.export_date ? -1 : a.export_date > b.export_date ? 1 : 0,
+    );
+    for (let i = 0; i < sorted.length; i++) {
+      const cur = sorted[i];
+      const prev = i > 0 ? sorted[i - 1] : null;
+      const delta = { ...cur };
+      for (const f of CUMULATIVE_FIELDS) {
+        const d = prev ? cur[f] - prev[f] : cur[f];
+        // Guard against any non-monotonic blip (none in data, but safe).
+        delta[f] = d > 0 ? d : 0;
+      }
+      out.push(delta);
+    }
+  }
+  return out;
+}
+
+// A selectable time bucket. In week mode each period is one ISO week; in month
+// mode each is one calendar month. `match` decides if a snapshot belongs to it,
+// so every panel filters by period instead of hard-coding week_number.
+interface Period {
+  key: string; // 'W23' | '2026-03'
+  label: string; // 'W23' | 'Mar'
+  match: (s: OutreachSnapshot) => boolean;
+}
+
 export default function OutreachDashboardPage({
   year,
   quarter,
   week,
+  granularity,
+  month,
   regions,
   selectedSequences,
   onYearChange,
   onQuarterChange,
   onWeekChange,
+  onGranularityChange,
+  onMonthChange,
   onRegionsChange,
   onSelectedSequencesChange,
   snapshots,
@@ -63,17 +125,6 @@ export default function OutreachDashboardPage({
     [year, quarter],
   );
 
-  const effectiveWeek = useMemo(() => {
-    return quarterWeeks.find((w) => w.week === week) ?? quarterWeeks[0];
-  }, [quarterWeeks, week]);
-
-  const prevWeek: IsoWeek | null = useMemo(() => {
-    if (!effectiveWeek) return null;
-    const idx = quarterWeeks.findIndex((w) => w.week === effectiveWeek.week);
-    if (idx <= 0) return null;
-    return quarterWeeks[idx - 1];
-  }, [quarterWeeks, effectiveWeek]);
-
   // Sequences for the multi-select (distinct ids in the data).
   const sequenceOptions = useMemo(() => {
     const m = new Map<number, string>();
@@ -85,14 +136,20 @@ export default function OutreachDashboardPage({
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [snapshots]);
 
-  // Pre-filter snapshots for the active year + region + sequences set.
+  // Convert cumulative counters to per-period-delta rows ONCE, across each
+  // sequence's full history (so the first row of the selected year still diffs
+  // against the prior year's last snapshot when present). All downstream
+  // aggregation sees real volume, not running totals.
+  const deltaSnapshots = useMemo(() => toDeltaSnapshots(snapshots), [snapshots]);
+
+  // Pre-filter the delta rows for the active year + region + sequences set.
   // Empty selectedSequences = "All Sequences" (DataVis convention).
   const scopedSnapshots = useMemo(() => {
     const allRegionsOn = regions.size === OUTREACH_REGIONS.length;
     const allSeqs =
       selectedSequences.size === 0 ||
       selectedSequences.size === sequenceOptions.length;
-    return snapshots.filter((s) => {
+    return deltaSnapshots.filter((s) => {
       if (s.year !== year) return false;
       if (!allRegionsOn) {
         const r = inferRegionFromSequenceName(s.sequence_name);
@@ -101,17 +158,58 @@ export default function OutreachDashboardPage({
       if (!allSeqs && !selectedSequences.has(s.sequence_id)) return false;
       return true;
     });
-  }, [snapshots, year, regions, selectedSequences, sequenceOptions]);
+  }, [deltaSnapshots, year, regions, selectedSequences, sequenceOptions]);
 
-  const currentRows = useMemo(() => {
-    if (!effectiveWeek) return [];
-    return scopedSnapshots.filter((s) => s.week_number === effectiveWeek.week);
-  }, [scopedSnapshots, effectiveWeek]);
+  // The ordered period list for the active granularity. Week mode mirrors the
+  // quarter's weeks (oldest -> newest); month mode is the calendar months that
+  // have data in the selected year (by export_date), Jan -> Dec.
+  const periods: Period[] = useMemo(() => {
+    if (granularity === 'week') {
+      return quarterWeeks.map((w) => ({
+        key: `W${w.week}`,
+        label: `W${w.week}`,
+        match: (s: OutreachSnapshot) => s.week_number === w.week,
+      }));
+    }
+    const present = new Set<number>();
+    for (const s of snapshots) {
+      const m = monthOfExportDate(s.export_date);
+      if (m && m.year === year) present.add(m.month);
+    }
+    return [...present]
+      .sort((a, b) => a - b)
+      .map((mo) => ({
+        key: `${year}-${String(mo).padStart(2, '0')}`,
+        label: MONTH_LABELS[mo - 1],
+        match: (s: OutreachSnapshot) => {
+          const m = monthOfExportDate(s.export_date);
+          return m !== null && m.year === year && m.month === mo;
+        },
+      }));
+  }, [granularity, quarterWeeks, snapshots, year]);
 
-  const prevRows = useMemo(() => {
-    if (!prevWeek) return [];
-    return scopedSnapshots.filter((s) => s.week_number === prevWeek.week);
-  }, [scopedSnapshots, prevWeek]);
+  // The selected period and the one immediately before it (for the delta).
+  const { currentPeriod, prevPeriod } = useMemo(() => {
+    const idx =
+      granularity === 'week'
+        ? periods.findIndex((p) => p.key === `W${week}`)
+        : periods.findIndex((p) => p.key.endsWith(`-${String(month).padStart(2, '0')}`));
+    const safeIdx = idx >= 0 ? idx : periods.length - 1;
+    return {
+      currentPeriod: periods[safeIdx] ?? null,
+      prevPeriod: safeIdx > 0 ? periods[safeIdx - 1] : null,
+    };
+  }, [periods, granularity, week, month]);
+
+  const currentRows = useMemo(
+    () => (currentPeriod ? scopedSnapshots.filter(currentPeriod.match) : []),
+    [scopedSnapshots, currentPeriod],
+  );
+
+  const prevRows = useMemo(
+    () => (prevPeriod ? scopedSnapshots.filter(prevPeriod.match) : []),
+    [scopedSnapshots, prevPeriod],
+  );
 
   const allRegionsOn = regions.size === OUTREACH_REGIONS.length;
   const toggleRegion = (r: OutreachRegionKey) => {
@@ -129,9 +227,9 @@ export default function OutreachDashboardPage({
             Outreach — Dashboard
           </h1>
           <p className="mt-1 text-sm text-slate-muted">
-            Aggregate metrics for the selected ISO week. Cards and charts
-            recompute from outreach_snapshots; deltas compare to the prior
-            week.
+            {granularity === 'week'
+              ? 'Aggregate metrics for the selected ISO week. Cards and charts recompute from outreach_snapshots; deltas compare to the prior week.'
+              : 'Aggregate metrics for the selected calendar month (its weeks summed). Cards and charts recompute from outreach_snapshots; deltas compare to the prior month.'}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -149,54 +247,100 @@ export default function OutreachDashboardPage({
               ))}
             </select>
           </label>
+          {/* Week | Month granularity toggle. */}
           <div className="flex items-center gap-1">
-            {QUARTER_VALUES.map((q) => {
-              const active = q === quarter;
+            {(['week', 'month'] as const).map((g) => {
+              const active = g === granularity;
               return (
                 <button
-                  key={q}
+                  key={g}
                   type="button"
-                  onClick={() => onQuarterChange(q)}
+                  onClick={() => onGranularityChange(g)}
                   className={
-                    'text-xs px-2 py-1 rounded border transition-colors ' +
+                    'text-xs px-2 py-1 rounded border transition-colors capitalize ' +
                     (active
                       ? 'bg-indigo text-white border-indigo'
                       : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
                   }
                 >
-                  Q{q}
+                  {g}
                 </button>
               );
             })}
           </div>
+          {/* Quarter buttons scope the week pills; irrelevant in month mode. */}
+          {granularity === 'week' && (
+            <div className="flex items-center gap-1">
+              {QUARTER_VALUES.map((q) => {
+                const active = q === quarter;
+                return (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => onQuarterChange(q)}
+                    className={
+                      'text-xs px-2 py-1 rounded border transition-colors ' +
+                      (active
+                        ? 'bg-indigo text-white border-indigo'
+                        : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+                    }
+                  >
+                    Q{q}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       </header>
 
       <section className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-xs text-slate-muted mr-1">Week</span>
-          {quarterWeeks.map((w) => {
-            const active = effectiveWeek?.week === w.week;
-            return (
-              <button
-                key={`${w.year}-${w.week}`}
-                type="button"
-                title={weekRangeLabel(w)}
-                onClick={() => onWeekChange(w.week)}
-                className={
-                  'text-xs px-2 py-1 rounded border transition-colors ' +
-                  (active
-                    ? 'bg-indigo text-white border-indigo'
-                    : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                }
-              >
-                W{w.week}
-              </button>
-            );
-          })}
-          {prevWeek && (
+          <span className="text-xs text-slate-muted mr-1">
+            {granularity === 'week' ? 'Week' : 'Month'}
+          </span>
+          {granularity === 'week'
+            ? quarterWeeks.map((w) => {
+                const active = currentPeriod?.key === `W${w.week}`;
+                return (
+                  <button
+                    key={`${w.year}-${w.week}`}
+                    type="button"
+                    title={weekRangeLabel(w)}
+                    onClick={() => onWeekChange(w.week)}
+                    className={
+                      'text-xs px-2 py-1 rounded border transition-colors ' +
+                      (active
+                        ? 'bg-indigo text-white border-indigo'
+                        : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+                    }
+                  >
+                    W{w.week}
+                  </button>
+                );
+              })
+            : periods.map((p) => {
+                const mo = parseInt(p.key.slice(-2), 10);
+                const active = currentPeriod?.key === p.key;
+                return (
+                  <button
+                    key={p.key}
+                    type="button"
+                    onClick={() => onMonthChange(mo)}
+                    className={
+                      'text-xs px-2 py-1 rounded border transition-colors ' +
+                      (active
+                        ? 'bg-indigo text-white border-indigo'
+                        : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
+                    }
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+          {prevPeriod && (
             <span className="text-xs text-slate-muted ml-2">
-              vs W{prevWeek.week}
+              vs {prevPeriod.label}
             </span>
           )}
         </div>
@@ -242,20 +386,24 @@ export default function OutreachDashboardPage({
         <p className="text-sm text-slate-muted italic">Loading…</p>
       ) : (
         <>
-          <SummaryCards current={currentRows} previous={prevRows} prevWeek={prevWeek} />
+          <SummaryCards
+            current={currentRows}
+            previous={prevRows}
+            prevLabel={prevPeriod?.label ?? null}
+          />
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <RegionPerformanceCard
               currentRows={currentRows}
               previousRows={prevRows}
-              currentWeek={effectiveWeek}
-              prevWeek={prevWeek}
+              curLabel={currentPeriod?.label ?? null}
+              prevLabel={prevPeriod?.label ?? null}
             />
             <EngagementFunnelCard rows={currentRows} />
             <SequenceRankingsCard rows={currentRows} />
             <ActivityHeatmapCard
               snapshots={scopedSnapshots}
-              quarterWeeks={quarterWeeks}
-              effectiveWeek={effectiveWeek}
+              periods={periods}
+              currentKey={currentPeriod?.key ?? null}
             />
           </div>
         </>
@@ -300,11 +448,11 @@ function aggregate(snaps: OutreachSnapshot[]): RegionStats {
 function SummaryCards({
   current,
   previous,
-  prevWeek,
+  prevLabel,
 }: {
   current: OutreachSnapshot[];
   previous: OutreachSnapshot[];
-  prevWeek: IsoWeek | null;
+  prevLabel: string | null;
 }) {
   const cur = aggregate(current);
   const prev = aggregate(previous);
@@ -340,8 +488,8 @@ function SummaryCards({
             key={key}
             className="bg-white border border-border rounded-lg p-3 shadow-sm"
             title={
-              prevWeek
-                ? `W${prevWeek.week}: ${p.toLocaleString()}, current: ${c.toLocaleString()}`
+              prevLabel
+                ? `${prevLabel}: ${p.toLocaleString()}, current: ${c.toLocaleString()}`
                 : `current: ${c.toLocaleString()}`
             }
           >
@@ -403,13 +551,13 @@ const REGION_METRICS: { key: keyof RegionStats; label: string }[] = [
 function RegionPerformanceCard({
   currentRows,
   previousRows,
-  currentWeek,
-  prevWeek,
+  curLabel,
+  prevLabel,
 }: {
   currentRows: OutreachSnapshot[];
   previousRows: OutreachSnapshot[];
-  currentWeek: IsoWeek | null;
-  prevWeek: IsoWeek | null;
+  curLabel: string | null;
+  prevLabel: string | null;
 }) {
   const data = useMemo(() => {
     const targetRegions: OutreachRegionKey[] = ['NA', 'EMEA'];
@@ -434,9 +582,9 @@ function RegionPerformanceCard({
         <h3 className="text-sm font-semibold text-charcoal">
           Region Performance
         </h3>
-        {currentWeek && prevWeek && (
+        {curLabel && prevLabel && (
           <span className="text-[10px] text-slate-muted">
-            W{currentWeek.week} vs W{prevWeek.week}
+            {curLabel} vs {prevLabel}
           </span>
         )}
       </div>
@@ -592,9 +740,51 @@ function SequenceRankingsCard({ rows }: { rows: OutreachSnapshot[] }) {
   const metric = RATE_METRICS[metricIdx];
 
   const ranked = useMemo(() => {
-    return rows
+    // Group rows by sequence and sum the additive counts, so a month (many
+    // weekly rows per sequence) ranks on its monthly totals, not per-week. In
+    // week mode each sequence has one row, so this is a pass-through. Rates are
+    // recomputed from the summed counts (never averaged) via metric.compute.
+    const bySeq = new Map<
+      number,
+      {
+        sequence_id: number;
+        sequence_name: string;
+        enabled: boolean;
+        delivered: number;
+        opened: number;
+        clicked: number;
+        replied: number;
+        outbound_calls: number;
+        linkedin_tasks_completed: number;
+      }
+    >();
+    for (const s of rows) {
+      const agg = bySeq.get(s.sequence_id) ?? {
+        sequence_id: s.sequence_id,
+        sequence_name: s.sequence_name,
+        enabled: false,
+        delivered: 0,
+        opened: 0,
+        clicked: 0,
+        replied: 0,
+        outbound_calls: 0,
+        linkedin_tasks_completed: 0,
+      };
+      agg.enabled = agg.enabled || s.enabled;
+      agg.delivered += s.delivered;
+      agg.opened += s.opened;
+      agg.clicked += s.clicked;
+      agg.replied += s.replied;
+      agg.outbound_calls += s.outbound_calls;
+      agg.linkedin_tasks_completed += s.linkedin_tasks_completed;
+      bySeq.set(s.sequence_id, agg);
+    }
+    return [...bySeq.values()]
       .filter((s) => s.enabled && s.delivered > 10)
-      .map((s) => ({ ...s, rate: metric.compute(s) }))
+      .map((s) => ({
+        ...s,
+        rate: metric.compute(s as unknown as OutreachSnapshot),
+      }))
       .sort((a, b) => b.rate - a.rate);
   }, [rows, metric]);
 
@@ -722,33 +912,35 @@ function heatColor(t: number): string {
 
 function ActivityHeatmapCard({
   snapshots,
-  quarterWeeks,
-  effectiveWeek,
+  periods,
+  currentKey,
 }: {
   snapshots: OutreachSnapshot[];
-  quarterWeeks: IsoWeek[];
-  effectiveWeek: IsoWeek | null;
+  periods: Period[];
+  currentKey: string | null;
 }) {
   const [metric, setMetric] = useState<HeatmapMetricKey>('total_sent');
 
-  // Rolling window: the 5 weeks ending at the selected week, clamped to
-  // the quarter. Earlier weeks fall off the left edge.
-  const windowWeeks = useMemo(() => {
-    if (!effectiveWeek) return [];
-    const idx = quarterWeeks.findIndex((w) => w.week === effectiveWeek.week);
-    if (idx < 0) return quarterWeeks.slice(-5);
-    const start = Math.max(0, idx - 4);
-    return quarterWeeks.slice(start, idx + 1);
-  }, [quarterWeeks, effectiveWeek]);
+  // Rolling window: the 5 periods ending at the selected one. In week mode
+  // these are weeks; in month mode, calendar months. Earlier periods fall off
+  // the left edge.
+  const windowPeriods = useMemo(() => {
+    if (periods.length === 0) return [];
+    const idx = periods.findIndex((p) => p.key === currentKey);
+    const end = idx >= 0 ? idx : periods.length - 1;
+    const start = Math.max(0, end - 4);
+    return periods.slice(start, end + 1);
+  }, [periods, currentKey]);
 
   const { sequences, maxVal } = useMemo(() => {
     const seqMap = new Map<
       number,
-      { id: number; name: string; data: Map<number, number> }
+      { id: number; name: string; data: Map<string, number> }
     >();
-    const windowSet = new Set(windowWeeks.map((w) => w.week));
     for (const s of snapshots) {
-      if (!windowSet.has(s.week_number)) continue;
+      // Which window period (if any) does this snapshot fall in?
+      const period = windowPeriods.find((p) => p.match(s));
+      if (!period) continue;
       if (!seqMap.has(s.sequence_id)) {
         seqMap.set(s.sequence_id, {
           id: s.sequence_id,
@@ -756,9 +948,11 @@ function ActivityHeatmapCard({
           data: new Map(),
         });
       }
+      // Sum across the period's snapshots: in month mode this rolls up the
+      // month's weeks; in week mode each period has one row, so it's a no-op.
       const val = (s[metric] as number) || 0;
-      const existing = seqMap.get(s.sequence_id)!.data.get(s.week_number) || 0;
-      if (val > existing) seqMap.get(s.sequence_id)!.data.set(s.week_number, val);
+      const data = seqMap.get(s.sequence_id)!.data;
+      data.set(period.key, (data.get(period.key) || 0) + val);
     }
     const seqs = [...seqMap.values()].sort((a, b) =>
       a.name.localeCompare(b.name),
@@ -768,7 +962,7 @@ function ActivityHeatmapCard({
       for (const v of seq.data.values()) if (v > max) max = v;
     }
     return { sequences: seqs, maxVal: max || 1 };
-  }, [snapshots, windowWeeks, metric]);
+  }, [snapshots, windowPeriods, metric]);
 
   return (
     <div className="bg-white rounded-lg border border-border shadow-sm p-4">
@@ -802,13 +996,12 @@ function ActivityHeatmapCard({
                   <th className="text-left px-2 py-1 text-slate-muted font-medium min-w-[180px]">
                     Sequence
                   </th>
-                  {windowWeeks.map((w) => (
+                  {windowPeriods.map((p) => (
                     <th
-                      key={w.week}
+                      key={p.key}
                       className="text-center px-1 py-1 text-slate-muted font-medium w-12"
-                      title={weekRangeLabel(w)}
                     >
-                      W{w.week}
+                      {p.label}
                     </th>
                   ))}
                 </tr>
@@ -822,17 +1015,17 @@ function ActivityHeatmapCard({
                     >
                       {seq.name}
                     </td>
-                    {windowWeeks.map((w) => {
-                      const val = seq.data.get(w.week) || 0;
+                    {windowPeriods.map((p) => {
+                      const val = seq.data.get(p.key) || 0;
                       const intensity = val / maxVal;
                       const bg = heatColor(intensity);
                       const text = intensity > 0.55 ? '#FFFFFF' : '#0F172A';
                       return (
-                        <td key={w.week} className="px-1 py-1 text-center">
+                        <td key={p.key} className="px-1 py-1 text-center">
                           <div
                             className="rounded px-1 py-0.5 text-[9px] font-medium tabular-nums"
                             style={{ backgroundColor: bg, color: text }}
-                            title={`${seq.name} — W${w.week}: ${val.toLocaleString()}`}
+                            title={`${seq.name} — ${p.label}: ${val.toLocaleString()}`}
                           >
                             {val > 0 ? val.toLocaleString() : ''}
                           </div>

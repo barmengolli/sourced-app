@@ -42,6 +42,7 @@ export interface UseOutreachSnapshotsResult {
   refresh: () => Promise<void>;
   byYear: (year: number) => OutreachSnapshot[];
   byWeek: (year: number, week: number) => OutreachSnapshot[];
+  byMonth: (year: number, month: number) => OutreachSnapshot[];
   byQuarter: (year: number, q: PeriodIndex) => OutreachSnapshot[];
   bySequence: (id: number) => OutreachSnapshot[];
   byRegion: (region: OutreachRegionKey) => OutreachSnapshot[];
@@ -55,6 +56,17 @@ function quarterOfWeek(week: number): PeriodIndex {
   if (week <= 26) return 2;
   if (week <= 39) return 3;
   return 4;
+}
+
+// Calendar month of a snapshot, parsed from export_date (YYYY-MM-DD). We use
+// export_date, NOT week_number: ISO weeks straddle month boundaries, so a week
+// could land in the wrong calendar month. Returns null on a malformed date.
+export function monthOfExportDate(
+  iso: string,
+): { year: number; month: number } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return null;
+  return { year: parseInt(m[1], 10), month: parseInt(m[2], 10) };
 }
 
 export function useOutreachSnapshots(): UseOutreachSnapshotsResult {
@@ -142,6 +154,17 @@ export function useOutreachSnapshots(): UseOutreachSnapshotsResult {
       snapshots.filter((s) => s.year === year && s.week_number === week),
     [snapshots],
   );
+  // Calendar month, bucketed by export_date (see monthOfExportDate). `year`
+  // here is the calendar year of the export, which can differ from s.year
+  // (the ISO-week year) near year boundaries.
+  const byMonth = useCallback(
+    (year: number, month: number) =>
+      snapshots.filter((s) => {
+        const m = monthOfExportDate(s.export_date);
+        return m !== null && m.year === year && m.month === month;
+      }),
+    [snapshots],
+  );
   const byQuarter = useCallback(
     (year: number, q: PeriodIndex) =>
       snapshots.filter(
@@ -169,6 +192,7 @@ export function useOutreachSnapshots(): UseOutreachSnapshotsResult {
       refresh,
       byYear,
       byWeek,
+      byMonth,
       byQuarter,
       bySequence,
       byRegion,
@@ -180,6 +204,7 @@ export function useOutreachSnapshots(): UseOutreachSnapshotsResult {
       refresh,
       byYear,
       byWeek,
+      byMonth,
       byQuarter,
       bySequence,
       byRegion,
