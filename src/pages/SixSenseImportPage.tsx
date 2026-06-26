@@ -62,6 +62,30 @@ function monthEnd(ym: string): string {
   return `${ym}-${String(last).padStart(2, '0')}`;
 }
 
+// A stored snapshot's month label from its year + month (week_number 1-12),
+// e.g. "Jun 2026". Used in the overwrite warning and registry.
+function snapshotMonthLabel(year: number, monthNum: number): string {
+  return new Date(Date.UTC(year, monthNum - 1, 1)).toLocaleDateString('en-US', {
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+// ISO timestamp -> "Jun 3, 2026, 2:14 PM" (local). Empty for null.
+function fmtTimestamp(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 export default function SixSenseImportPage({
   snapshots,
   upsertSnapshot,
@@ -88,6 +112,20 @@ export default function SixSenseImportPage({
 
   // The effective segment to import under.
   const effectiveSegment = addingNew ? newSegment.trim() : segment;
+
+  // Existing snapshot for the chosen (month, segment), if any. Drives the
+  // overwrite warning: importing here REPLACES this row (upsert on the natural
+  // key), so the most likely mistake is a wrong-month/segment pick clobbering
+  // real data. snapshot_date is the first of the month.
+  const existingForChosen = useMemo(() => {
+    if (!month || !effectiveSegment) return null;
+    const key = `${month}-01`;
+    return (
+      snapshots.find(
+        (s) => s.snapshot_date === key && s.segment === effectiveSegment,
+      ) ?? null
+    );
+  }, [snapshots, month, effectiveSegment]);
 
   const onParsed = (parsed: ParsedCsv, file: File) => {
     setError(null);
@@ -141,6 +179,7 @@ export default function SixSenseImportPage({
         segment: effectiveSegment,
         windowStart: `${month}-01`,
         windowEnd: monthEnd(month),
+        fileName: fileName || null,
       });
       await upsertSnapshot(input);
       setStep('done');
@@ -274,6 +313,34 @@ export default function SixSenseImportPage({
             <PreviewStat label="No activity" value={fmtInt(counts.no_activity)} />
           </div>
 
+          {/* Overwrite guardrail: the chosen (month, segment) already has data.
+              Importing replaces it — so a wrong-month/segment pick would clobber
+              a real snapshot. Name the file/date already stored so the mistake
+              is obvious before confirming. */}
+          {existingForChosen && (
+            <div className="text-sm text-warning border border-warning/40 bg-warning/5 rounded px-3 py-2">
+              ⚠ This replaces the existing{' '}
+              <span className="font-medium">
+                {snapshotMonthLabel(
+                  existingForChosen.year,
+                  existingForChosen.week_number,
+                )}
+              </span>{' '}
+              snapshot for{' '}
+              <span className="font-medium">{effectiveSegment}</span>
+              {existingForChosen.imported_at || existingForChosen.file_name ? (
+                <>
+                  {' '}(imported {fmtTimestamp(existingForChosen.imported_at)}
+                  {existingForChosen.file_name
+                    ? ` from ${existingForChosen.file_name}`
+                    : ''}
+                  )
+                </>
+              ) : null}
+              . Double-check the month and segment if this isn't intended.
+            </div>
+          )}
+
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -320,7 +387,61 @@ export default function SixSenseImportPage({
           </div>
         </div>
       )}
+
+      {/* Import history: an audit registry of every snapshot, newest import
+          first, so a wrong-month/segment upload can be spotted after the fact. */}
+      <ImportHistory snapshots={snapshots} />
     </div>
+  );
+}
+
+// Registry of all imported snapshots: Segment / Month / Imported / File.
+// Sorted by imported_at desc (created_at fallback) so the most recent import
+// is at the top. Historical rows (pre-audit) show "—" for file.
+function ImportHistory({ snapshots }: { snapshots: SixSenseSnapshot[] }) {
+  const rows = useMemo(() => {
+    const keyOf = (s: SixSenseSnapshot) => s.imported_at ?? s.created_at ?? '';
+    return [...snapshots].sort((a, b) => (keyOf(a) < keyOf(b) ? 1 : -1));
+  }, [snapshots]);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <section className="space-y-2 pt-4 border-t border-border">
+      <h2 className="text-sm font-semibold text-charcoal">Import history</h2>
+      <p className="text-xs text-slate-muted">
+        Every imported snapshot, most recent first. Use this to confirm the
+        right file went into the right month and segment.
+      </p>
+      <div className="border border-border rounded overflow-x-auto bg-bg">
+        <table className="min-w-full text-sm">
+          <thead className="bg-muted text-xs text-slate-muted uppercase tracking-wide">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">Segment</th>
+              <th className="px-3 py-2 text-left font-medium">Month</th>
+              <th className="px-3 py-2 text-left font-medium">Imported</th>
+              <th className="px-3 py-2 text-left font-medium">File</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s, i) => (
+              <tr key={s.id} className={i % 2 === 0 ? 'bg-bg' : 'bg-muted/40'}>
+                <td className="px-3 py-2 text-charcoal">{s.segment}</td>
+                <td className="px-3 py-2 text-charcoal">
+                  {snapshotMonthLabel(s.year, s.week_number)}
+                </td>
+                <td className="px-3 py-2 text-slate-muted">
+                  {fmtTimestamp(s.imported_at ?? s.created_at)}
+                </td>
+                <td className="px-3 py-2 text-slate-muted">
+                  {s.file_name ?? '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

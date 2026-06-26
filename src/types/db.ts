@@ -233,6 +233,10 @@ export interface SixSenseSnapshot {
   attended_field_events: number;
   ai_emails_engaged: number;
   source: string;
+  // Import audit. file_name is the original uploaded CSV name (null on rows
+  // imported before this was captured); imported_at is set on every upsert.
+  file_name: string | null;
+  imported_at: string | null;
   created_at: string;
 }
 
