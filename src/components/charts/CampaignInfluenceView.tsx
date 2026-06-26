@@ -92,6 +92,7 @@ interface OpportunityAttribution {
   year: number;
   periodIndex: PeriodIndex;
   label?: string | null;
+  account?: string | null;
   // ISO date the deal entered this stage; rendered as a sub-label under
   // the stage node in the Sankey so each node shows both the stage and
   // when the deal got there.
@@ -341,6 +342,7 @@ interface DealGroup {
   dealId: string;
   attributions: OpportunityAttribution[];
   label: string;
+  account: string;
   highestStage: string;
   highestStageLabel: string;
   earliestAttr: OpportunityAttribution;
@@ -488,6 +490,8 @@ export default function CampaignInfluenceView({
   const [influenceParentChannels, setInfluenceParentChannels] = useState<
     Set<string>
   >(() => new Set());
+  // Free-text search over opportunity name (label) OR account name.
+  const [influenceSearch, setInfluenceSearch] = useState('');
 
   // Adapter: join attribution_touches onto each attribution by attribution_id
   // so the ported buildDealJourneySankeyData can iterate `touches` inline.
@@ -521,6 +525,7 @@ export default function CampaignInfluenceView({
         year: a.year,
         periodIndex: a.period_index,
         label: a.label ?? '',
+        account: a.account ?? '',
         stageEnteredAt: a.stage_entered_at,
         touches,
       };
@@ -593,6 +598,7 @@ export default function CampaignInfluenceView({
           dealId: key,
           attributions: [attr],
           label: attr.label || '',
+          account: attr.account || '',
           highestStage: attr.stageKey,
           highestStageLabel: '',
           earliestAttr: attr,
@@ -608,6 +614,7 @@ export default function CampaignInfluenceView({
       group.highestStage = highest.stageKey;
       group.highestStageLabel = FUNNEL_STAGE_LABELS[highest.stageKey] || highest.stageKey;
       group.label = group.attributions.find((a) => a.label)?.label || '';
+      group.account = group.attributions.find((a) => a.account)?.account || '';
     }
     return [...groupMap.values()];
   }, [opportunityAttributions]);
@@ -719,6 +726,16 @@ export default function CampaignInfluenceView({
   // everything".
   const displayedGroups = useMemo(() => {
     let groups = regionFilteredGroups;
+    // Text search: opportunity name OR account name, case-insensitive
+    // substring. Composes with the Region/Channel/Year/Status filters.
+    const q = influenceSearch.trim().toLowerCase();
+    if (q) {
+      groups = groups.filter(
+        (g) =>
+          g.label.toLowerCase().includes(q) ||
+          g.account.toLowerCase().includes(q),
+      );
+    }
     if (influenceParentChannels.size > 0) {
       groups = groups.filter((g) =>
         g.attributions.some((a) => {
@@ -752,7 +769,7 @@ export default function CampaignInfluenceView({
       if (aTerm !== bTerm) return aTerm ? 1 : -1;
       return sortDate(b).localeCompare(sortDate(a));
     });
-  }, [regionFilteredGroups, influenceParentChannels, topLevelIdOf]);
+  }, [regionFilteredGroups, influenceParentChannels, influenceSearch, topLevelIdOf]);
 
   const toggleRegion = (r: RegionKey) => {
     setInfluenceRegions((prev) => {
@@ -767,6 +784,23 @@ export default function CampaignInfluenceView({
 
   const filterBar = (
     <div className="pl-3 border-l-2 border-border space-y-2">
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-slate-muted mr-1 w-14">Search</span>
+        <button
+          type="button"
+          onClick={() => setInfluenceSearch('')}
+          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
+        >
+          Clear
+        </button>
+        <input
+          type="text"
+          value={influenceSearch}
+          onChange={(e) => setInfluenceSearch(e.target.value)}
+          placeholder="Opportunity or account name"
+          className="text-xs px-2 py-1 rounded border border-border bg-bg text-charcoal min-w-[240px] focus:outline-none focus:ring-2 focus:ring-indigo/30"
+        />
+      </div>
       <div className="flex flex-wrap items-center gap-1">
         <span className="text-xs text-slate-muted mr-1 w-14">Region</span>
         <button
