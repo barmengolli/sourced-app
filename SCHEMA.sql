@@ -372,6 +372,11 @@ CREATE TABLE sixsense_snapshots (
   attended_field_events INTEGER DEFAULT 0,
   ai_emails_engaged INTEGER DEFAULT 0,
   source TEXT DEFAULT 'csv-import',
+  -- Import audit: the original uploaded file name and the explicit import
+  -- timestamp (set on every upsert, unlike created_at which only reflects the
+  -- first insert). Power the Import-tab history registry + overwrite warning.
+  file_name TEXT,
+  imported_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(snapshot_date, segment)
 );

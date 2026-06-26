@@ -24,6 +24,8 @@ export type SixSenseCounts = Omit<
   | 'window_end'
   | 'year'
   | 'week_number'
+  | 'file_name'
+  | 'imported_at'
 >;
 
 // Full row passed to the upsert. (snapshot_date, segment) is the natural key.
@@ -35,6 +37,9 @@ export interface SixSenseSnapshotInput extends SixSenseCounts {
   year: number;
   week_number: number;
   source?: string;
+  // Import audit; see SixSenseSnapshot.
+  file_name: string | null;
+  imported_at: string;
 }
 
 // Exact 6sense metric labels -> column. The summary lists Reach and
@@ -150,6 +155,7 @@ export function toSnapshotInput(
     windowStart?: string | null;
     windowEnd?: string | null;
     source?: string;
+    fileName?: string | null;
   },
 ): SixSenseSnapshotInput {
   // UTC parse so the first-of-month date doesn't drift across time zones.
@@ -163,6 +169,8 @@ export function toSnapshotInput(
     year: d.getUTCFullYear(),
     week_number: d.getUTCMonth() + 1, // repurposed: month 1-12
     source: opts.source ?? 'csv-import',
+    file_name: opts.fileName ?? null,
+    imported_at: new Date().toISOString(),
   };
 }
 

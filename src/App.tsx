@@ -91,11 +91,18 @@ export interface OutreachSubPageProps {
   year: number;
   quarter: 1 | 2 | 3 | 4;
   week: number;
+  // Time granularity for the Dashboard: 'week' (week pills, WoW) or 'month'
+  // (month pills, MoM rollups). 'month' aggregates each calendar month's weeks.
+  granularity: 'week' | 'month';
+  // Selected calendar month (1-12) when granularity is 'month'.
+  month: number;
   regions: Set<OutreachRegionKey>;
   selectedSequences: Set<number>;
   onYearChange: (y: number) => void;
   onQuarterChange: (q: 1 | 2 | 3 | 4) => void;
   onWeekChange: (w: number) => void;
+  onGranularityChange: (g: 'week' | 'month') => void;
+  onMonthChange: (m: number) => void;
   onRegionsChange: (next: Set<OutreachRegionKey>) => void;
   onSelectedSequencesChange: (next: Set<number>) => void;
   // Snapshots are loaded once at the App level (via useOutreachSnapshots
@@ -210,6 +217,14 @@ export default function App() {
     initialOutreachQuarter,
   );
   const [outreachWeek, setOutreachWeek] = useState<number>(initialIso.week);
+  // Dashboard time granularity + selected calendar month (1-12). Week is the
+  // default; month rolls each calendar month's weeks up.
+  const [outreachGranularity, setOutreachGranularity] = useState<
+    'week' | 'month'
+  >('week');
+  const [outreachMonth, setOutreachMonth] = useState<number>(
+    new Date().getMonth() + 1,
+  );
   const [outreachRegions, setOutreachRegions] = useState<
     Set<OutreachRegionKey>
   >(() => new Set<OutreachRegionKey>(OUTREACH_REGIONS));
@@ -224,6 +239,7 @@ export default function App() {
   // event. Any explicit week/quarter change from the user flips the flag,
   // so subsequent navigation between sub-tabs preserves their selection.
   const outreachWeekTouched = useRef(false);
+  const outreachMonthTouched = useRef(false);
   const { snapshots: outreachSnapshots, loading: outreachLoading } =
     useOutreachSnapshots();
 
@@ -251,6 +267,22 @@ export default function App() {
     else setOutreachQuarter(4);
   }, [outreachSnapshots, outreachYear]);
 
+  // Snap outreachMonth to the latest calendar month present in the data for
+  // the active year, once snapshots load. Same "touched" guard as the week
+  // snap so a manual month pick sticks. Month is parsed from export_date.
+  useEffect(() => {
+    if (outreachMonthTouched.current) return;
+    if (outreachSnapshots.length === 0) return;
+    let maxMonth = -1;
+    for (const s of outreachSnapshots) {
+      const m = /^(\d{4})-(\d{2})/.exec(s.export_date);
+      if (!m || parseInt(m[1], 10) !== outreachYear) continue;
+      const mo = parseInt(m[2], 10);
+      if (mo > maxMonth) maxMonth = mo;
+    }
+    if (maxMonth > 0) setOutreachMonth(maxMonth);
+  }, [outreachSnapshots, outreachYear]);
+
   // Wrap the lifted setters so any explicit user action from a sub-page
   // marks the week as "touched", preventing the default-to-latest effect
   // from clobbering subsequent navigation.
@@ -263,10 +295,15 @@ export default function App() {
     setOutreachQuarter(q);
   }, []);
   const setOutreachYearUser = useCallback((y: number) => {
-    // Year change: re-allow auto-snap so we land on the latest week of the
-    // newly chosen year (matches how the user expects "show me 2025").
+    // Year change: re-allow auto-snap so we land on the latest week/month of
+    // the newly chosen year (matches how the user expects "show me 2025").
     outreachWeekTouched.current = false;
+    outreachMonthTouched.current = false;
     setOutreachYear(y);
+  }, []);
+  const setOutreachMonthUser = useCallback((m: number) => {
+    outreachMonthTouched.current = true;
+    setOutreachMonth(m);
   }, []);
 
   // Centralized navigate. Any path to a sub-page (sidebar click, parent
@@ -297,11 +334,15 @@ export default function App() {
     year: outreachYear,
     quarter: outreachQuarter,
     week: outreachWeek,
+    granularity: outreachGranularity,
+    month: outreachMonth,
     regions: outreachRegions,
     selectedSequences: outreachSelectedSequences,
     onYearChange: setOutreachYearUser,
     onQuarterChange: setOutreachQuarterUser,
     onWeekChange: setOutreachWeekUser,
+    onGranularityChange: setOutreachGranularity,
+    onMonthChange: setOutreachMonthUser,
     onRegionsChange: setOutreachRegions,
     onSelectedSequencesChange: setOutreachSelectedSequences,
     snapshots: outreachSnapshots,
