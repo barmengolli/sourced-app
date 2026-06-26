@@ -459,8 +459,8 @@ function ReachEngagementTrend({ months }: { months: SixSenseSnapshot[] }) {
 
   return (
     <ChartCard title="Reach & Engagement Trend" subtitle="% of accounts, by month">
-      <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+      <ResponsiveContainer width="100%" height={240}>
+        <LineChart data={data} margin={{ top: 20, right: 16, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.border} />
           <XAxis
             dataKey="month"
@@ -486,6 +486,9 @@ function ReachEngagementTrend({ months }: { months: SixSenseSnapshot[] }) {
             labelStyle={{ color: CHART_COLORS.charcoal, fontWeight: 600 }}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
+          {/* Per-point % labels so the chart is screenshot-ready without
+              hovering. Reach above its line, Engagement below, so the two
+              series' labels don't collide. */}
           <Line
             type="monotone"
             dataKey="reach"
@@ -495,6 +498,12 @@ function ReachEngagementTrend({ months }: { months: SixSenseSnapshot[] }) {
             dot={{ r: 3 }}
             activeDot={{ r: 5 }}
             isAnimationActive={false}
+            label={{
+              position: 'top',
+              fontSize: 14,
+              fill: CHART_COLORS.indigo,
+              formatter: (v) => `${Math.round(Number(v))}%`,
+            }}
           />
           <Line
             type="monotone"
@@ -505,6 +514,12 @@ function ReachEngagementTrend({ months }: { months: SixSenseSnapshot[] }) {
             dot={{ r: 3 }}
             activeDot={{ r: 5 }}
             isAnimationActive={false}
+            label={{
+              position: 'bottom',
+              fontSize: 14,
+              fill: CHART_COLORS.teal,
+              formatter: (v) => `${Math.round(Number(v))}%`,
+            }}
           />
         </LineChart>
       </ResponsiveContainer>
