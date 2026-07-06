@@ -18,6 +18,7 @@ import OutreachComparePage from './pages/OutreachComparePage';
 import SixSenseDashboardPage from './pages/SixSenseDashboardPage';
 import SixSenseImportPage from './pages/SixSenseImportPage';
 import BdrSection from './pages/BdrSection';
+import CampaignsSection from './pages/CampaignsSection';
 import { useOutreachSnapshots } from './hooks/useOutreachSnapshots';
 import { useSixSenseSnapshots } from './hooks/useSixSenseSnapshots';
 import type { OutreachSnapshot, SixSenseSnapshot } from './types/db';
@@ -46,6 +47,8 @@ export type PageKey =
   | 'sixsense-import'
   | 'bdr-quota-dashboard'
   | 'bdr-quota-quotas'
+  | 'campaigns-overview'
+  | 'campaigns-tags'
   | 'leads'
   | 'channels'
   | 'funnel-import'
@@ -161,6 +164,9 @@ function PageBody({
     case 'bdr-quota-dashboard':
     case 'bdr-quota-quotas':
       return <BdrSection page={page} onNavigate={onNavigate} />;
+    case 'campaigns-overview':
+    case 'campaigns-tags':
+      return <CampaignsSection page={page} onNavigate={onNavigate} />;
     case 'funnel-import':
       return <FunnelImportPage />;
     case 'leads':

@@ -430,6 +430,34 @@ CREATE TRIGGER set_timestamp_campaign_costs BEFORE UPDATE ON campaign_costs
   FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
 -- =============================================================
+-- Campaign tags (unifies the silos)
+-- =============================================================
+-- A manual tag layer mapping a canonical campaign (e.g. "L&A") to the assets
+-- that belong to it in each silo. Leads/opps come for free through tagged
+-- channels; 6Sense segments and Outreach sequences are tagged directly.
+
+CREATE TABLE campaign_tags (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  color TEXT,
+  display_order INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE campaign_tag_links (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tag_id UUID NOT NULL REFERENCES campaign_tags(id) ON DELETE CASCADE,
+  asset_type TEXT NOT NULL
+    CHECK (asset_type IN ('channel', 'sixsense_segment', 'outreach_sequence')),
+  -- channel UUID | 6Sense segment string | Outreach sequence_id, all as text.
+  asset_ref TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT campaign_tag_links_asset_unique UNIQUE (asset_type, asset_ref)
+);
+
+CREATE INDEX idx_campaign_tag_links_tag ON campaign_tag_links(tag_id);
+
+-- =============================================================
 -- Row Level Security
 -- =============================================================
 -- Pattern mirrors DataVis 1: public read, anon write (gated by client password).
@@ -447,6 +475,8 @@ ALTER TABLE cell_links              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outreach_snapshots      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sixsense_snapshots      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bdr_quotas              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE campaign_tags           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE campaign_tag_links      ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
@@ -455,7 +485,8 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'channels','leads','attributions','attribution_touches','campaign_costs',
     'funnel_projections','funnel_actuals','cell_comments','cell_links',
-    'outreach_snapshots','sixsense_snapshots','bdr_quotas'
+    'outreach_snapshots','sixsense_snapshots','bdr_quotas',
+    'campaign_tags','campaign_tag_links'
   ]
   LOOP
     EXECUTE format('CREATE POLICY "Allow public read" ON %I FOR SELECT USING (true);', t);
@@ -479,5 +510,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE funnel_actuals;
 ALTER PUBLICATION supabase_realtime ADD TABLE outreach_snapshots;
 ALTER PUBLICATION supabase_realtime ADD TABLE sixsense_snapshots;
 ALTER PUBLICATION supabase_realtime ADD TABLE bdr_quotas;
+ALTER PUBLICATION supabase_realtime ADD TABLE campaign_tags;
+ALTER PUBLICATION supabase_realtime ADD TABLE campaign_tag_links;
 
 -- Done.
