@@ -82,6 +82,17 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
       { key: 'outreach-compare', label: 'Compare' },
     ],
   },
+  {
+    id: 'campaigns',
+    label: 'Campaigns',
+    defaultChild: 'campaigns-overview',
+    lastTabStorageKey: 'sourced.campaigns.lastTab',
+    expandedStorageKey: 'sourced.sidebar.expanded.campaigns',
+    children: [
+      { key: 'campaigns-overview', label: 'Overview', beta: true },
+      { key: 'campaigns-tags', label: 'Tags' },
+    ],
+  },
 ];
 
 export const UTILITY_PAGES: SidebarChild[] = [

@@ -66,6 +66,32 @@ export interface Channel {
   created_at: string;
 }
 
+// A campaign tag: the canonical "campaign" that unifies the silos. Assets
+// (channels, 6Sense segments, Outreach sequences) are linked to a tag via
+// campaign_tag_links; leads/opps come through the tag's channels by FK.
+export interface CampaignTag {
+  id: string;
+  name: string;
+  color?: string | null;
+  display_order: number;
+  created_at: string;
+}
+
+// The silo an asset lives in. asset_ref is the channel UUID, the 6Sense
+// segment string, or the Outreach sequence_id (as text) accordingly.
+export type CampaignAssetType =
+  | 'channel'
+  | 'sixsense_segment'
+  | 'outreach_sequence';
+
+export interface CampaignTagLink {
+  id: string;
+  tag_id: string;
+  asset_type: CampaignAssetType;
+  asset_ref: string;
+  created_at: string;
+}
+
 export interface FunnelProjection {
   id: string;
   channel_id: string;
