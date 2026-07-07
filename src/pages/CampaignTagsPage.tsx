@@ -10,6 +10,7 @@ import type {
   Channel,
   OutreachSnapshot,
   SixSenseSnapshot,
+  LinkedinAdSnapshot,
   CampaignAssetType,
 } from '../types/db';
 import type { UseCampaignTagsResult } from '../hooks/useCampaignTags';
@@ -26,11 +27,13 @@ export default function CampaignTagsPage({
   channels,
   outreachSnapshots,
   sixSenseSnapshots,
+  linkedinSnapshots,
 }: {
   tagsHook: UseCampaignTagsResult;
   channels: Channel[];
   outreachSnapshots: OutreachSnapshot[];
   sixSenseSnapshots: SixSenseSnapshot[];
+  linkedinSnapshots: LinkedinAdSnapshot[];
   onNavigate: (p: PageKey) => void;
 }) {
   const { tags, createTag, renameTag, setColor, deleteTag, linkAsset, unlinkAsset, tagFor } =
@@ -82,6 +85,17 @@ export default function CampaignTagsPage({
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [outreachSnapshots]);
+
+  // Distinct LinkedIn ad sets (adset_id = adset_name; the tag asset_ref).
+  const adsets = useMemo(() => {
+    const m = new Map<string, { id: string; name: string }>();
+    for (const s of linkedinSnapshots) {
+      if (!m.has(s.adset_id)) {
+        m.set(s.adset_id, { id: s.adset_id, name: s.adset_name });
+      }
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [linkedinSnapshots]);
 
   const add = async () => {
     setError(null);
@@ -281,6 +295,21 @@ export default function CampaignTagsPage({
           sequences.map((seq) => (
             <AssetRow key={seq.id} name={seq.name}>
               {picker('outreach_sequence', String(seq.id))}
+            </AssetRow>
+          ))
+        )}
+      </AssetGroup>
+
+      <AssetGroup
+        title="LinkedIn ad sets"
+        hint="Drives spend, impressions, and clicks."
+      >
+        {adsets.length === 0 ? (
+          <Empty label="No LinkedIn ad sets imported yet." />
+        ) : (
+          adsets.map((a) => (
+            <AssetRow key={a.id} name={a.name}>
+              {picker('linkedin_adset', a.id)}
             </AssetRow>
           ))
         )}

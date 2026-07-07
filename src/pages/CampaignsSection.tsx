@@ -10,6 +10,7 @@ import { useLeads } from '../hooks/useLeads';
 import { useAttributions } from '../hooks/useAttributions';
 import { useOutreachSnapshots } from '../hooks/useOutreachSnapshots';
 import { useSixSenseSnapshots } from '../hooks/useSixSenseSnapshots';
+import { useLinkedinSnapshots } from '../hooks/useLinkedinSnapshots';
 import CampaignTagsPage from './CampaignTagsPage';
 import CampaignsOverviewPage from './CampaignsOverviewPage';
 
@@ -30,6 +31,8 @@ export default function CampaignsSection({
     useOutreachSnapshots();
   const { snapshots: sixSenseSnapshots, loading: sixSenseLoading } =
     useSixSenseSnapshots();
+  const { snapshots: linkedinSnapshots, loading: linkedinLoading } =
+    useLinkedinSnapshots();
 
   if (page === 'campaigns-tags') {
     return (
@@ -38,6 +41,7 @@ export default function CampaignsSection({
         channels={channels}
         outreachSnapshots={outreachSnapshots}
         sixSenseSnapshots={sixSenseSnapshots}
+        linkedinSnapshots={linkedinSnapshots}
         onNavigate={onNavigate}
       />
     );
@@ -51,8 +55,13 @@ export default function CampaignsSection({
       attributions={attributions}
       outreachSnapshots={outreachSnapshots}
       sixSenseSnapshots={sixSenseSnapshots}
+      linkedinSnapshots={linkedinSnapshots}
       loading={
-        leadsLoading || attrsLoading || outreachLoading || sixSenseLoading
+        leadsLoading ||
+        attrsLoading ||
+        outreachLoading ||
+        sixSenseLoading ||
+        linkedinLoading
       }
       onNavigate={onNavigate}
     />
