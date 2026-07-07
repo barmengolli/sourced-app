@@ -82,7 +82,8 @@ export interface CampaignTag {
 export type CampaignAssetType =
   | 'channel'
   | 'sixsense_segment'
-  | 'outreach_sequence';
+  | 'outreach_sequence'
+  | 'linkedin_adset';
 
 export interface CampaignTagLink {
   id: string;
@@ -212,6 +213,27 @@ export interface OutreachSnapshot {
   overdue_tasks: number;
   outbound_calls: number;
   linkedin_tasks_completed: number;
+  created_at: string;
+}
+
+// One row per (LinkedIn ad set x week). Populated by the n8n weekly cron from a
+// Google Sheet; the app never writes here. Metrics are PER-WEEK (this week's
+// spend/impressions/clicks), NOT cumulative — the app sums rows for a period.
+// adset_id = adset_name (the export has no numeric id) and is the tag asset_ref.
+export interface LinkedinAdSnapshot {
+  id: string;
+  snapshot_date: string;      // ISO date (YYYY-MM-DD), the week's date
+  year: number;
+  week_number: number;        // ISO week
+  campaign_id: string | null;
+  campaign_name: string | null;
+  product: string | null;
+  region: string | null;
+  adset_id: string;
+  adset_name: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
   created_at: string;
 }
 

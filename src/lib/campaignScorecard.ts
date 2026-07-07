@@ -29,6 +29,7 @@ import type {
   Attribution,
   OutreachSnapshot,
   SixSenseSnapshot,
+  LinkedinAdSnapshot,
   CampaignTagLink,
 } from '../types/db';
 import { reachPct, engagementPct } from './sixsense';
@@ -63,6 +64,19 @@ export interface SequenceEmailStats {
   optedOut: number;
 }
 
+// Lifetime-in-scope LinkedIn Ads metrics for one tagged ad set. Metrics are
+// summed across the ad set's weekly rows (per-week data, not cumulative). Rates
+// (CTR/CPC/CPM) are derived in the UI from these counts.
+export interface LinkedinAdsetStats {
+  adsetId: string;
+  name: string;
+  product: string | null;
+  region: string | null;
+  spend: number;
+  impressions: number;
+  clicks: number;
+}
+
 // One open opportunity in the campaign (deduped to its highest stage), for the
 // "pipeline if won" tile.
 export interface OpenDeal {
@@ -93,6 +107,11 @@ export interface CampaignScorecard {
   outreachReplied: number;
   // Per-sequence lifetime email metrics (one row per tagged sequence).
   emailBySequence: SequenceEmailStats[];
+  // LinkedIn Ads from tagged ad sets (summed across weeks in scope).
+  linkedinSpend: number;
+  linkedinImpressions: number;
+  linkedinClicks: number;
+  adsByAdset: LinkedinAdsetStats[];
   // Per-channel funnel breakdown (sorted by leads desc, top-N + "Other").
   byChannel: ChannelFunnel[];
   // Stage-to-stage conversion (0..1, null when the denominator is 0).
@@ -110,6 +129,7 @@ export interface CampaignScorecard {
   channelCount: number;
   segmentCount: number;
   sequenceCount: number;
+  linkedinAdsetCount: number;
 }
 
 // Cap the per-channel breakdown to keep the stacked bar readable and within the
@@ -266,6 +286,7 @@ export function computeScorecard(
     attributions: Attribution[];
     outreachSnapshots: OutreachSnapshot[];
     sixSenseSnapshots: SixSenseSnapshot[];
+    linkedinSnapshots: LinkedinAdSnapshot[];
   },
   filterYear: number | null,
 ): CampaignScorecard {
@@ -289,6 +310,11 @@ export function computeScorecard(
     links
       .filter((l) => l.asset_type === 'outreach_sequence')
       .map((l) => Number(l.asset_ref)),
+  );
+  const linkedinAdsetRefs = new Set(
+    links
+      .filter((l) => l.asset_type === 'linkedin_adset')
+      .map((l) => l.asset_ref),
   );
 
   const channelSet = expandChannels(
@@ -526,6 +552,46 @@ export function computeScorecard(
     emailBySequence.sort((a, b) => b.sent - a.sent);
   }
 
+  // --- LinkedIn Ads (per-week rows SUMMED per tagged ad set) ---
+  // Unlike Outreach's cumulative counters, LinkedIn metrics are per-week, so we
+  // sum every in-scope row rather than taking the latest.
+  let linkedinSpend = 0;
+  let linkedinImpressions = 0;
+  let linkedinClicks = 0;
+  const adsByAdset: LinkedinAdsetStats[] = [];
+  if (linkedinAdsetRefs.size > 0) {
+    for (const adsetId of linkedinAdsetRefs) {
+      const rows = data.linkedinSnapshots.filter(
+        (s) =>
+          s.adset_id === adsetId &&
+          (filterYear == null || s.year === filterYear),
+      );
+      if (rows.length === 0) continue;
+      let spend = 0,
+        impressions = 0,
+        clicks = 0;
+      for (const r of rows) {
+        spend += r.spend ?? 0;
+        impressions += r.impressions ?? 0;
+        clicks += r.clicks ?? 0;
+      }
+      linkedinSpend += spend;
+      linkedinImpressions += impressions;
+      linkedinClicks += clicks;
+      const latest = rows[0]; // for display fields (name/product/region)
+      adsByAdset.push({
+        adsetId,
+        name: latest.adset_name,
+        product: latest.product,
+        region: latest.region,
+        spend,
+        impressions,
+        clicks,
+      });
+    }
+    adsByAdset.sort((a, b) => b.spend - a.spend);
+  }
+
   return {
     reachPct: reach,
     engagementPct: engagement,
@@ -540,6 +606,10 @@ export function computeScorecard(
     outreachSent,
     outreachReplied,
     emailBySequence,
+    linkedinSpend,
+    linkedinImpressions,
+    linkedinClicks,
+    adsByAdset,
     byChannel,
     conversion,
     openDeals,
@@ -548,5 +618,6 @@ export function computeScorecard(
     channelCount: channelRefs.size,
     segmentCount: segmentRefs.size,
     sequenceCount: sequenceRefs.size,
+    linkedinAdsetCount: linkedinAdsetRefs.size,
   };
 }

@@ -47,10 +47,10 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     ],
   },
   {
-    // UI label uses the brand spelling "6Sense"; PageKeys use the
-    // `sixsense-` prefix since identifiers can't lead with a digit.
+    // UI label is "Reach & Engagement"; the id / PageKeys keep the `sixsense`
+    // prefix (the underlying data source) so routing + storage keys are stable.
     id: 'sixsense',
-    label: '6Sense',
+    label: 'Reach & Engagement',
     defaultChild: 'sixsense-dashboard',
     lastTabStorageKey: 'sourced.sixsense.lastTab',
     expandedStorageKey: 'sourced.sidebar.expanded.sixsense',
@@ -81,6 +81,14 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
       { key: 'outreach-dashboard', label: 'Dashboard' },
       { key: 'outreach-compare', label: 'Compare' },
     ],
+  },
+  {
+    id: 'linkedin-ads',
+    label: 'LinkedIn Ads',
+    defaultChild: 'linkedin-dashboard',
+    lastTabStorageKey: 'sourced.linkedin.lastTab',
+    expandedStorageKey: 'sourced.sidebar.expanded.linkedin',
+    children: [{ key: 'linkedin-dashboard', label: 'Dashboard', beta: true }],
   },
   {
     id: 'campaigns',

@@ -10,6 +10,7 @@ import type {
   Attribution,
   OutreachSnapshot,
   SixSenseSnapshot,
+  LinkedinAdSnapshot,
   CampaignTag,
 } from '../types/db';
 import type { UseCampaignTagsResult } from '../hooks/useCampaignTags';
@@ -19,6 +20,7 @@ import {
   type ChannelFunnel,
   type OpenDeal,
   type SequenceEmailStats,
+  type LinkedinAdsetStats,
 } from '../lib/campaignScorecard';
 import ChartCard from '../components/charts/ChartCard';
 import ChannelFunnelBars from '../components/campaigns/ChannelFunnelBars';
@@ -30,6 +32,7 @@ export default function CampaignsOverviewPage({
   attributions,
   outreachSnapshots,
   sixSenseSnapshots,
+  linkedinSnapshots,
   loading,
   onNavigate,
 }: {
@@ -39,6 +42,7 @@ export default function CampaignsOverviewPage({
   attributions: Attribution[];
   outreachSnapshots: OutreachSnapshot[];
   sixSenseSnapshots: SixSenseSnapshot[];
+  linkedinSnapshots: LinkedinAdSnapshot[];
   loading: boolean;
   onNavigate: (p: PageKey) => void;
 }) {
@@ -70,6 +74,7 @@ export default function CampaignsOverviewPage({
             attributions,
             outreachSnapshots,
             sixSenseSnapshots,
+            linkedinSnapshots,
           },
           year,
         ),
@@ -82,6 +87,7 @@ export default function CampaignsOverviewPage({
       attributions,
       outreachSnapshots,
       sixSenseSnapshots,
+      linkedinSnapshots,
       year,
     ],
   );
@@ -155,7 +161,8 @@ function CampaignCard({
   const untagged =
     score.channelCount === 0 &&
     score.segmentCount === 0 &&
-    score.sequenceCount === 0;
+    score.sequenceCount === 0 &&
+    score.linkedinAdsetCount === 0;
   const hasChannels = score.byChannel.length > 0;
 
   return (
@@ -168,7 +175,7 @@ function CampaignCard({
         <h2 className="text-lg font-semibold text-charcoal">{tag.name}</h2>
         <span className="text-xs text-slate-muted ml-2">
           {score.channelCount} channels · {score.segmentCount} segments ·{' '}
-          {score.sequenceCount} sequences
+          {score.sequenceCount} sequences · {score.linkedinAdsetCount} LinkedIn
         </span>
         {!untagged && (
           <button
@@ -246,7 +253,7 @@ function CampaignCard({
               </div>
 
               <ChartCard
-                title="Email Performance by Sequence"
+                title="Outbound Email Performance by Sequence"
                 subtitle="Lifetime totals per tagged Outreach sequence."
               >
                 {score.emailBySequence.length > 0 ? (
@@ -255,6 +262,20 @@ function CampaignCard({
                   <p className="text-sm text-slate-muted italic">
                     No Outreach sequences tagged to this campaign. Tag them on
                     the Tags page to see email performance.
+                  </p>
+                )}
+              </ChartCard>
+
+              <ChartCard
+                title="LinkedIn Ads Performance by Ad Set"
+                subtitle="Spend, impressions, clicks, and derived CTR / CPC / CPM."
+              >
+                {score.adsByAdset.length > 0 ? (
+                  <LinkedinAdsTable adsets={score.adsByAdset} />
+                ) : (
+                  <p className="text-sm text-slate-muted italic">
+                    No LinkedIn ad sets tagged to this campaign. Tag them on the
+                    Tags page to see ad performance.
                   </p>
                 )}
               </ChartCard>
@@ -392,6 +413,81 @@ function ChannelBreakdownTable({ byChannel }: { byChannel: ChannelFunnel[] }) {
                 className={`${cell} text-right tabular-nums text-charcoal ${shadeAt(i)}`}
               >
                 {v}
+              </td>
+            ))}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// LinkedIn ad-set performance (summed across weeks in scope). CTR = clicks/impr,
+// CPC = spend/clicks, CPM = spend/impr*1000. The Total row recomputes each rate
+// from the SUMMED spend/impressions/clicks (blended), never an average of rows.
+function LinkedinAdsTable({ adsets }: { adsets: LinkedinAdsetStats[] }) {
+  const money = (n: number) =>
+    `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  const money2 = (n: number) => `$${n.toFixed(2)}`;
+  const num = (n: number) => n.toLocaleString();
+  const ctr = (clicks: number, impr: number) =>
+    impr > 0 ? `${((clicks / impr) * 100).toFixed(2)}%` : '—';
+  const cpc = (spend: number, clicks: number) =>
+    clicks > 0 ? money2(spend / clicks) : '—';
+  const cpm = (spend: number, impr: number) =>
+    impr > 0 ? money2((spend / impr) * 1000) : '—';
+
+  type Row = { spend: number; impressions: number; clicks: number };
+  const cols: { key: string; label: string; title?: string; value: (r: Row) => string }[] = [
+    { key: 'spend', label: 'Spend', value: (r) => money(r.spend) },
+    { key: 'impr', label: 'Impr.', value: (r) => num(r.impressions) },
+    { key: 'clicks', label: 'Clicks', value: (r) => num(r.clicks) },
+    { key: 'ctr', label: 'CTR', title: 'Clicks / Impressions', value: (r) => ctr(r.clicks, r.impressions) },
+    { key: 'cpc', label: 'CPC', title: 'Spend / Clicks', value: (r) => cpc(r.spend, r.clicks) },
+    { key: 'cpm', label: 'CPM', title: 'Spend / Impressions × 1000', value: (r) => cpm(r.spend, r.impressions) },
+  ];
+  const shadeAt = (i: number) => (i % 2 === 1 ? 'bg-muted/50' : '');
+  const total = adsets.reduce(
+    (t, a) => ({
+      spend: t.spend + a.spend,
+      impressions: t.impressions + a.impressions,
+      clicks: t.clicks + a.clicks,
+    }),
+    { spend: 0, impressions: 0, clicks: 0 },
+  );
+  const cell = 'border border-border px-2 py-1';
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm border-collapse border border-border">
+        <thead className="text-xs text-slate-muted bg-muted/40">
+          <tr>
+            <th className={`${cell} text-left font-medium`}>Ad set</th>
+            {cols.map((col, i) => (
+              <th key={col.key} title={col.title} className={`${cell} text-right font-medium ${shadeAt(i)}`}>
+                {col.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {adsets.map((a) => (
+            <tr key={a.adsetId}>
+              <td className={`${cell} text-charcoal truncate max-w-[240px]`} title={a.name}>
+                {a.name}
+              </td>
+              {cols.map((col, i) => (
+                <td key={col.key} className={`${cell} text-right tabular-nums text-slate-muted ${shadeAt(i)}`}>
+                  {col.value(a)}
+                </td>
+              ))}
+            </tr>
+          ))}
+          <tr className="font-medium">
+            <td className={`${cell} text-charcoal`}>Total</td>
+            {cols.map((col, i) => (
+              <td key={col.key} className={`${cell} text-right tabular-nums text-charcoal ${shadeAt(i)}`}>
+                {col.value(total)}
               </td>
             ))}
           </tr>

@@ -322,6 +322,35 @@ CREATE INDEX idx_outreach_sequence ON outreach_snapshots(sequence_id);
 CREATE INDEX idx_outreach_export_date ON outreach_snapshots(export_date DESC);
 
 -- =============================================================
+-- LinkedIn Ads snapshots (weekly, n8n-fed from a Google Sheet)
+-- =============================================================
+-- One row per (ad set x week). Metrics are PER-WEEK (not cumulative), summed
+-- from the sheet's daily line items by n8n. adset_id = adset_name (the export
+-- has no numeric id) and is the campaign_tag_links.asset_ref.
+
+CREATE TABLE linkedin_ads_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  snapshot_date DATE NOT NULL,
+  year INTEGER NOT NULL,
+  week_number INTEGER NOT NULL,
+  campaign_id TEXT,
+  campaign_name TEXT,
+  product TEXT,
+  region TEXT,
+  adset_id TEXT NOT NULL,
+  adset_name TEXT NOT NULL,
+  spend NUMERIC(12,2) DEFAULT 0,
+  impressions INTEGER DEFAULT 0,
+  clicks INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (snapshot_date, adset_id)
+);
+
+CREATE INDEX idx_linkedin_year_week ON linkedin_ads_snapshots(year, week_number);
+CREATE INDEX idx_linkedin_adset ON linkedin_ads_snapshots(adset_id);
+CREATE INDEX idx_linkedin_snapshot_date ON linkedin_ads_snapshots(snapshot_date DESC);
+
+-- =============================================================
 -- 6sense snapshots
 -- =============================================================
 -- "Activities By Source" summary snapshot. EIS has no 6sense API access, so
@@ -448,7 +477,7 @@ CREATE TABLE campaign_tag_links (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tag_id UUID NOT NULL REFERENCES campaign_tags(id) ON DELETE CASCADE,
   asset_type TEXT NOT NULL
-    CHECK (asset_type IN ('channel', 'sixsense_segment', 'outreach_sequence')),
+    CHECK (asset_type IN ('channel', 'sixsense_segment', 'outreach_sequence', 'linkedin_adset')),
   -- channel UUID | 6Sense segment string | Outreach sequence_id, all as text.
   asset_ref TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -486,7 +515,7 @@ BEGIN
     'channels','leads','attributions','attribution_touches','campaign_costs',
     'funnel_projections','funnel_actuals','cell_comments','cell_links',
     'outreach_snapshots','sixsense_snapshots','bdr_quotas',
-    'campaign_tags','campaign_tag_links'
+    'campaign_tags','campaign_tag_links','linkedin_ads_snapshots'
   ]
   LOOP
     EXECUTE format('CREATE POLICY "Allow public read" ON %I FOR SELECT USING (true);', t);
@@ -512,5 +541,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE sixsense_snapshots;
 ALTER PUBLICATION supabase_realtime ADD TABLE bdr_quotas;
 ALTER PUBLICATION supabase_realtime ADD TABLE campaign_tags;
 ALTER PUBLICATION supabase_realtime ADD TABLE campaign_tag_links;
+ALTER PUBLICATION supabase_realtime ADD TABLE linkedin_ads_snapshots;
 
 -- Done.
