@@ -5,7 +5,9 @@
 // Join semantics (see the campaign-tag migration):
 //   channel links       -> the channel + its leaf children -> leads/MQLs
 //                          (leads.source_channel_id) and opps
-//                          (attributions.channel_id).
+//                          (attributions.channel_id OR any attribution_touch's
+//                          channel_id, so a campaign sees deals it influenced
+//                          without having sourced).
 //   sixsense_segment    -> latest snapshot per tagged segment -> reach/engagement.
 //   outreach_sequence   -> per-sequence volume (cumulative counters diffed to
 //                          the sequence's span) -> sent / replied.
@@ -22,17 +24,33 @@
 //     a campaign spans segments of very different account sizes.
 //   - Outreach/email figures are lifetime-to-date (latest cumulative snapshot),
 //     so they don't change with the year filter the way volume would.
+//   - Open deals are scoped per DEAL, not per attribution row: a deal is in
+//     scope if ANY of its stage rows or touches names a tagged channel, and its
+//     stage/amount are then resolved from ALL its rows. The older per-row
+//     prefilter could resolve a deal's stage from a channel-filtered subset of
+//     its rows, which made the stage a property of the filter rather than of
+//     the deal.
+//   - A deal touched by two campaigns counts at FULL value under both (the
+//     "full credit, labelled" model): each campaign's number stands alone and
+//     matches Salesforce, so campaign totals OVERLAP and do not sum to company
+//     pipeline. The Open opportunities card says so, and splits sourced (this
+//     campaign was first touch) from influenced (it came in later).
+//   - byChannel stays FIRST-TOUCH only. Spreading an influenced deal across
+//     every channel that touched it would double-count inside the stacked bar
+//     and break its Total row.
 
 import type {
   Channel,
   Lead,
   Attribution,
+  AttributionTouch,
   OutreachSnapshot,
   SixSenseSnapshot,
   LinkedinAdSnapshot,
   CampaignTagLink,
 } from '../types/db';
 import { reachPct, engagementPct } from './sixsense';
+import { compareTouchesChronologically } from './compute';
 
 // One channel's contribution to the campaign funnel (the channel that sourced
 // the leads / was first-touch on the opps).
@@ -89,6 +107,15 @@ export interface OpenDeal {
   stageLabel: string;
   amount: number | null;
   sfLink: string | null; // Salesforce Lightning URL, when known.
+  // Where THIS campaign sits in the deal's touch sequence: 1-based position of
+  // its EARLIEST touch, chronologically. null when the deal has no recorded
+  // touch on a channel of this campaign (it qualified via its stage row's
+  // channel instead), which is the common case: most deals have one touch.
+  touchRank: number | null;
+  // true when this campaign brought the deal in (touch rank 1, or the no-touch
+  // fallback where the deal's first-touch channel belongs to this campaign).
+  // false means it influenced a deal another campaign sourced.
+  sourced: boolean;
 }
 
 export interface CampaignScorecard {
@@ -122,10 +149,18 @@ export interface CampaignScorecard {
     mqlToOpp: number | null;
     oppToWon: number | null;
   };
-  // Open opportunities (HPP/Opp/Pursuit), deduped by deal, for the pipeline tile.
+  // Open opportunities (HPP/Opp/Pursuit), deduped by deal, for the pipeline
+  // tile. Includes deals this campaign SOURCED (first touch) and deals it
+  // INFLUENCED (a later touch), each at its full amount.
   openDeals: OpenDeal[];
-  // Sum of amounts across openDeals (deals with no amount excluded).
+  // Sum of amounts across openDeals (deals with no amount excluded). Every open
+  // deal is either sourced or influenced, so the two subtotals partition the
+  // total: openPipelineSourced + openPipelineInfluenced === openPipelineAmount.
   openPipelineAmount: number;
+  openPipelineSourced: number;
+  openPipelineInfluenced: number;
+  openDealsSourcedCount: number;
+  openDealsInfluencedCount: number;
   openDealsMissingAmount: number;
   // Coverage: how many assets of each type are tagged to this campaign.
   channelCount: number;
@@ -308,6 +343,10 @@ export function computeScorecard(
     channels: Channel[];
     leads: Lead[];
     attributions: Attribution[];
+    // Required, not optional: a caller that forgot to pass touches would
+    // silently fall back to first-touch-only opps, which is the exact bug the
+    // touch join exists to fix.
+    attributionTouches: AttributionTouch[];
     outreachSnapshots: OutreachSnapshot[];
     sixSenseSnapshots: SixSenseSnapshot[];
     linkedinSnapshots: LinkedinAdSnapshot[];
@@ -373,18 +412,63 @@ export function computeScorecard(
   const leads = campaignLeads.length;
   const mqls = campaignLeads.filter(isMql).length;
 
-  // --- Opportunities (by first-touch channel) ---
+  // --- Opportunities (sourced or influenced) ---
   // An opportunity has one attribution ROW per stage it entered (HPP -> Opp ->
   // Pursuit -> Won). Counting rows over-counts deals, so first collapse to ONE
   // record per deal at its HIGHEST stage, then everything downstream (stage
   // totals, conversion, per-channel breakdown) counts DEALS, not stage events.
-  const campaignAttrs = data.attributions.filter(
-    (a) =>
-      a.channel_id != null &&
-      channelSet.has(a.channel_id) &&
-      (filterYear == null || a.year === filterYear),
-  );
-  const deals = dedupeDealsByHighestStage(campaignAttrs);
+  //
+  // Scoping is per DEAL: gather every row of a deal, then decide once whether
+  // the deal belongs to this campaign. Filtering rows first (the old approach)
+  // would resolve a deal's stage and amount from only the rows that happened to
+  // name a tagged channel.
+  const dealKey = (a: Attribution) => a.deal_id ?? a.id;
+
+  const rowsByDeal = new Map<string, Attribution[]>();
+  for (const a of data.attributions) {
+    const k = dealKey(a);
+    const arr = rowsByDeal.get(k) ?? [];
+    arr.push(a);
+    rowsByDeal.set(k, arr);
+  }
+
+  const touchesByRow = new Map<string, AttributionTouch[]>();
+  for (const t of data.attributionTouches) {
+    const arr = touchesByRow.get(t.attribution_id) ?? [];
+    arr.push(t);
+    touchesByRow.set(t.attribution_id, arr);
+  }
+
+  // A deal's touches, unioned across ALL its stage rows and deduped. Promoting
+  // a deal COPIES its touches onto each new downstream row (useAttributions),
+  // so the same logical touch recurs once per stage with a fresh row id and
+  // touch id. Neither id can be the dedupe key; the identity that survives a
+  // copy is (touch_order, channel_id, touched_at).
+  const touchesForDeal = (rows: Attribution[]): AttributionTouch[] => {
+    const seen = new Map<string, AttributionTouch>();
+    for (const r of rows) {
+      for (const t of touchesByRow.get(r.id) ?? []) {
+        const k = `${t.touch_order}|${t.channel_id ?? ''}|${t.touched_at ?? ''}`;
+        if (!seen.has(k)) seen.set(k, t);
+      }
+    }
+    return [...seen.values()];
+  };
+
+  const campaignDealRows: Attribution[] = [];
+  const touchesByDealKey = new Map<string, AttributionTouch[]>();
+  for (const [k, rows] of rowsByDeal) {
+    // Year filter at the DEAL level: in scope if any row falls in the year.
+    if (filterYear != null && !rows.some((r) => r.year === filterYear)) continue;
+    const touches = touchesForDeal(rows);
+    const inScope =
+      rows.some((r) => r.channel_id != null && channelSet.has(r.channel_id)) ||
+      touches.some((t) => t.channel_id != null && channelSet.has(t.channel_id));
+    if (!inScope) continue;
+    campaignDealRows.push(...rows);
+    touchesByDealKey.set(k, touches);
+  }
+  const deals = dedupeDealsByHighestStage(campaignDealRows);
 
   let hpp = 0,
     opp = 0,
@@ -497,6 +581,31 @@ export function computeScorecard(
   // --- Open deals (pipeline if won) ---
   // The deals are already deduped to their highest stage. Keep those still open
   // (HPP/Opp/Pursuit); a deal that reached closeWon/closeLost is terminal.
+  //
+  // Each open deal is credited to this campaign at its EARLIEST touch: a
+  // campaign that touched a deal at positions 2 and 3 is shown its strongest
+  // claim ("2nd touch"), not every claim. Rank 1 means the campaign sourced the
+  // deal; 2+ means it influenced one another campaign sourced.
+  const creditFor = (
+    d: DealRecord,
+  ): { touchRank: number | null; sourced: boolean } => {
+    const touches = (touchesByDealKey.get(d.dealId) ?? [])
+      .filter((t) => t.channel_id)
+      .sort(compareTouchesChronologically);
+    const idx = touches.findIndex(
+      (t) => t.channel_id != null && channelSet.has(t.channel_id),
+    );
+    if (idx >= 0) return { touchRank: idx + 1, sourced: idx === 0 };
+    // No touch on this campaign's channels: the deal came in via a stage row's
+    // channel. Most deals have no touches recorded at all, so this is the
+    // ordinary path. DealRecord.channelId is the earliest row's channel, i.e.
+    // the deal's first touch as far as the row data knows.
+    return {
+      touchRank: null,
+      sourced: d.channelId !== '' && channelSet.has(d.channelId),
+    };
+  };
+
   const openDeals: OpenDeal[] = deals
     .filter((d) => d.stage in OPEN_STAGE_LABEL)
     .map((d) => ({
@@ -507,17 +616,26 @@ export function computeScorecard(
       stageLabel: OPEN_STAGE_LABEL[d.stage],
       amount: d.amount,
       sfLink: d.sfLink,
+      ...creditFor(d),
     }));
-  // Sort by amount desc (nulls last), then name.
+  // Sourced first (the deals this campaign owns are the primary read), then
+  // amount desc (nulls last), then name.
   openDeals.sort((a, b) => {
+    if (a.sourced !== b.sourced) return a.sourced ? -1 : 1;
     const av = a.amount ?? -1;
     const bv = b.amount ?? -1;
     return bv - av || a.name.localeCompare(b.name);
   });
-  const openPipelineAmount = openDeals.reduce(
-    (t, d) => t + (d.amount ?? 0),
-    0,
-  );
+  const sumAmount = (ds: OpenDeal[]) => ds.reduce((t, d) => t + (d.amount ?? 0), 0);
+  // Every open deal is exactly one of sourced / influenced, so these partition
+  // openPipelineAmount.
+  const sourcedDeals = openDeals.filter((d) => d.sourced);
+  const influencedDeals = openDeals.filter((d) => !d.sourced);
+  const openPipelineAmount = sumAmount(openDeals);
+  const openPipelineSourced = sumAmount(sourcedDeals);
+  const openPipelineInfluenced = sumAmount(influencedDeals);
+  const openDealsSourcedCount = sourcedDeals.length;
+  const openDealsInfluencedCount = influencedDeals.length;
   const openDealsMissingAmount = openDeals.filter(
     (d) => d.amount == null,
   ).length;
@@ -653,6 +771,10 @@ export function computeScorecard(
     conversion,
     openDeals,
     openPipelineAmount,
+    openPipelineSourced,
+    openPipelineInfluenced,
+    openDealsSourcedCount,
+    openDealsInfluencedCount,
     openDealsMissingAmount,
     channelCount: channelRefs.size,
     segmentCount: segmentRefs.size,

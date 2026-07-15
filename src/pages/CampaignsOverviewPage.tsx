@@ -8,6 +8,7 @@ import type {
   Channel,
   Lead,
   Attribution,
+  AttributionTouch,
   OutreachSnapshot,
   SixSenseSnapshot,
   LinkedinAdSnapshot,
@@ -30,6 +31,7 @@ export default function CampaignsOverviewPage({
   channels,
   leads,
   attributions,
+  attributionTouches,
   outreachSnapshots,
   sixSenseSnapshots,
   linkedinSnapshots,
@@ -40,6 +42,7 @@ export default function CampaignsOverviewPage({
   channels: Channel[];
   leads: Lead[];
   attributions: Attribution[];
+  attributionTouches: AttributionTouch[];
   outreachSnapshots: OutreachSnapshot[];
   sixSenseSnapshots: SixSenseSnapshot[];
   linkedinSnapshots: LinkedinAdSnapshot[];
@@ -72,6 +75,7 @@ export default function CampaignsOverviewPage({
             channels,
             leads,
             attributions,
+            attributionTouches,
             outreachSnapshots,
             sixSenseSnapshots,
             linkedinSnapshots,
@@ -85,6 +89,7 @@ export default function CampaignsOverviewPage({
       channels,
       leads,
       attributions,
+      attributionTouches,
       outreachSnapshots,
       sixSenseSnapshots,
       linkedinSnapshots,
@@ -281,12 +286,15 @@ function CampaignCard({
               </ChartCard>
 
               <ChartCard
-                title="Open Opportunities"
-                subtitle="Pipeline this campaign would generate if its open deals close-won."
+                title="Open opportunities"
+                subtitle="Pipeline if this campaign's open deals close-won, split into deals it sourced (first touch) and deals it influenced later. Every campaign that touched a deal counts it in full, so totals overlap across campaigns."
               >
                 <DealsPipelineCard
                   deals={score.openDeals}
-                  pipeline={score.openPipelineAmount}
+                  sourced={score.openPipelineSourced}
+                  influenced={score.openPipelineInfluenced}
+                  sourcedCount={score.openDealsSourcedCount}
+                  influencedCount={score.openDealsInfluencedCount}
                   missing={score.openDealsMissingAmount}
                 />
               </ChartCard>
@@ -591,6 +599,8 @@ function SequenceEmailTable({ sequences }: { sequences: SequenceEmailStats[] }) 
       clicked: 0,
       replied: 0,
       optedOut: 0,
+      calls: 0,
+      linkedinMessages: 0,
     },
   );
 
@@ -653,15 +663,59 @@ function fmtMoney(n: number): string {
   return `$${Math.round(n).toLocaleString()}`;
 }
 
+// Which touch this campaign was on a deal. Rank 1 (or the no-touch fallback on
+// the deal's own channel) means the campaign sourced it; 2+ means it came in
+// after another campaign sourced it. Deals with no recorded touches show no
+// rank, only whether their channel belongs to this campaign.
+function ordinalTouch(n: number): string {
+  const s = n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`;
+  return `${s} touch`;
+}
+
+function TouchBadge({
+  rank,
+  sourced,
+}: {
+  rank: number | null;
+  sourced: boolean;
+}) {
+  const label =
+    rank == null ? (sourced ? '1st touch' : 'Influenced') : ordinalTouch(rank);
+  return (
+    <span
+      className={
+        'inline-block rounded-full px-1.5 py-0.5 text-[10px] border ' +
+        (sourced
+          ? 'border-indigo/40 text-indigo bg-indigo/5'
+          : 'border-border text-slate-muted bg-muted/40')
+      }
+      title={
+        sourced
+          ? 'First touch: this campaign sourced the deal'
+          : 'This campaign influenced the deal after another sourced it'
+      }
+    >
+      {label}
+    </span>
+  );
+}
+
 // Open opportunities by name + amount, with the total pipeline they'd generate
-// if won. Deals with no amount show "—" and are excluded from the total.
+// if won, split into deals this campaign sourced vs influenced. Deals with no
+// amount show "—" and are excluded from the totals.
 function DealsPipelineCard({
   deals,
-  pipeline,
+  sourced,
+  influenced,
+  sourcedCount,
+  influencedCount,
   missing,
 }: {
   deals: OpenDeal[];
-  pipeline: number;
+  sourced: number;
+  influenced: number;
+  sourcedCount: number;
+  influencedCount: number;
   missing: number;
 }) {
   if (deals.length === 0) {
@@ -671,15 +725,32 @@ function DealsPipelineCard({
       </p>
     );
   }
+  const dealWord = (n: number) => (n === 1 ? 'deal' : 'deals');
+  // A bucket holding only deals with no amount would read "$0", which says the
+  // pipeline is worth nothing rather than unknown. Show a dash instead.
+  const money = (amount: number, count: number) =>
+    count > 0 && amount === 0 ? '—' : fmtMoney(amount);
   return (
     <div className="space-y-3">
-      <div className="flex items-baseline gap-2">
-        <span className="text-2xl font-semibold text-charcoal tabular-nums">
-          {fmtMoney(pipeline)}
-        </span>
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-2xl font-semibold text-charcoal tabular-nums">
+            {money(sourced, sourcedCount)}
+          </span>
+          <span className="text-xs text-slate-muted">
+            sourced · {sourcedCount} {dealWord(sourcedCount)}
+          </span>
+        </div>
+        <div className="flex items-baseline gap-2">
+          <span className="text-2xl font-semibold text-slate-muted tabular-nums">
+            {money(influenced, influencedCount)}
+          </span>
+          <span className="text-xs text-slate-muted">
+            influenced · {influencedCount} {dealWord(influencedCount)}
+          </span>
+        </div>
         <span className="text-xs text-slate-muted">
-          pipeline if won · {deals.length} open{' '}
-          {deals.length === 1 ? 'deal' : 'deals'}
+          {money(sourced + influenced, deals.length)} pipeline if won
           {missing > 0 && ` · ${missing} without an amount`}
         </span>
       </div>
@@ -689,6 +760,7 @@ function DealsPipelineCard({
             <tr className="border-b border-border">
               <th className="text-left font-medium py-1 pr-3">Opportunity</th>
               <th className="text-left font-medium py-1 px-2">Stage</th>
+              <th className="text-left font-medium py-1 px-2">Touch</th>
               <th className="text-right font-medium py-1 pl-2">Amount</th>
             </tr>
           </thead>
@@ -711,6 +783,9 @@ function DealsPipelineCard({
                   )}
                 </td>
                 <td className="py-1 px-2 text-slate-muted">{d.stageLabel}</td>
+                <td className="py-1 px-2">
+                  <TouchBadge rank={d.touchRank} sourced={d.sourced} />
+                </td>
                 <td className="py-1 pl-2 text-right tabular-nums text-charcoal">
                   {d.amount == null ? '—' : fmtMoney(d.amount)}
                 </td>
