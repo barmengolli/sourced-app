@@ -18,7 +18,9 @@ prefix, which is also the intended apply order.
 ## Migrations in this directory
 
 Listed in date order. Status reflects what has been applied to the
-production Supabase project as of 2026-05-06.
+production Supabase project as of 2026-07-15. Statuses dated before
+2026-05-06 have not been re-verified against prod since; confirm in the
+Supabase dashboard before relying on them.
 
 | File | Status | Notes |
 |---|---|---|
@@ -43,7 +45,9 @@ production Supabase project as of 2026-05-06.
 | `2026-07-06_campaign_tags.sql` | PENDING | Adds `campaign_tags` (canonical campaign: name, color, order) + `campaign_tag_links` (polymorphic 1:1 map from a tag to one asset via `(asset_type, asset_ref)` where asset_type ∈ channel/sixsense_segment/outreach_sequence and asset_ref is the channel UUID / segment string / sequence_id as text; `UNIQUE(asset_type, asset_ref)`). The manual tag layer that unifies the four data silos for the Campaigns tab: leads/opps join through tagged channels (existing FKs), 6Sense and Outreach are tagged directly. RLS (public read / anon write) + realtime, both guarded. Idempotent (`IF NOT EXISTS`, guarded policies/publication). |
 | `2026-07-07_linkedin_ads.sql` | PENDING | Adds `linkedin_ads_snapshots` (one row per ad set × week: snapshot_date, year, week_number, campaign/product/region, adset_id=adset_name, spend/impressions/clicks). Weekly, n8n-fed from a Google Sheet; metrics are PER-WEEK (not cumulative), so the app sums rows directly. RLS + realtime, both guarded. Also widens `campaign_tag_links.asset_type` CHECK to add `'linkedin_adset'` (drops old CHECK by column lookup, re-adds). Idempotent. Apply after `2026-07-06_campaign_tags.sql`. |
 
-Status legend: **APPLIED** (run against prod), **APPLIED** (committed
+| `2026-07-15_campaign_tag_links_multi_tag.sql` | APPLIED | Multi-tag assets: swaps `campaign_tag_links`' natural key from `UNIQUE(asset_type, asset_ref)` (1:1, tagging an asset to a second campaign MOVED it) to `UNIQUE(tag_id, asset_type, asset_ref)`, so one channel / segment / sequence / ad set can belong to several campaigns at once. Drops the old constraint by column lookup (robust to its name), collapses any duplicate rows first, and adds an `(asset_type, asset_ref)` index to replace the one the dropped constraint provided implicitly. Campaign totals INTENTIONALLY overlap once an asset is shared (a shared channel's leads and deals count in full for every campaign claiming it, so figures no longer sum to a company total); the Campaigns Overview says so in-UI. Apply after `2026-07-07_linkedin_ads.sql` and BEFORE deploying the paired code change on this branch (`useCampaignTags` / `CampaignTagPicker` / `campaignScorecard`): the new `linkAsset` upserts on the new key and errors against the old constraint. Idempotent. |
+
+Status legend: **APPLIED** (run against prod), **PENDING** (committed
 but not yet run), **UNKNOWN** (provenance unclear, verify in Supabase
 before applying).
 

@@ -464,6 +464,11 @@ CREATE TRIGGER set_timestamp_campaign_costs BEFORE UPDATE ON campaign_costs
 -- A manual tag layer mapping a canonical campaign (e.g. "L&A") to the assets
 -- that belong to it in each silo. Leads/opps come for free through tagged
 -- channels; 6Sense segments and Outreach sequences are tagged directly.
+--
+-- An asset may belong to SEVERAL campaigns (campaigns share channels). Totals
+-- therefore overlap by design: a shared channel's leads and deals count in full
+-- for every campaign claiming it, so per-campaign figures do not sum to a
+-- company total. See migrations/2026-07-15_campaign_tag_links_multi_tag.sql.
 
 CREATE TABLE campaign_tags (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -478,13 +483,17 @@ CREATE TABLE campaign_tag_links (
   tag_id UUID NOT NULL REFERENCES campaign_tags(id) ON DELETE CASCADE,
   asset_type TEXT NOT NULL
     CHECK (asset_type IN ('channel', 'sixsense_segment', 'outreach_sequence', 'linkedin_adset')),
-  -- channel UUID | 6Sense segment string | Outreach sequence_id, all as text.
+  -- channel UUID | 6Sense segment string | Outreach sequence_id | LinkedIn
+  -- adset_name, all as text.
   asset_ref TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  CONSTRAINT campaign_tag_links_asset_unique UNIQUE (asset_type, asset_ref)
+  -- One link per (campaign, asset): an asset may belong to several campaigns,
+  -- but a campaign cannot claim the same asset twice.
+  CONSTRAINT campaign_tag_links_tag_asset_unique UNIQUE (tag_id, asset_type, asset_ref)
 );
 
 CREATE INDEX idx_campaign_tag_links_tag ON campaign_tag_links(tag_id);
+CREATE INDEX idx_campaign_tag_links_asset ON campaign_tag_links(asset_type, asset_ref);
 
 -- =============================================================
 -- Row Level Security

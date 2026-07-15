@@ -36,7 +36,7 @@ export default function CampaignTagsPage({
   linkedinSnapshots: LinkedinAdSnapshot[];
   onNavigate: (p: PageKey) => void;
 }) {
-  const { tags, createTag, renameTag, setColor, deleteTag, linkAsset, unlinkAsset, tagFor } =
+  const { tags, createTag, renameTag, setColor, deleteTag, linkAsset, unlinkAsset, tagsFor } =
     tagsHook;
 
   const [newName, setNewName] = useState('');
@@ -118,15 +118,25 @@ export default function CampaignTagsPage({
     }
   };
 
-  // Small helper to render a picker for one asset.
-  const picker = (type: CampaignAssetType, ref: string) => (
-    <CampaignTagPicker
-      tags={tags}
-      current={tagFor(type, ref)}
-      onAssign={(tagId) => linkAsset(tagId, type, ref)}
-      onClear={() => unlinkAsset(type, ref)}
-    />
-  );
+  // Small helper to render a picker for one asset. An asset can carry several
+  // campaigns, so the menu toggles each one independently.
+  const picker = (type: CampaignAssetType, ref: string) => {
+    const currentTags = tagsFor(type, ref);
+    return (
+      <CampaignTagPicker
+        tags={tags}
+        current={currentTags}
+        onToggle={(tagId) =>
+          currentTags.some((t) => t.id === tagId)
+            ? unlinkAsset(tagId, type, ref)
+            : linkAsset(tagId, type, ref)
+        }
+        onClearAll={async () => {
+          for (const t of currentTags) await unlinkAsset(t.id, type, ref);
+        }}
+      />
+    );
+  };
 
   return (
     <div className="p-8 space-y-6 max-w-4xl">
@@ -136,7 +146,9 @@ export default function CampaignTagsPage({
         </h1>
         <p className="mt-1 text-sm text-slate-muted">
           Create a campaign, then tag the assets that belong to it in each silo.
-          Leads and opportunities are pulled in through the tagged channels.
+          Leads and opportunities are pulled in through the tagged channels. An
+          asset can belong to several campaigns: each one counts it in full, so
+          campaign totals overlap rather than summing to a company total.
         </p>
       </div>
 
@@ -263,7 +275,7 @@ export default function CampaignTagsPage({
       {/* Asset mapping */}
       <AssetGroup
         title="Channels"
-        hint="Drives leads, MQLs, and opportunities. Tag a parent or its sub-channels. A sub-channel's own tag wins over its parent's."
+        hint="Drives leads, MQLs, and opportunities. Tag a parent or its sub-channels, and tag a channel to several campaigns when they share it. A sub-channel's own tags win over its parent's. Campaigns sharing a channel each count its leads and deals in full, so their totals overlap."
       >
         {channelRows.length === 0 ? (
           <Empty label="No channels yet." />

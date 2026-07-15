@@ -141,19 +141,25 @@ const MAX_BREAKDOWN_CHANNELS = 6;
 // Resolve this campaign's tagged channels to the full set of channel ids whose
 // leads/opps count for it. Includes:
 //   - every channel tagged directly to this campaign, and
-//   - the sub-channels of a tagged PARENT, EXCEPT any sub-channel that is
-//     itself tagged to a different campaign (a sub-channel's own tag wins).
-// `otherTaggedChannels` is the set of channel ids tagged to a DIFFERENT
-// campaign, used to enforce that precedence.
+//   - the sub-channels of a tagged PARENT, EXCEPT any sub-channel that carries
+//     its own tag(s) none of which is this campaign (a sub-channel's own tags
+//     win over its parent's).
+// `claimedByOtherCampaigns` is the set of channel ids that are tagged to at
+// least one campaign but NOT to this one. A channel tagged to BOTH this
+// campaign and another is NOT in that set: multi-tag means both campaigns
+// legitimately claim it, so it must not be excluded here.
 function expandChannels(
   ownChannelIds: Set<string>,
-  otherTaggedChannels: Set<string>,
+  claimedByOtherCampaigns: Set<string>,
   channels: Channel[],
 ): Set<string> {
   const out = new Set(ownChannelIds);
   // Iterate to a fixpoint so the tree can be deeper than one level (a tagged
   // parent pulls in children, grandchildren, etc.), stopping when no new
   // descendant is added. A sub-channel claimed by another campaign is excluded.
+  // A channel claimed only by other campaigns is skipped, which also stops the
+  // walk descending THROUGH it: its own children belong to that campaign's
+  // subtree, not this one. That is intentional and pre-existing.
   let added = true;
   while (added) {
     added = false;
@@ -162,7 +168,7 @@ function expandChannels(
         c.parent_channel_id &&
         out.has(c.parent_channel_id) &&
         !out.has(c.id) &&
-        !otherTaggedChannels.has(c.id)
+        !claimedByOtherCampaigns.has(c.id)
       ) {
         out.add(c.id);
         added = true;
@@ -309,12 +315,25 @@ export function computeScorecard(
   filterYear: number | null,
 ): CampaignScorecard {
   const links = allLinks.filter((l) => l.tag_id === tagId);
-  // Channel ids tagged to a DIFFERENT campaign: a tagged parent must not absorb
-  // a sub-channel that another campaign claims.
-  const otherTaggedChannels = new Set(
-    allLinks
-      .filter((l) => l.asset_type === 'channel' && l.tag_id !== tagId)
-      .map((l) => l.asset_ref),
+  // Every tag carried by each channel. A channel can be tagged to SEVERAL
+  // campaigns, so "claimed by someone else" is a property of its whole tag set,
+  // not of any single link: a channel tagged to both this campaign and another
+  // is claimed by both and must NOT be excluded from this one's expansion.
+  const tagsByChannel = new Map<string, Set<string>>();
+  for (const l of allLinks) {
+    if (l.asset_type !== 'channel') continue;
+    let s = tagsByChannel.get(l.asset_ref);
+    if (!s) {
+      s = new Set();
+      tagsByChannel.set(l.asset_ref, s);
+    }
+    s.add(l.tag_id);
+  }
+  // Tagged, but not to this campaign: a tagged parent must not absorb it.
+  const claimedByOtherCampaigns = new Set(
+    [...tagsByChannel.entries()]
+      .filter(([, tagIds]) => !tagIds.has(tagId))
+      .map(([channelId]) => channelId),
   );
   const channelRefs = new Set(
     links.filter((l) => l.asset_type === 'channel').map((l) => l.asset_ref),
@@ -337,7 +356,7 @@ export function computeScorecard(
 
   const channelSet = expandChannels(
     channelRefs,
-    otherTaggedChannels,
+    claimedByOtherCampaigns,
     data.channels,
   );
 
