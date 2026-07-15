@@ -256,7 +256,23 @@ function dedupeDealsByHighestStage(attrs: Attribution[]): DealRecord[] {
   const out: DealRecord[] = [];
   for (const [dealId, entry] of map) {
     const named = entry.rows.find((r) => r.label) ?? entry.rows[0];
-    const amountRow = entry.rows.find((r) => r.amount != null && r.amount > 0);
+    // Amount comes from the deal's HIGHEST-stage row. SFDC amounts get revised
+    // as a deal progresses and the stage rows genuinely disagree (a deal can
+    // read $1.5M on HPP and $1.9M on Pursuit), so the latest stage carries the
+    // freshest number. Ties within a stage break on stage_entered_at desc then
+    // id, so the pick is deterministic rather than dependent on array order.
+    // Rows with no positive amount are skipped, falling BACK DOWN the ladder,
+    // so a deal whose top row has no amount still reports its earlier one.
+    const byStageDesc = [...entry.rows].sort((a, b) => {
+      const ra = STAGE_RANK[a.stage_key] ?? 0;
+      const rb = STAGE_RANK[b.stage_key] ?? 0;
+      if (ra !== rb) return rb - ra;
+      if (a.stage_entered_at !== b.stage_entered_at) {
+        return a.stage_entered_at < b.stage_entered_at ? 1 : -1;
+      }
+      return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+    });
+    const amountRow = byStageDesc.find((r) => r.amount != null && r.amount > 0);
     // First-touch channel = the channel on the deal's earliest stage row.
     // Tie-break on id so rows sharing a stage_entered_at resolve deterministically.
     const byDate = [...entry.rows].sort((a, b) => {

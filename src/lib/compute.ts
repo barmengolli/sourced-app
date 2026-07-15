@@ -2186,6 +2186,26 @@ function dealAmount(rows: Attribution[]): number {
   return best;
 }
 
+// Chronological order for a deal's touches: earliest touched_at first, with
+// nulls LAST, tie-broken by touch_order ascending.
+//
+// touch_order is ENTRY order, not chronology (setTouchesFor assigns i + 1 from
+// the editor's array position), so it can only ever be a tie-breaker. Shared by
+// computeChannelSpend's first-touch resolution and the campaign scorecard's
+// touch ranking so the two agree on what "first touch" means.
+export function compareTouchesChronologically(
+  a: AttributionTouch,
+  b: AttributionTouch,
+): number {
+  const aNull = !a.touched_at;
+  const bNull = !b.touched_at;
+  if (aNull !== bNull) return aNull ? 1 : -1;
+  if (!aNull && !bNull && a.touched_at !== b.touched_at) {
+    return a.touched_at! < b.touched_at! ? -1 : 1;
+  }
+  return a.touch_order - b.touch_order;
+}
+
 export function computeChannelSpend(
   input: ComputeChannelSpendInput,
 ): ChannelSpendBreakdown[] {
@@ -2281,34 +2301,12 @@ export function computeChannelSpend(
   //        touches added).
   const firstTouchByDeal = new Map<string, string | null>();
   for (const [dealId, rows] of rowsByDeal) {
-    let best: AttributionTouch | null = null;
-    for (const r of rows) {
-      for (const t of touchesByAttribution.get(r.id) ?? []) {
-        if (!t.channel_id) continue;
-        if (best === null) {
-          best = t;
-          continue;
-        }
-        // touched_at nulls sort LAST. Otherwise lexicographic ISO
-        // string compare. On equal touched_at, smaller touch_order
-        // wins.
-        const aNull = !t.touched_at;
-        const bNull = !best.touched_at;
-        if (aNull && !bNull) continue;
-        if (!aNull && bNull) {
-          best = t;
-          continue;
-        }
-        if (!aNull && !bNull) {
-          if (t.touched_at! < best.touched_at!) {
-            best = t;
-            continue;
-          }
-          if (t.touched_at! > best.touched_at!) continue;
-        }
-        if (t.touch_order < best.touch_order) best = t;
-      }
-    }
+    // Channel-bearing touches only: a touch with no channel can't attribute.
+    // Filter BEFORE sorting so it can never win the first-touch slot.
+    const touches = rows
+      .flatMap((r) => touchesByAttribution.get(r.id) ?? [])
+      .filter((t) => t.channel_id);
+    const best = touches.sort(compareTouchesChronologically)[0];
     if (best) {
       firstTouchByDeal.set(dealId, best.channel_id ?? null);
       continue;
