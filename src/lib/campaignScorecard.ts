@@ -62,6 +62,8 @@ export interface SequenceEmailStats {
   clicked: number;
   replied: number;
   optedOut: number;
+  calls: number;
+  linkedinMessages: number;
 }
 
 // Lifetime-in-scope LinkedIn Ads metrics for one tagged ad set. Metrics are
@@ -547,6 +549,8 @@ export function computeScorecard(
         clicked: last.clicked,
         replied: last.replied,
         optedOut: last.opted_out,
+        calls: last.outbound_calls,
+        linkedinMessages: last.linkedin_tasks_completed,
       });
     }
     emailBySequence.sort((a, b) => b.sent - a.sent);

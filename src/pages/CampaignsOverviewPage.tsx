@@ -253,7 +253,7 @@ function CampaignCard({
               </div>
 
               <ChartCard
-                title="Outbound Email Performance by Sequence"
+                title="Outbound performance"
                 subtitle="Lifetime totals per tagged Outreach sequence."
               >
                 {score.emailBySequence.length > 0 ? (
@@ -261,7 +261,7 @@ function CampaignCard({
                 ) : (
                   <p className="text-sm text-slate-muted italic">
                     No Outreach sequences tagged to this campaign. Tag them on
-                    the Tags page to see email performance.
+                    the Tags page to see outbound performance.
                   </p>
                 )}
               </ChartCard>
@@ -551,6 +551,18 @@ function SequenceEmailTable({ sequences }: { sequences: SequenceEmailStats[] }) 
       title: 'Opted out / Sent',
       value: (s) => pct(s.optedOut, s.sent),
     },
+    {
+      key: 'calls',
+      label: 'Calls made',
+      title: 'Outbound calls completed on this sequence',
+      value: (s) => num(s.calls),
+    },
+    {
+      key: 'linkedin',
+      label: 'LinkedIn msgs',
+      title: 'LinkedIn tasks completed on this sequence',
+      value: (s) => num(s.linkedinMessages),
+    },
   ];
   const shadeAt = (i: number) => (i % 2 === 1 ? 'bg-muted/50' : '');
 
@@ -566,6 +578,8 @@ function SequenceEmailTable({ sequences }: { sequences: SequenceEmailStats[] }) 
       clicked: t.clicked + s.clicked,
       replied: t.replied + s.replied,
       optedOut: t.optedOut + s.optedOut,
+      calls: t.calls + s.calls,
+      linkedinMessages: t.linkedinMessages + s.linkedinMessages,
     }),
     {
       sequenceId: 0,
