@@ -8,7 +8,6 @@
 
 // Active BDRs: each gets a gauge card and rolls into the Program total.
 export const BDRS = ['Dave Cummins', 'Garrett McNally'] as const;
-export type Bdr = (typeof BDRS)[number];
 
 // Catch-all for deals from BDRs who have left the company. Selectable in the
 // editor and counted in the year-over-year "created" chart, but it does NOT
@@ -27,8 +26,3 @@ export const BDR_STAGE_LABELS: Record<BdrStage, string> = {
   hpp: 'HPP (SQL)',
   opp: 'Opp (SAO)',
 };
-
-// A deal counts toward BDR quota only when its first-touch top-level channel
-// resolves to this base name (year prefix stripped, e.g. "2026 - Marketing
-// SDR" -> "Marketing SDR"). Any sub-campaign under it qualifies.
-export const MARKETING_SDR_BASE_NAME = 'Marketing SDR';

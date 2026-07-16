@@ -47,23 +47,6 @@ export const COMPUTED_STAGES: ReadonlySet<FunnelStageKey> = new Set([
   'mql',
 ]);
 
-// Stages stored in funnel_actuals (manually entered).
-export const MANUAL_ACTUAL_STAGES: AttributionStageKey[] = [
-  'hpp',
-  'opp',
-  'pursuit',
-  'closeWon',
-  'closeLost',
-];
-
-// Stages a deal can be promoted INTO via the existing Promote flow.
-// closeLost is reached via the new Close Lost button, not Promote.
-export const PROMOTE_TARGET_STAGES: AttributionStageKey[] = [
-  'opp',
-  'pursuit',
-  'closeWon',
-];
-
 // Stages a deal can be marked Lost FROM. Excludes closeWon (terminal) and
 // closeLost itself (already terminal). Excludes lead/mql (pre-attribution).
 export const LOSS_ELIGIBLE_STAGES: AttributionStageKey[] = [
