@@ -10,8 +10,9 @@ import type {
 } from '../../types/db';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type { UseAttributionTouchesResult } from '../../hooks/useAttributionTouches';
-import { STAGE_RANK } from '../../hooks/useAttributions';
+import { PROMOTION_STAGE_RANK } from '../../hooks/useAttributions';
 import { formatDate } from '../../lib/dates';
+import { formatCurrency } from '../../lib/formatters';
 import {
   FUNNEL_STAGE_LABELS,
   LOSS_ELIGIBLE_STAGES,
@@ -55,15 +56,6 @@ function minDateIso(): string {
   const d = new Date();
   d.setFullYear(d.getFullYear() - 5);
   return d.toISOString().slice(0, 10);
-}
-
-function fmtMoney(v: number | null | undefined): string {
-  if (v === null || v === undefined) return '';
-  return v.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  });
 }
 
 export default function OpportunitiesListModal({
@@ -189,7 +181,7 @@ export default function OpportunitiesListModal({
                         {a.amount !== null && a.amount !== undefined ? (
                           <>
                             {' · '}
-                            {fmtMoney(a.amount)}
+                            {formatCurrency(a.amount)}
                           </>
                         ) : null}
                         {' · '}
@@ -326,13 +318,13 @@ export default function OpportunitiesListModal({
                               (other) =>
                                 other.id !== a.id &&
                                 other.deal_id === a.deal_id &&
-                                STAGE_RANK[other.stage_key] >
-                                  STAGE_RANK[a.stage_key],
+                                PROMOTION_STAGE_RANK[other.stage_key] >
+                                  PROMOTION_STAGE_RANK[a.stage_key],
                             )
                             .sort(
                               (x, y) =>
-                                STAGE_RANK[x.stage_key] -
-                                STAGE_RANK[y.stage_key],
+                                PROMOTION_STAGE_RANK[x.stage_key] -
+                                PROMOTION_STAGE_RANK[y.stage_key],
                             );
                     return (
                       <div className="ml-4 p-3 border border-border rounded-md bg-muted space-y-2">

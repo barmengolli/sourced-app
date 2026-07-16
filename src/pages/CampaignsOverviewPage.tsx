@@ -23,6 +23,7 @@ import {
   type SequenceEmailStats,
   type LinkedinAdsetStats,
 } from '../lib/campaignScorecard';
+import { formatCompactCurrency } from '../lib/formatters';
 import ChartCard from '../components/charts/ChartCard';
 import ChannelFunnelBars from '../components/campaigns/ChannelFunnelBars';
 
@@ -657,12 +658,6 @@ function SequenceEmailTable({ sequences }: { sequences: SequenceEmailStats[] }) 
 }
 
 // Compact currency: $1.2M, $450K, $0.
-function fmtMoney(n: number): string {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${Math.round(n / 1_000)}K`;
-  return `$${Math.round(n).toLocaleString()}`;
-}
-
 // Which touch this campaign was on a deal. Rank 1 (or the no-touch fallback on
 // the deal's own channel) means the campaign sourced it; 2+ means it came in
 // after another campaign sourced it. Deals with no recorded touches show no
@@ -729,7 +724,7 @@ function DealsPipelineCard({
   // A bucket holding only deals with no amount would read "$0", which says the
   // pipeline is worth nothing rather than unknown. Show a dash instead.
   const money = (amount: number, count: number) =>
-    count > 0 && amount === 0 ? '—' : fmtMoney(amount);
+    count > 0 && amount === 0 ? '—' : formatCompactCurrency(amount);
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
@@ -787,7 +782,7 @@ function DealsPipelineCard({
                   <TouchBadge rank={d.touchRank} sourced={d.sourced} />
                 </td>
                 <td className="py-1 pl-2 text-right tabular-nums text-charcoal">
-                  {d.amount == null ? '—' : fmtMoney(d.amount)}
+                  {d.amount == null ? '—' : formatCompactCurrency(d.amount)}
                 </td>
               </tr>
             ))}

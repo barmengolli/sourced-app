@@ -9,7 +9,11 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
-    // No setup files, no globals: tests import { describe, it, expect } from
-    // 'vitest' explicitly so there is no ambient magic.
+    // Stub dummy Supabase env vars before any module loads, so importing a pure
+    // constant from a hook file (whose graph touches lib/supabase.ts) doesn't
+    // throw on client construction. No network call is ever made; see
+    // src/test/setupEnv.ts.
+    setupFiles: ['src/test/setupEnv.ts'],
+    // Tests import { describe, it, expect } from 'vitest' explicitly; no globals.
   },
 });

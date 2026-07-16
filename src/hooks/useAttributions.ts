@@ -91,10 +91,17 @@ const STAGE_NEXT: Record<AttributionStageKey, AttributionStageKey | null> = {
   closeLost: null,
 };
 
-// Rank used by deleteWithCascade to identify "strictly-downstream"
-// rows. closeWon and closeLost share rank 4 because they're parallel
-// terminals — deleting one shouldn't sweep the other.
-export const STAGE_RANK: Record<AttributionStageKey, number> = {
+// Progression rank used by deleteWithCascade and the promote/close-lost guards
+// to identify "strictly-downstream" rows. closeWon and closeLost share rank 4
+// because they are PARALLEL terminals: deleting one must not sweep the other,
+// and neither is "further along" than the other.
+//
+// NOTE: this is deliberately NOT the same as DEAL_DEDUPE_PRECEDENCE in
+// campaignScorecard.ts, which ranks closeWon ABOVE closeLost so that when a
+// deal has conflicting terminal rows the dedupe keeps it as won. The two encode
+// different questions ("is X downstream of Y?" vs "which terminal wins a
+// dedupe?") and must not be merged. See leadStagePrecedence.test.ts.
+export const PROMOTION_STAGE_RANK: Record<AttributionStageKey, number> = {
   hpp: 1,
   opp: 2,
   pursuit: 3,
@@ -300,11 +307,11 @@ export function useAttributions(): UseAttributionsResult {
       // other row with the same deal_id and strictly-higher rank.
       const ids = [id];
       if (target.deal_id) {
-        const targetRank = STAGE_RANK[target.stage_key];
+        const targetRank = PROMOTION_STAGE_RANK[target.stage_key];
         for (const a of before) {
           if (a.id === id) continue;
           if (a.deal_id !== target.deal_id) continue;
-          if (STAGE_RANK[a.stage_key] > targetRank) ids.push(a.id);
+          if (PROMOTION_STAGE_RANK[a.stage_key] > targetRank) ids.push(a.id);
         }
       }
 

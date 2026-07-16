@@ -13,6 +13,7 @@ import type {
   NewCampaignCostInput,
   UseCampaignCostsResult,
 } from '../../hooks/useCampaignCosts';
+import { formatCurrency } from '../../lib/formatters';
 
 interface BudgetEditorProps {
   channelId: string;
@@ -22,14 +23,6 @@ interface BudgetEditorProps {
   // Year used by the quick-fill date helpers (This year / Q1 / Q2 /
   // Q3 / Q4). Defaults to the current calendar year when omitted.
   defaultYear?: number;
-}
-
-function fmtMoney(n: number): string {
-  return n.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  });
 }
 
 function quarterRange(year: number, q: 1 | 2 | 3 | 4): { start: string; end: string } {
@@ -198,7 +191,7 @@ export default function BudgetEditor({
                   {c.start_date} → {c.end_date}
                 </span>
                 <span className="tabular-nums font-medium">
-                  {fmtMoney(c.amount)}
+                  {formatCurrency(c.amount)}
                 </span>
                 {c.notes && (
                   <span className="text-slate-muted truncate flex-1">
