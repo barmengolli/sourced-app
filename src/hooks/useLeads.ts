@@ -10,9 +10,11 @@ import { todayIso } from '../lib/dates';
 import {
   buildSyncPatch as buildSyncPatchPure,
   buildInsertRow as buildInsertRowPure,
+  mergePendingLeadFields,
   type SfdcSync,
   type SyncClock,
 } from '../lib/leadSync';
+import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 
 // Re-export so existing callers importing SfdcSync from useLeads keep working.
 export type { SfdcSync } from '../lib/leadSync';
@@ -270,6 +272,37 @@ export function useLeads(): UseLeadsResult {
     return Date.now() - ts < PENDING_WRITE_TTL_MS;
   }, []);
 
+  // One realtime handler shared by the initial subscription and the resume path
+  // (previously two identical copies with six `as unknown as` casts between
+  // them). INSERT prepends if new; UPDATE merges keeping locally-pending fields
+  // via the typed mergePendingLeadFields; DELETE removes by id.
+  const handleRealtimePayload = useCallback(
+    (payload: RealtimePostgresChangesPayload<Lead>) => {
+      if (realtimePausedRef.current) return;
+      if (payload.eventType === 'INSERT') {
+        const next = payload.new;
+        setLeads((prev) =>
+          prev.some((l) => l.id === next.id) ? prev : [next, ...prev],
+        );
+      } else if (payload.eventType === 'UPDATE') {
+        const next = payload.new;
+        setLeads((prev) => {
+          const existing = prev.find((l) => l.id === next.id);
+          if (!existing) return [next, ...prev];
+          const merged = mergePendingLeadFields(next, existing, (field) =>
+            isPending(next.id, field),
+          );
+          return prev.map((l) => (l.id === next.id ? merged : l));
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const old = payload.old as { id?: string };
+        if (!old?.id) return;
+        setLeads((prev) => prev.filter((l) => l.id !== old.id));
+      }
+    },
+    [isPending],
+  );
+
   const refresh = useCallback(async () => {
     try {
       const all = await fetchAllLeads();
@@ -303,41 +336,7 @@ export function useLeads(): UseLeadsResult {
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'leads' },
-          (payload) => {
-            if (realtimePausedRef.current) return;
-            if (payload.eventType === 'INSERT') {
-              const next = payload.new as Lead;
-              setLeads((prev) =>
-                prev.some((l) => l.id === next.id) ? prev : [next, ...prev],
-              );
-            } else if (payload.eventType === 'UPDATE') {
-              const next = payload.new as Lead;
-              setLeads((prev) => {
-                const existing = prev.find((l) => l.id === next.id);
-                if (!existing) return [next, ...prev];
-                // Per-field guard: keep our optimistic value for any column
-                // that is currently in flight, take the server value for
-                // everything else.
-                const merged = { ...next } as unknown as Record<string, unknown>;
-                const existingRecord = existing as unknown as Record<
-                  string,
-                  unknown
-                >;
-                for (const key of Object.keys(existingRecord)) {
-                  if (isPending(next.id, key)) {
-                    merged[key] = existingRecord[key];
-                  }
-                }
-                return prev.map((l) =>
-                  l.id === next.id ? (merged as unknown as Lead) : l,
-                );
-              });
-            } else if (payload.eventType === 'DELETE') {
-              const old = payload.old as { id?: string };
-              if (!old?.id) return;
-              setLeads((prev) => prev.filter((l) => l.id !== old.id));
-            }
-          },
+          handleRealtimePayload,
         )
         .subscribe();
     };
@@ -351,7 +350,7 @@ export function useLeads(): UseLeadsResult {
         channelRef.current = null;
       }
     };
-  }, [isPending]);
+  }, [channelName, handleRealtimePayload]);
 
   const pauseRealtime = useCallback(() => {
     realtimePausedRef.current = true;
@@ -369,45 +368,10 @@ export function useLeads(): UseLeadsResult {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'leads' },
-        (payload) => {
-          // Same handler logic as the initial subscription. Duplicated only
-          // because the initial copy is closed over by the useEffect; pulling
-          // it out into a module-scoped function would force us to thread
-          // the leads ref and isPending through, which is uglier than this.
-          if (realtimePausedRef.current) return;
-          if (payload.eventType === 'INSERT') {
-            const next = payload.new as Lead;
-            setLeads((prev) =>
-              prev.some((l) => l.id === next.id) ? prev : [next, ...prev],
-            );
-          } else if (payload.eventType === 'UPDATE') {
-            const next = payload.new as Lead;
-            setLeads((prev) => {
-              const existing = prev.find((l) => l.id === next.id);
-              if (!existing) return [next, ...prev];
-              const merged = { ...next } as unknown as Record<string, unknown>;
-              const existingRecord = existing as unknown as Record<
-                string,
-                unknown
-              >;
-              for (const key of Object.keys(existingRecord)) {
-                if (isPending(next.id, key)) {
-                  merged[key] = existingRecord[key];
-                }
-              }
-              return prev.map((l) =>
-                l.id === next.id ? (merged as unknown as Lead) : l,
-              );
-            });
-          } else if (payload.eventType === 'DELETE') {
-            const old = payload.old as { id?: string };
-            if (!old?.id) return;
-            setLeads((prev) => prev.filter((l) => l.id !== old.id));
-          }
-        },
+        handleRealtimePayload,
       )
       .subscribe();
-  }, [isPending]);
+  }, [channelName, handleRealtimePayload]);
 
   const applyPatch = useCallback(
     async (

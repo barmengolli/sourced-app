@@ -40,6 +40,41 @@ export interface SyncClock {
   todayIso: () => string; // date-only for stage_history entered_at fallback
 }
 
+// Read one editable field's value from a Lead or an SFDC candidate for diffing,
+// without a double cast. Both the stored Lead and the parsed candidate expose
+// the editable fields as optional properties, so a Partial view keyed by
+// EditableLeadField is the accurate shared shape. Replaces the
+// `as unknown as Record<string, unknown>` casts in ImportDiff.
+export function comparableField(
+  source: Partial<Record<EditableLeadField, unknown>>,
+  field: EditableLeadField,
+): unknown {
+  return source[field];
+}
+
+// Merge an incoming realtime lead row with the local one, keeping the local
+// (optimistic) value for any field the caller reports as still pending in a
+// local write, and taking the server value for everything else. Pure and typed:
+// no `as unknown as` double cast. `isPending(field)` is bound to this row's id
+// by the caller.
+//
+// Typed via a Lead-keyed loop rather than a string-indexed Record. We only ever
+// read/write keys that exist on both objects, so the result is a valid Lead.
+export function mergePendingLeadFields(
+  incoming: Lead,
+  local: Lead,
+  isPending: (field: string) => boolean,
+): Lead {
+  const merged: Lead = { ...incoming };
+  for (const key of Object.keys(local) as (keyof Lead)[]) {
+    if (isPending(key as string)) {
+      // Same key on both objects, so the assignment is type-safe.
+      (merged[key] as Lead[keyof Lead]) = local[key];
+    }
+  }
+  return merged;
+}
+
 // Who edits are attributed to on sync-appended history entries.
 const EDITED_BY = 'Marketing';
 
