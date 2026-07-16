@@ -20,7 +20,7 @@
 // channels.name now contains the year prefix ("2025 - Sales"), so
 // every (year, channel) pair is an addressable entity by name.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -232,7 +232,7 @@ export default function YearLeadCharts({
     () => mergedChannels.map((c) => c.channelId).join('|'),
     [mergedChannels],
   );
-  const computeDefault = (): Set<string> => {
+  const computeDefault = useCallback((): Set<string> => {
     const currentOnly = mergedChannels.filter((c) => c.isCurrent);
     const priorOnly = mergedChannels.filter((c) => !c.isCurrent);
 
@@ -254,49 +254,45 @@ export default function YearLeadCharts({
 
     // Fallback 2: fewer than 2 current-year channels -> everything.
     return new Set(mergedChannels.map((c) => c.channelId));
-  };
-  const [selectedChannelIds, setSelectedChannelIds] = useState<Set<string>>(
+  }, [mergedChannels]);
+  // Memoized computed default: recomputes when the channel dataset changes. No
+  // effect, no setState during render. Depends on mergedChannels directly (the
+  // only value computeDefault reads), so no exhaustive-deps suppression.
+  const defaultSelection = useMemo(
     () => computeDefault(),
+    [computeDefault],
   );
-  // True once the user has manually changed the channel selection.
-  // Until then, the selection tracks computeDefault() as data for the
-  // two years streams in (they load at different times, so a one-shot
-  // default fires too early and lands on the wrong fallback).
-  const userTouchedSelection = useRef(false);
-  useEffect(() => {
-    // While source data is still streaming in, don't compute or prune
-    // anything: the channel union is incomplete and any default chosen
-    // now would flash the wrong selection (e.g. prior-year-only
-    // channels) before converging. The effect re-runs when loading
-    // flips false and computes the default exactly once, on full data.
-    if (loading) return;
-    // Until the user touches the selection, keep tracking the computed
-    // default. Current-year and prior-year channels load at different
-    // times; recomputing on every union change means we converge on the
-    // paired default once both sides are in.
-    if (!userTouchedSelection.current) {
-      if (mergedChannels.length > 0) {
-        setSelectedChannelIds(computeDefault());
-      }
-      return;
+
+  // Explicit user override, keyed by the dataset identity it was made against.
+  // null override means "follow the computed default". When channelKey changes
+  // (e.g. the user switches year), a stale override no longer applies, so the
+  // effective selection falls back to the fresh default until the user picks
+  // again for the new dataset.
+  const [override, setOverride] = useState<{
+    key: string;
+    ids: Set<string>;
+  } | null>(null);
+
+  // Effective selection: the user's override when it was made against the
+  // current dataset and still has at least one valid id, else the computed
+  // default. Derived, not stored, so it can never go stale.
+  const selectedChannelIds = useMemo<Set<string>>(() => {
+    // An override applies only when it was made against the CURRENT dataset. A
+    // stale override (dataset identity changed) is dropped and the default
+    // re-derives. A deliberately-empty override for the current dataset is
+    // honored (the user chose to show nothing); it is NOT treated as "fall back
+    // to default".
+    if (override && override.key === channelKey) {
+      const valid = new Set(mergedChannels.map((c) => c.channelId));
+      return new Set<string>([...override.ids].filter((id) => valid.has(id)));
     }
-    // After first interaction: existing behavior. Prune invalid ids in
-    // place; if the entire selection became invalid (e.g. year switch),
-    // re-anchor to the default.
-    const valid = new Set(mergedChannels.map((c) => c.channelId));
-    let dropped = false;
-    const pruned = new Set<string>();
-    for (const id of selectedChannelIds) {
-      if (valid.has(id)) pruned.add(id);
-      else dropped = true;
-    }
-    if (pruned.size === 0 && mergedChannels.length > 0) {
-      setSelectedChannelIds(computeDefault());
-    } else if (dropped) {
-      setSelectedChannelIds(pruned);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelKey, loading]);
+    return defaultSelection;
+  }, [override, channelKey, mergedChannels, defaultSelection]);
+
+  // Apply a user change: store it as an override against the current dataset.
+  const applySelection = (ids: Set<string>) => {
+    setOverride({ key: channelKey, ids });
+  };
 
   // Channels selected for rendering, in the same sort order as the
   // dropdown so colors and bar order match across both cards.
@@ -345,21 +341,16 @@ export default function YearLeadCharts({
   const priorYearKey = hasPriorYear ? String(priorYear) : '';
 
   const toggleChannel = (id: string) => {
-    userTouchedSelection.current = true;
-    setSelectedChannelIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    const next = new Set<string>(selectedChannelIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    applySelection(next);
   };
   const selectAll = () => {
-    userTouchedSelection.current = true;
-    setSelectedChannelIds(new Set(mergedChannels.map((c) => c.channelId)));
+    applySelection(new Set(mergedChannels.map((c) => c.channelId)));
   };
   const clearAll = () => {
-    userTouchedSelection.current = true;
-    setSelectedChannelIds(new Set());
+    applySelection(new Set());
   };
 
   return (
