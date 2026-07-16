@@ -325,7 +325,7 @@ export default function FunnelDashboardPage({
         {/*
         <ChartCard
           title="Funnel Flow"
-          subtitle="Lead cohort progression through the funnel, with channel attribution preserved end-to-end. Drop-off is the gap between each stage's incoming and outgoing edges."
+          subtitle="Cohort progression through the funnel. Channel, Leads, and MQL are unique people; HPP and later are deals (one person can source several deals), so totals are not conserved across the HPP boundary. Leads without a recorded MQL enter via 'No recorded MQL'; deals with no originating lead enter via 'Sales-sourced'. Open deals flow to an 'Open at <stage>' sink so the deal side balances."
         >
           <FunnelSankeyView
             leads={leads}

@@ -254,6 +254,23 @@ export default function FunnelSankeyView({
               // payload carries our RechartsLink shape.
               if ('channelId' in datum && 'sourceLabel' in datum) {
                 const link = datum as RechartsLink;
+                // Unit changes at HPP: Channel/Lead/MQL are unique PEOPLE; HPP
+                // and later (including open/terminal sinks) are DEALS. Decide by
+                // the target node's label since the link's numeric target index
+                // isn't the node id. Any target from HPP onward is a deal count.
+                const DEAL_TARGET_LABELS = new Set([
+                  'HPP (SQL)',
+                  'Opp (SAO)',
+                  'Pursuit',
+                  'Open at HPP',
+                  'Open at Opp',
+                  'Open at Pursuit',
+                  'Won',
+                  'Lost',
+                ]);
+                const unit = DEAL_TARGET_LABELS.has(link.targetLabel)
+                  ? 'deals'
+                  : 'people';
                 return (
                   <div
                     style={{
@@ -268,7 +285,7 @@ export default function FunnelSankeyView({
                       {link.sourceLabel} → {link.targetLabel}
                     </div>
                     <div style={{ color: CHART_COLORS.slateMuted }}>
-                      {link.channelLabel}: {link.value.toLocaleString()}
+                      {link.channelLabel}: {link.value.toLocaleString()} {unit}
                     </div>
                   </div>
                 );

@@ -1117,17 +1117,6 @@ export interface ComputeFunnelSankeyInput {
   regions?: Set<RegionKey>;
 }
 
-// Stage progression on the deal side: HPP → Opp → Pursuit → CloseWon, with
-// CloseLost as a parallel terminal reachable from any of HPP / Opp /
-// Pursuit. Order matters: it determines the "did this deal progress past
-// stage X" check and which stage's outgoing edge gets the attribution.
-const DEAL_STAGE_PROGRESSION: AttributionStageKey[] = [
-  'hpp',
-  'opp',
-  'pursuit',
-  'closeWon',
-];
-
 // Walks parent_channel_id up to the root. Returns the channel id of the
 // top-level ancestor (or the input id itself if it's already top-level).
 // Cycles are guarded against via a visited set; an unresolvable id falls
@@ -1199,47 +1188,63 @@ export function computeFunnelSankey(
   // attribution.channel_id.
   const dealsCountedViaLead = new Set<string>();
 
-  // Helper: emit the deal-stage edges for one deal (a chain of attribution
-  // rows sharing a deal_id) under the given color channel. Used both by
-  // the cohort-lead pass and the manual-entry pass.
+  // Emit the deal-stage edges for one deal (a chain of attribution rows sharing
+  // a deal_id) under the given color channel. Used by both the cohort-lead and
+  // sales-sourced passes.
+  //
+  // The deal subgraph (HPP and later) CONSERVES flow: every stage a deal reaches
+  // has exactly one outgoing link, either to the next progression stage, to a
+  // terminal (Won / Lost), or to an explicit OPEN sink for its highest reached
+  // stage. So "inflow to stage X == sum of X's outgoing progression + sink
+  // links". Lead/MQL upstream are unique-person counts and are NOT forced to
+  // conserve across the person-to-deal boundary at HPP.
   const emitDealEdges = (
     dealAttrs: Attribution[],
     colorChannelId: string,
   ): void => {
     const stageSet = new Set(dealAttrs.map((a) => a.stage_key));
-    // Walk the linear progression first to emit "stage → next stage"
-    // edges for every consecutive pair the deal hit.
-    for (let i = 0; i < DEAL_STAGE_PROGRESSION.length - 1; i++) {
-      const from = DEAL_STAGE_PROGRESSION[i];
-      const to = DEAL_STAGE_PROGRESSION[i + 1];
+    const reached = (['hpp', 'opp', 'pursuit'] as const).filter((s) =>
+      stageSet.has(s),
+    );
+    // Highest progression stage the deal reached among the open stages.
+    const highestOpen = reached.length ? reached[reached.length - 1] : null;
+
+    // Progression edges between consecutive open stages the deal hit.
+    const openProgression: AttributionStageKey[] = ['hpp', 'opp', 'pursuit'];
+    for (let i = 0; i < openProgression.length - 1; i++) {
+      const from = openProgression[i];
+      const to = openProgression[i + 1];
       if (stageSet.has(from) && stageSet.has(to)) {
         bumpEdge(`stage:${from}`, `stage:${to}`, colorChannelId);
       }
     }
-    // closeLost branches: the deal terminated at whichever was its
-    // highest progression stage in {hpp, opp, pursuit}. We pick the
-    // highest such stage from the deal's stage set; that's the stage
-    // whose outgoing → closeLost edge the deal contributes to.
-    if (stageSet.has('closeLost')) {
-      let lostFrom: AttributionStageKey | null = null;
-      for (const s of ['pursuit', 'opp', 'hpp'] as const) {
-        if (stageSet.has(s)) {
-          lostFrom = s;
-          break;
-        }
-      }
-      if (lostFrom) {
-        bumpEdge(
-          `stage:${lostFrom}`,
-          'terminal:closeLost',
-          colorChannelId,
-        );
-      }
+
+    // Terminal or open sink from the deal's highest reached stage. Exactly one
+    // of these fires, so the highest stage's outflow always equals its inflow.
+    if (stageSet.has('closeWon')) {
+      // Progressed to won: pursuit -> won (or the highest open -> won).
+      const from = highestOpen ?? 'pursuit';
+      bumpEdge(`stage:${from}`, 'terminal:closeWon', colorChannelId);
+    } else if (stageSet.has('closeLost')) {
+      const from = highestOpen ?? 'hpp';
+      bumpEdge(`stage:${from}`, 'terminal:closeLost', colorChannelId);
+    } else if (highestOpen) {
+      // Still open: sink to the explicit "Open at <stage>" node so the deal is
+      // accounted for and the stage conserves.
+      bumpEdge(`stage:${highestOpen}`, `open:${highestOpen}`, colorChannelId);
     }
-    // closeWon branch: handled implicitly by the linear progression above
-    // (pursuit → closeWon). We retarget that edge to the dedicated
-    // terminal node so closeWon and closeLost render side-by-side at the
-    // right edge instead of closeWon being a generic stage column.
+  };
+
+  // Route a deal into HPP through exactly ONE ingress, then emit its stage
+  // edges. `hppSource` is the node feeding HPP: an MQL node, a "no recorded
+  // MQL" node, or the sales-sourced node.
+  const enterHppAndEmit = (
+    hppSource: string,
+    dealAttrs: Attribution[],
+    colorChannelId: string,
+  ): void => {
+    bumpEdge(hppSource, 'stage:hpp', colorChannelId);
+    emitDealEdges(dealAttrs, colorChannelId);
   };
 
   // ---------- Pass 1: cohort leads ----------
@@ -1275,35 +1280,35 @@ export function computeFunnelSankey(
       dealsForLead.set(key, arr);
     }
 
+    // A lead reaching MQL is a unique-person edge; emit once per lead, not per
+    // deal, so the MQL node keeps a person count.
+    const leadReachedMql = firstMqlDate(lead) !== null;
+
     for (const [dealKey, dealAttrs] of dealsForLead) {
       const stageSet = new Set(dealAttrs.map((a) => a.stage_key));
-      // MQL → HPP edge: the lead is in the cohort, reached MQL OR went
-      // straight to HPP without a stored MQL transition. We emit the
-      // edge whenever any HPP attribution exists for this lead (matches
-      // the spec: "leads in the cohort that have a downstream HPP
-      // attribution row").
       if (stageSet.has('hpp')) {
-        bumpEdge('stage:mql', 'stage:hpp', topId);
+        // A deal enters HPP once, through the MQL node if the lead has recorded
+        // MQL history, otherwise through the explicit "No recorded MQL" node.
+        // A lead with an HPP deal but NO MQL history must NOT create an
+        // MQL -> HPP edge (M5a).
+        const hppSource = leadReachedMql ? 'stage:mql' : 'stage:no-mql';
+        enterHppAndEmit(hppSource, dealAttrs, topId);
       }
-      emitDealEdges(dealAttrs, topId);
-      // Track the deal so the manual-entry pass below skips it.
+      // Track the deal so the sales-sourced pass below skips it.
       if (dealAttrs.some((a) => a.deal_id)) {
         dealsCountedViaLead.add(dealKey);
       }
     }
   }
 
-  // ---------- Pass 2: manual-entry deals (no lead) ----------
+  // ---------- Pass 2: sales-sourced deals (no lead) ----------
+  // These have no originating lead, so they enter the funnel at HPP through the
+  // dedicated "Sales-sourced" node (M5b). In current production EVERY deal is
+  // leadless, so this is the primary entry path, not an edge case.
   for (const [dealId, dealAttrs] of attrsByDealId) {
     if (dealsCountedViaLead.has(dealId)) continue;
-    // A manual-entry deal has all its attributions with lead_id = null.
-    // If ANY attribution in the chain has a lead_id, this is a
-    // lead-sourced deal that should have been counted in Pass 1; skip.
     if (dealAttrs.some((a) => a.lead_id)) continue;
 
-    // Filter by the HPP row's period (the entry-point row) and the
-    // deal's canonical region derived from REGION_STAGE_PRIORITY so
-    // a chain reads the same region everywhere.
     const hpp = dealAttrs.find((a) => a.stage_key === 'hpp');
     if (!hpp) continue; // chains without an HPP entry don't enter the Sankey
     if (!matchesRegionFilter(deriveDealRegion(dealAttrs), regions)) continue;
@@ -1313,15 +1318,12 @@ export function computeFunnelSankey(
     if (!hpp.channel_id) continue;
 
     const topId = resolveTopLevelChannelId(hpp.channel_id, channelById);
-
-    // Channel → HPP direct (skips Leads + MQL columns per spec).
-    bumpEdge(`channel:${topId}`, 'stage:hpp', topId);
-    emitDealEdges(dealAttrs, topId);
+    enterHppAndEmit('source:sales', dealAttrs, topId);
   }
 
-  // Pass 2b: HPP rows that lack a deal_id entirely (one-off attribution
-  // rows with no chain). attrsByDealId already covers chains; these
-  // single rows would otherwise fall through silently.
+  // Pass 2b: HPP rows that lack a deal_id entirely (one-off rows, no chain).
+  // Also sales-sourced, so they enter through the same node and take an open
+  // HPP sink (a lone HPP row has no progression).
   for (const a of attributions) {
     if (a.lead_id) continue;
     if (a.deal_id) continue;
@@ -1332,23 +1334,11 @@ export function computeFunnelSankey(
     }
     if (!a.channel_id) continue;
     const topId = resolveTopLevelChannelId(a.channel_id, channelById);
-    bumpEdge(`channel:${topId}`, 'stage:hpp', topId);
+    enterHppAndEmit('source:sales', [a], topId);
   }
 
-  // The progression's last hop (pursuit → closeWon) needs to retarget to
-  // the terminal:closeWon node so closeWon stacks alongside closeLost on
-  // the right edge instead of being a generic mid-funnel stage. Rewrite
-  // any edge whose target is "stage:closeWon" to "terminal:closeWon".
-  for (const [key, edge] of edgeMap) {
-    if (edge.target === 'stage:closeWon') {
-      edgeMap.delete(key);
-      edge.target = 'terminal:closeWon';
-      const newKey = `${edge.source}|${edge.target}|${edge.channelId}`;
-      const merged = edgeMap.get(newKey);
-      if (merged) merged.value += edge.value;
-      else edgeMap.set(newKey, edge);
-    }
-  }
+  // emitDealEdges targets terminal:closeWon directly, so no post-hoc retarget
+  // is needed.
 
   // ---------- Build the node list ----------
   // Order is load-bearing: Recharts assigns column indexes in the order
@@ -1361,10 +1351,9 @@ export function computeFunnelSankey(
     nodes.push(n);
   };
 
-  // Channels column: every top-level channel, in the same order as the
-  // grid. We always emit a node so an inactive channel still anchors the
-  // column visually; if it has no edges, the renderer will hide it via
-  // the empty-data guard.
+  // Channels column: every top-level channel, in grid order. Always emitted so
+  // an inactive channel still anchors the column; edgeless nodes are hidden by
+  // the renderer's empty-data guard.
   for (const ch of topLevelChannels) {
     pushNode({
       id: `channel:${ch.id}`,
@@ -1374,12 +1363,17 @@ export function computeFunnelSankey(
     });
   }
 
-  // Stage columns in funnel order. Closed Won and Closed Lost are the
-  // two terminal nodes — they go last so they share the rightmost
-  // column.
-  const stageNodes: { id: string; label: string; key: FunnelStageKey }[] = [
+  // Sales-sourced entry: leadless deals enter here (upstream of HPP, alongside
+  // the channel column since they have no channel-to-lead flow).
+  pushNode({ id: 'source:sales', label: 'Sales-sourced', kind: 'stage' });
+
+  // Person-side stages (unique people). "No recorded MQL" sits between MQL and
+  // HPP as the ingress for cohort leads whose deal reached HPP without an MQL
+  // history entry.
+  const stageNodes: { id: string; label: string; key?: FunnelStageKey }[] = [
     { id: 'stage:lead', label: 'Leads', key: 'lead' },
     { id: 'stage:mql', label: 'MQL', key: 'mql' },
+    { id: 'stage:no-mql', label: 'No recorded MQL' },
     { id: 'stage:hpp', label: 'HPP (SQL)', key: 'hpp' },
     { id: 'stage:opp', label: 'Opp (SAO)', key: 'opp' },
     { id: 'stage:pursuit', label: 'Pursuit', key: 'pursuit' },
@@ -1387,15 +1381,21 @@ export function computeFunnelSankey(
   for (const s of stageNodes) {
     pushNode({ id: s.id, label: s.label, kind: 'stage', stageKey: s.key });
   }
+
+  // Open sinks: a deal still open at a stage flows to its "Open at <stage>"
+  // node so the deal subgraph conserves (Section 4.5). Terminals last.
+  pushNode({ id: 'open:hpp', label: 'Open at HPP', kind: 'terminal' });
+  pushNode({ id: 'open:opp', label: 'Open at Opp', kind: 'terminal' });
+  pushNode({ id: 'open:pursuit', label: 'Open at Pursuit', kind: 'terminal' });
   pushNode({
     id: 'terminal:closeWon',
-    label: 'Closed Won',
+    label: 'Won',
     kind: 'terminal',
     stageKey: 'closeWon',
   });
   pushNode({
     id: 'terminal:closeLost',
-    label: 'Closed Lost',
+    label: 'Lost',
     kind: 'terminal',
     stageKey: 'closeLost',
   });
