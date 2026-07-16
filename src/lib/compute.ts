@@ -2358,31 +2358,38 @@ export function computeChannelSpend(
     }
   }
 
-  // --- 7. Build per-channel rows. allocatedCost handles the
-  //        parent-cost-only case: when a parent has direct cost and
-  //        its direct child has none, each child gets a proportional
-  //        slice of the parent's cost based on the child's region-
-  //        filtered lead share. We compute that per parent and fan
-  //        out to children.
+  // --- 7. Distribute parent-only budget down to descendants, and track how
+  //        much of each channel's OWN direct cost was successfully distributed.
+  //        See the spend contract (CLEANUP_PLAN_EXECUTION.md Section 8):
+  //
+  //          retained direct cost = direct cost - distributed own direct cost
+  //          rolled allocated cost = retained direct + sum(child rolled)
+  //
+  //        allocatedCost starts as each channel's own direct cost. When a
+  //        parent's budget is distributed to descendants by lead share, we ADD
+  //        the slice to each descendant AND record the distributed amount on the
+  //        parent, so the roll-up (below) can subtract it and never double-count.
   const allocatedCost = new Map<string, number>();
   for (const channel of channels) {
     allocatedCost.set(channel.id, directCost.get(channel.id) ?? 0);
   }
+  // How much of a channel's own direct cost flowed OUT to descendants. Whatever
+  // is not distributed stays retained on the channel itself.
+  const distributedOwnCost = new Map<string, number>();
   for (const channel of channels) {
     const parentCost = directCost.get(channel.id) ?? 0;
     if (parentCost <= 0) continue;
     const childIds = childrenByParent.get(channel.id) ?? [];
     if (childIds.length === 0) continue;
-    // Only allocate when at least one direct child has zero direct
-    // cost (the Content Syndication shape). Otherwise the parent's
-    // cost reads as a separate aggregate and doesn't flow down.
+    // Only distribute when NO direct child has its own direct cost. When a
+    // child carries its own budget, the parent's cost is a separate aggregate
+    // that stays retained on the parent and is added (not overwritten) at
+    // roll-up. This preserves the parent-plus-child sum (M2a).
     const anyChildDirect = childIds.some(
       (cid) => (directCost.get(cid) ?? 0) > 0,
     );
     if (anyChildDirect) continue;
-    // Sum descendant leads, not just direct-child leads, so a
-    // grandchild's leads still pull their share. childrenByParent
-    // walk via BFS.
+    // Descendant leads (BFS), so a grandchild's leads still pull a share.
     const descendants = new Set<string>();
     let frontier = [...childIds];
     while (frontier.length) {
@@ -2396,6 +2403,8 @@ export function computeChannelSpend(
     }
     let totalLeads = 0;
     for (const id of descendants) totalLeads += leadsByChannel.get(id) ?? 0;
+    // No descendant leads means nothing to distribute: the parent RETAINS its
+    // full direct cost (do not zero it out).
     if (totalLeads === 0) continue;
     for (const id of descendants) {
       const share = (leadsByChannel.get(id) ?? 0) / totalLeads;
@@ -2404,6 +2413,8 @@ export function computeChannelSpend(
         (allocatedCost.get(id) ?? 0) + parentCost * share,
       );
     }
+    // The whole parent budget was distributed across descendants.
+    distributedOwnCost.set(channel.id, parentCost);
   }
 
   // --- 8. Materialize rows.
@@ -2457,23 +2468,26 @@ export function computeChannelSpend(
 
   // --- 9. Roll up sub-channel metrics to their parents.
   //
-  // A parent's displayed value = sum of its direct children's (already
-  // rolled-up) values. We walk post-order so deeper subtrees aggregate
-  // before their ancestors. `cost` (direct only) is intentionally left
-  // alone so callers that sum direct cost across rows stay
-  // double-count-free; the displayed Cost column reads `allocatedCost`.
+  // A parent's displayed value = its OWN contribution + the sum of its direct
+  // children's (already rolled-up) values. We walk post-order so deeper
+  // subtrees aggregate before their ancestors. `cost` (direct only) is left
+  // alone so callers that sum direct cost across rows stay double-count-free;
+  // the displayed Cost column reads `allocatedCost`.
   //
-  // Content Syndication case: parent.allocatedCost was already its
-  // directCost, and children's allocatedCost slices sum to that same
-  // directCost (because the redistribution loop above fully
-  // re-allocates the parent's budget). Overwriting parent.allocatedCost
-  // with sum-of-children yields the same number, so this is a no-op
-  // for that shape.
+  // For allocatedCost the parent contributes its RETAINED direct cost (own
+  // direct cost minus whatever was distributed to descendants), per the spend
+  // contract (Section 8):
   //
-  // Events case: parent.allocatedCost was 0 and children carry their
-  // own direct costs. After this pass, parent.allocatedCost equals the
-  // sum of its event children's spend, which is what the user expects
-  // when looking at the Events row.
+  //   rolled allocated = retained direct + sum(child rolled allocated)
+  //
+  //   - Distributed-down shape (e.g. Content Syndication): the parent's whole
+  //     budget went to children, so retained = 0 and the parent reads the sum
+  //     of the slices, which equals its budget. No double count.
+  //   - Zero-descendant-lead shape: nothing distributed, retained = full budget,
+  //     children contribute 0, so the parent keeps its budget instead of zeroing.
+  //   - Parent-plus-child-direct shape (M2a): allocation is skipped, retained =
+  //     the parent's own budget, and the child's own budget rolls up on top, so
+  //     the parent shows the sum of both.
   const rowsById = new Map<string, ChannelSpendBreakdown>();
   for (const r of out) rowsById.set(r.channelId, r);
   const rolledUp = new Set<string>();
@@ -2485,12 +2499,16 @@ export function computeChannelSpend(
     for (const kid of kids) rollupRow(kid);
     const r = rowsById.get(channelId);
     if (!r) return;
-    let allocCost = 0;
-    let leads = 0;
-    let mqls = 0;
-    let opps = 0;
-    let pipe = 0;
-    let won = 0;
+    // Retained direct cost: the channel's own direct cost that was NOT
+    // distributed to descendants.
+    const own = directCost.get(channelId) ?? 0;
+    const distributed = distributedOwnCost.get(channelId) ?? 0;
+    let allocCost = own - distributed;
+    let leads = leadsByChannel.get(channelId) ?? 0;
+    let mqls = mqlsByChannel.get(channelId) ?? 0;
+    let opps = firstTouchOpps.get(channelId) ?? 0;
+    let pipe = pipelineByChannel.get(channelId) ?? 0;
+    let won = wonByChannel.get(channelId) ?? 0;
     for (const kid of kids) {
       const cr = rowsById.get(kid);
       if (!cr) continue;
