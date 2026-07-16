@@ -42,6 +42,7 @@ import type {
   MonthlyLeadsForYear,
 } from '../../lib/compute';
 import ChartCard from './ChartCard';
+import QuarterlyBackfillNote from './QuarterlyBackfillNote';
 
 interface YearLeadChartsProps {
   data: MonthlyLeadsForYear;
@@ -336,7 +337,7 @@ export default function YearLeadCharts({
 
   const subtitle = `All ${year} months. Region filter applies.`;
   const totalsSubtitle = hasPriorYear
-    ? `All ${year} months vs ${priorYear}. ${priorYear} may reflect spread quarterly actuals. Region filter applies.`
+    ? `All ${year} months vs ${priorYear}. Monthly bars show source-dated leads only; any quarterly backfill is noted above, not plotted. Region filter applies.`
     : subtitle;
   const channelCountSubtitle = `${selectedChannels.length} channel${selectedChannels.length === 1 ? '' : 's'} selected. Region filter applies.`;
   const hasAnyData = data.byChannel.length > 0 || (priorYearByChannel?.length ?? 0) > 0;
@@ -364,6 +365,7 @@ export default function YearLeadCharts({
   return (
     <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <ChartCard title="Total Leads per Month" subtitle={totalsSubtitle}>
+        <QuarterlyBackfillNote fallback={data.quarterlyFallback} />
         {loading ? (
           <LoadingPlaceholder tall />
         ) : data.byChannel.length > 0 ? (
