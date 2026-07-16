@@ -158,12 +158,9 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   //    intentionally invisible from the grid; the Opportunity Influence
   //    tabs on the Opportunities sub-tab surface them.
   //
-  //    Cells covered here populate handledByLeads so the manualActuals
-  //    fallback below knows not to also add a funnel_actuals lead/mql
-  //    row for the same (channel, year, period, stage) — without the
-  //    dedupe, 2025-style fallback rows would stack on top of real lead
-  //    counts in years where both exist.
-  const handledByLeads = new Set<string>();
+  //    The manual fallback below dedupes against sourceCoverage (built from raw
+  //    records before filtering), not against what these loops land, so a
+  //    filtered-to-zero source cell is still treated as covered.
   let unassignedLeadCount = 0;
   for (const l of leads) {
     if (!matchesRegionFilter(l.region, regions)) continue;
@@ -180,9 +177,6 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
         if (row) {
           const cell = row.cells.lead;
           cell.actual = (cell.actual ?? 0) + 1;
-          handledByLeads.add(
-            attribKey(l.source_channel_id, leadBucket.year, leadBucket.quarter, 'lead'),
-          );
         }
       }
     }
@@ -200,9 +194,6 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
           if (row) {
             const cell = row.cells.mql;
             cell.actual = (cell.actual ?? 0) + 1;
-            handledByLeads.add(
-              attribKey(l.source_channel_id, mqlBucket.year, mqlBucket.quarter, 'mql'),
-            );
           }
         }
       }
@@ -260,7 +251,6 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   // Count attributions per (channel, year, period, stage). One attribution row
   // contributes 1 to its leaf channel's stage cell. Channel rollup to parents
   // happens later in step 5. Region filter applied per attribution.
-  const handledByAttribution = new Set<string>();
   for (const a of attributions) {
     if (!a.channel_id) continue;
     if (!matchesRegionFilter(a.region, regions)) continue;
@@ -278,24 +268,51 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     if (!row) continue;
     const cell = row.cells[a.stage_key];
     cell.actual = (cell.actual ?? 0) + 1;
-    handledByAttribution.add(
+  }
+
+  // Manual fallback (M3 fix): only contribute when no SOURCE RECORD covers this
+  // (channel, year, quarter, stage) cell. Coverage is built from the raw lead
+  // and attribution records BEFORE the region filter and the HPP-cohort gate,
+  // so a cell whose source data was filtered or gated to zero is still "covered"
+  // and does NOT get a manual value layered on top of a real-but-hidden zero.
+  //
+  // handledByLeads / handledByAttribution mark what actually LANDED after
+  // filtering (used elsewhere); sourceCoverage marks what EXISTS at source.
+  // Coverage is evaluated per STORED quarter even when the view is the full year,
+  // so a Q1 manual actual can't sneak in against a real Q1 source record just
+  // because the year view aggregates.
+  //
+  // Proxy limitation (Section 4.3): with no import-completeness table, a truly
+  // empty source period is indistinguishable from an unimported one. Presence of
+  // any eligible source record is the coverage signal for this cleanup.
+  const sourceCoverage = new Set<string>();
+  for (const l of leads) {
+    if (!l.source_channel_id) continue;
+    const lb = quarterOfIsoDate(l.marketing_sourced_date);
+    if (lb) {
+      sourceCoverage.add(attribKey(l.source_channel_id, lb.year, lb.quarter, 'lead'));
+      const mqlIso = firstMqlDate(l);
+      const mb = mqlIso ? quarterOfIsoDate(mqlIso) : null;
+      if (mb) {
+        sourceCoverage.add(attribKey(l.source_channel_id, mb.year, mb.quarter, 'mql'));
+      }
+    }
+  }
+  for (const a of attributions) {
+    if (!a.channel_id) continue;
+    sourceCoverage.add(
       attribKey(a.channel_id, a.year, a.period_index, a.stage_key),
     );
   }
 
-  // Manual fallback: only contribute when no compute pass already covers
-  // this exact (channel, year, period, stage) cell. For HPP+ that means
-  // attributions win; for lead/mql that means the leads pass wins.
   for (const m of manualActuals) {
     if (m.actual === null || m.actual === undefined) continue;
     const bucket = { year: m.year, quarter: m.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
     const key = attribKey(m.channel_id, m.year, m.period_index, m.stage_key);
-    if (m.stage_key === 'lead' || m.stage_key === 'mql') {
-      if (handledByLeads.has(key)) continue;
-    } else if (handledByAttribution.has(key)) {
-      continue;
-    }
+    // Suppress the fallback whenever a source record exists for this exact
+    // stored cell, whether or not that record survives the current view filters.
+    if (sourceCoverage.has(key)) continue;
     const row = rowMap.get(m.channel_id);
     if (!row) continue;
     const cell = row.cells[m.stage_key];
@@ -925,14 +942,29 @@ export interface MonthlyChannelLeads {
   perMonth: number[];   // length 12, index 0 = Jan, 11 = Dec
 }
 
+// A quarterly manual-actual lead count that is NOT distributed into monthly
+// values (M4 fix). It is surfaced separately so the UI can show it as a labeled
+// count annotation ("Q1 Lead actual: 30 (quarterly backfill)"), never as a
+// monthly bar, point, or currency.
+export interface QuarterlyLeadFallback {
+  channelId: string;
+  channelName: string;
+  quarter: PeriodIndex; // 1..4
+  value: number; // the quarterly lead count
+}
+
 export interface MonthlyLeadsForYear {
   // One entry per top-level channel with >= 1 lead in the year.
   // Sorted by year total descending so legend order is stable.
   byChannel: MonthlyChannelLeads[];
   // Length 12. Sum across all channels (including the unsorted set,
   // which by construction equals the sum of byChannel rows since
-  // unattributed leads are excluded upstream).
+  // unattributed leads are excluded upstream). Contains ONLY source-dated
+  // monthly lead counts; quarterly backfill is never spread into it.
   monthTotals: number[];
+  // Quarterly manual actuals with NO real-lead coverage for that
+  // (top-level channel, quarter). Presented separately by the UI (Step 7).
+  quarterlyFallback: QuarterlyLeadFallback[];
 }
 
 export interface ComputeMonthlyLeadsForYearInput {
@@ -947,21 +979,6 @@ export interface ComputeMonthlyLeadsForYearInput {
   manualActuals?: FunnelActual[];
 }
 
-// Spread a quarterly integer count across its three months. The
-// spec's worked example pins the direction: 245 splits as 82/82/81
-// across Jan/Feb/Mar (front-loaded ceilings), not 81/81/83 or
-// 81/82/82. So the first `remainder` months get +1 and the rest
-// take the floor. Returns [m0, m1, m2] aligned to the quarter's
-// months.
-function spreadQuarterlyToMonths(value: number): [number, number, number] {
-  const base = Math.floor(value / 3);
-  const remainder = value - base * 3; // 0, 1, or 2
-  return [
-    remainder > 0 ? base + 1 : base,
-    remainder > 1 ? base + 1 : base,
-    base,
-  ];
-}
 
 export function computeMonthlyLeadsForYear(
   input: ComputeMonthlyLeadsForYearInput,
@@ -974,14 +991,27 @@ export function computeMonthlyLeadsForYear(
   const perChannel = new Map<string, number[]>();
   const monthTotals = new Array<number>(12).fill(0);
 
-  // Dedupe key shared between the leads pass and the funnel_actuals
-  // fallback. Same shape as computeGrid's attribKey, but keyed on
-  // month index (0..11) instead of period_index since this output
-  // is monthly.
-  const cellKey = (cid: string, mIdx: number): string =>
-    `${cid}\x1f${year}\x1f${mIdx}\x1f${'lead'}`;
-  const handledByLeads = new Set<string>();
+  // M4 fix: source coverage is keyed at (top-level channel, QUARTER) grain,
+  // built from real leads BEFORE the region filter. If any real lead covers a
+  // quarter, the whole quarterly manual fallback for that channel+quarter is
+  // suppressed. We never spread a quarterly value into invented months.
+  //
+  // Coverage is region-unfiltered on purpose (Section 4.3): a real lead that a
+  // region toggle hides still means the period is "imported", so a backfill must
+  // not fill the visible gap.
+  const coverageKey = (cid: string, quarter: number): string =>
+    `${cid}\x1f${quarter}`;
+  const sourceCoverage = new Set<string>();
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    const lm = monthOfIsoDate(lead.marketing_sourced_date);
+    if (!lm || lm.year !== year) continue;
+    const topId = resolveTopLevelChannelId(lead.source_channel_id, channelById);
+    const quarter = Math.floor((lm.month - 1) / 3) + 1;
+    sourceCoverage.add(coverageKey(topId, quarter));
+  }
 
+  // Monthly bars: source-dated real leads only (region-filtered for display).
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
     if (!matchesRegionFilter(lead.region, regions)) continue;
@@ -999,37 +1029,25 @@ export function computeMonthlyLeadsForYear(
     const idx = leadMonth.month - 1;
     row[idx] += 1;
     monthTotals[idx] += 1;
-    handledByLeads.add(cellKey(topId, idx));
   }
 
-  // Historical-year fallback: spread quarterly funnel_actuals leads
-  // across their three months. A cell already covered by real leads
-  // is skipped so years with both data sources don't double-count.
+  // Quarterly fallback: collected SEPARATELY, never added to monthly arrays. A
+  // (channel, quarter) with any real-lead coverage is suppressed entirely.
+  const quarterlyFallback: QuarterlyLeadFallback[] = [];
   for (const m of manualActuals ?? []) {
     if (m.stage_key !== 'lead') continue;
     if (m.year !== year) continue;
     if (m.actual === null || m.actual === undefined) continue;
     const value = Math.round(m.actual);
     if (value <= 0) continue;
-    const quarter = m.period_index; // 1..4
-    const monthsForQuarter: [number, number, number] = [
-      (quarter - 1) * 3,
-      (quarter - 1) * 3 + 1,
-      (quarter - 1) * 3 + 2,
-    ];
     const topId = resolveTopLevelChannelId(m.channel_id, channelById);
-    const spread = spreadQuarterlyToMonths(value);
-    let row = perChannel.get(topId);
-    if (!row) {
-      row = new Array<number>(12).fill(0);
-      perChannel.set(topId, row);
-    }
-    for (let i = 0; i < 3; i++) {
-      const monthIdx = monthsForQuarter[i];
-      if (handledByLeads.has(cellKey(topId, monthIdx))) continue;
-      row[monthIdx] += spread[i];
-      monthTotals[monthIdx] += spread[i];
-    }
+    if (sourceCoverage.has(coverageKey(topId, m.period_index))) continue;
+    quarterlyFallback.push({
+      channelId: topId,
+      channelName: channelById.get(topId)?.name ?? 'Unknown',
+      quarter: m.period_index,
+      value,
+    });
   }
 
   const byChannel: MonthlyChannelLeads[] = [];
@@ -1048,7 +1066,7 @@ export function computeMonthlyLeadsForYear(
     return bTot - aTot;
   });
 
-  return { byChannel, monthTotals };
+  return { byChannel, monthTotals, quarterlyFallback };
 }
 
 // ---------- Funnel Flow Sankey (Channel Influence chart) ----------
