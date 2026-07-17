@@ -7,7 +7,7 @@ import {
 } from '../constants/regions';
 import {
   parseEventActivations,
-  type EventActivation,
+  type EventActivationValue,
 } from '../constants/eventActivations';
 
 export interface ParsedCsv {
@@ -37,7 +37,7 @@ export interface LeadCandidate {
   // contains only unknown values. Letting this be `undefined` would
   // make field_locks behave inconsistently between leads with a
   // mapped-but-empty column and leads from a CSV that didn't map it.
-  event_activations?: EventActivation[];
+  event_activations?: EventActivationValue[];
 }
 
 export type MappingValue = string | { primary: string; fallback?: string };
@@ -74,6 +74,10 @@ const COALESCE_FIELDS: ReadonlySet<MappableField> = new Set([
   'country',
   'lead_source',
   'current_stage',
+  // SFDC exports "Contact: Event Activation" and "Lead: Event
+  // Activation" (one per record type). Coalesce Contact-first, Lead
+  // fallback, matching the other prefixed fields.
+  'event_activations',
 ]);
 
 export function isCoalesceField(f: MappableField): boolean {
@@ -182,7 +186,7 @@ export function coalesceRows(
     // re-import). Empty cell → empty array, which is semantically
     // "no activations" and will overwrite stored values for unlocked
     // leads (intended; that's how the lock contract works elsewhere).
-    let eventActivations: EventActivation[] | undefined;
+    let eventActivations: EventActivationValue[] | undefined;
     if (mapping.event_activations) {
       const raw = readMapped(row, mapping.event_activations) ?? '';
       eventActivations = parseEventActivations(raw);
@@ -305,14 +309,18 @@ export function suggestMapping(headers: string[]): ColumnMapping {
     'marketing_sourced_date',
     'parent_campaign',
     'sub_campaign',
-    'event_activations',
   ] as MappableField[]) {
     const found = findExact(headers, HEADER_ALIASES[f]);
     if (found) out[f] = found;
   }
 
   // Coalesced fields: prefer Contact: prefix first, fall back to Lead: prefix.
-  for (const f of ['country', 'lead_source', 'current_stage'] as MappableField[]) {
+  for (const f of [
+    'country',
+    'lead_source',
+    'current_stage',
+    'event_activations',
+  ] as MappableField[]) {
     const aliases = HEADER_ALIASES[f];
     const primary =
       findHeader(headers, aliases, CONTACT_PREFIX) ?? findExact(headers, aliases);

@@ -8,8 +8,8 @@ import {
 import { STAGE_LABELS, STAGE_ORDER } from '../../constants/stages';
 import { REGIONS, type RegionKey } from '../../constants/regions';
 import {
-  EVENT_ACTIVATION_VALUES,
-  type EventActivation,
+  EVENT_ACTIVATION_ALL,
+  type EventActivationValue,
 } from '../../constants/eventActivations';
 import { formatDateTime } from '../../lib/dates';
 import LockIcon from '../common/LockIcon';
@@ -189,22 +189,23 @@ export default function LeadFieldRow({
       );
     }
     if (kind === 'eventActivations') {
-      // Multi-select: 4 checkboxes inline, one per known value. Storage
-      // shape is string[], so commit a fresh sorted array on every
-      // toggle (sorted in EVENT_ACTIVATION_VALUES order so diff
-      // comparisons against re-imports stay stable).
+      // Multi-select: 5 checkboxes inline, one per known value (the 4
+      // activation types plus Registered). Storage shape is string[],
+      // so commit a fresh sorted array on every toggle (sorted in
+      // EVENT_ACTIVATION_ALL order so diff comparisons against
+      // re-imports stay stable).
       const current = (rawValue as string[] | null) ?? [];
       const currentSet = new Set(current);
-      const toggle = (val: EventActivation) => {
+      const toggle = (val: EventActivationValue) => {
         const next = new Set(currentSet);
         if (next.has(val)) next.delete(val);
         else next.add(val);
-        const sorted = EVENT_ACTIVATION_VALUES.filter((v) => next.has(v));
+        const sorted = EVENT_ACTIVATION_ALL.filter((v) => next.has(v));
         void commit(sorted);
       };
       return (
         <div className="flex flex-wrap gap-x-3 gap-y-1">
-          {EVENT_ACTIVATION_VALUES.map((v) => (
+          {EVENT_ACTIVATION_ALL.map((v) => (
             <label
               key={v}
               className="inline-flex items-center gap-1.5 text-sm text-charcoal cursor-pointer"

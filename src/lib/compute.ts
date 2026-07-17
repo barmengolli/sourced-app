@@ -31,7 +31,9 @@ import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
 import { VELOCITY_THRESHOLDS } from '../constants/velocityThresholds';
 import {
   EVENT_ACTIVATION_VALUES,
+  EVENT_ACTIVATION_ALL,
   type EventActivation,
+  type EventActivationValue,
 } from '../constants/eventActivations';
 
 export type PeriodFilter = 'year' | 'Q1' | 'Q2' | 'Q3' | 'Q4';
@@ -1976,10 +1978,10 @@ export interface EventActivationCounts {
   channelId: string;
   channelName: string;
   totalContacts: number;        // unique contacts at this event in period
-  withAnyActivation: number;    // contacts with >= 1 activation
-  perType: Record<EventActivation, number>;
+  withAnyActivation: number;    // contacts with >= 1 ACTIVE activation (excludes Registered)
+  perType: Record<EventActivationValue, number>; // includes Registered
   preAndPost: number;           // contacts with both Pre-Event and Post-Event
-  multiActivation: number;      // contacts with >= 2 activations
+  multiActivation: number;      // contacts with >= 2 active activations
 }
 
 export interface ComputeEventActivationsInput {
@@ -2029,14 +2031,14 @@ export function computeEventActivations(
     channelName: string;
     totalContacts: number;
     withAnyActivation: number;
-    perType: Record<EventActivation, number>;
+    perType: Record<EventActivationValue, number>;
     preAndPost: number;
     multiActivation: number;
   }
   const tally = new Map<string, Tally>();
-  const blankPerType = (): Record<EventActivation, number> => {
-    const out = {} as Record<EventActivation, number>;
-    for (const v of EVENT_ACTIVATION_VALUES) out[v] = 0;
+  const blankPerType = (): Record<EventActivationValue, number> => {
+    const out = {} as Record<EventActivationValue, number>;
+    for (const v of EVENT_ACTIVATION_ALL) out[v] = 0;
     return out;
   };
 
@@ -2063,13 +2065,22 @@ export function computeEventActivations(
     }
     t.totalContacts += 1;
 
-    const activations = (lead.event_activations ?? []).filter((v) =>
-      (EVENT_ACTIVATION_VALUES as readonly string[]).includes(v),
-    ) as EventActivation[];
-    const set = new Set<EventActivation>(activations);
-    if (set.size >= 1) t.withAnyActivation += 1;
-    if (set.size >= 2) t.multiActivation += 1;
-    if (set.has('Pre-Event Meeting') && set.has('Post-Event Meeting')) {
+    // Recognize all values (4 active + Registered) for the per-type
+    // columns, but gate the "active" metrics on the 4 active types
+    // only. Registered contributes to its column/tile and Total
+    // Contacts, never to Active Contacts / % Active.
+    const recognized = (lead.event_activations ?? []).filter((v) =>
+      (EVENT_ACTIVATION_ALL as readonly string[]).includes(v),
+    ) as EventActivationValue[];
+    const set = new Set<EventActivationValue>(recognized);
+    const activeSet = new Set<EventActivation>(
+      recognized.filter((v) =>
+        (EVENT_ACTIVATION_VALUES as readonly string[]).includes(v),
+      ) as EventActivation[],
+    );
+    if (activeSet.size >= 1) t.withAnyActivation += 1;
+    if (activeSet.size >= 2) t.multiActivation += 1;
+    if (activeSet.has('Pre-Event Meeting') && activeSet.has('Post-Event Meeting')) {
       t.preAndPost += 1;
     }
     for (const v of set) {
