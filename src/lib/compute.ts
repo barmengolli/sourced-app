@@ -1138,6 +1138,28 @@ function resolveTopLevelChannelId(
   return channelId;
 }
 
+// The top-level channel (year prefix stripped) whose presence PROVES a deal was
+// Sales-originated. A null lead_id does NOT prove Sales origin: in the current
+// data model every deal is leadless (M7 leaves lead_id null; M8 adds the lead
+// picker), so the only positive evidence of Sales origin today is the deal's
+// channel resolving to this explicit taxonomy bucket.
+const SALES_GENERATED_CHANNEL = 'Sales Generated';
+const stripChannelYear = (name: string) => name.replace(/^\d{4}\s*-\s*/, '');
+
+// Is a deal Sales-originated? True only when its top-level channel is the
+// explicit "Sales Generated" bucket. A leadless deal on any other channel
+// (Website, Events, Marketing SDR, Content Syndication, or no channel) is NOT
+// classified as Sales-sourced; the Sankey routes it through the neutral
+// "No linked lead" node instead.
+function isSalesOriginated(
+  topLevelChannelId: string,
+  channelById: Map<string, Channel>,
+): boolean {
+  const ch = channelById.get(topLevelChannelId);
+  if (!ch) return false;
+  return stripChannelYear(ch.name) === SALES_GENERATED_CHANNEL;
+}
+
 export function computeFunnelSankey(
   input: ComputeFunnelSankeyInput,
 ): FunnelSankeyData {
@@ -1301,10 +1323,15 @@ export function computeFunnelSankey(
     }
   }
 
-  // ---------- Pass 2: sales-sourced deals (no lead) ----------
-  // These have no originating lead, so they enter the funnel at HPP through the
-  // dedicated "Sales-sourced" node (M5b). In current production EVERY deal is
-  // leadless, so this is the primary entry path, not an edge case.
+  // ---------- Pass 2: leadless deals ----------
+  // These have no linked lead in the app. A null lead_id does NOT prove Sales
+  // origin (M7 leaves every deal's lead_id null), so we classify by evidence:
+  //   - top-level channel is "Sales Generated" -> "Sales-sourced" (proven).
+  //   - anything else (Website / Events / Marketing SDR / Content Syndication /
+  //     no channel) -> "No linked lead" (neutral, no origin claimed).
+  const ingressFor = (topId: string): string =>
+    isSalesOriginated(topId, channelById) ? 'source:sales' : 'source:no-lead';
+
   for (const [dealId, dealAttrs] of attrsByDealId) {
     if (dealsCountedViaLead.has(dealId)) continue;
     if (dealAttrs.some((a) => a.lead_id)) continue;
@@ -1318,12 +1345,11 @@ export function computeFunnelSankey(
     if (!hpp.channel_id) continue;
 
     const topId = resolveTopLevelChannelId(hpp.channel_id, channelById);
-    enterHppAndEmit('source:sales', dealAttrs, topId);
+    enterHppAndEmit(ingressFor(topId), dealAttrs, topId);
   }
 
   // Pass 2b: HPP rows that lack a deal_id entirely (one-off rows, no chain).
-  // Also sales-sourced, so they enter through the same node and take an open
-  // HPP sink (a lone HPP row has no progression).
+  // Same origin classification as Pass 2; a lone HPP row takes an open HPP sink.
   for (const a of attributions) {
     if (a.lead_id) continue;
     if (a.deal_id) continue;
@@ -1334,7 +1360,7 @@ export function computeFunnelSankey(
     }
     if (!a.channel_id) continue;
     const topId = resolveTopLevelChannelId(a.channel_id, channelById);
-    enterHppAndEmit('source:sales', [a], topId);
+    enterHppAndEmit(ingressFor(topId), [a], topId);
   }
 
   // emitDealEdges targets terminal:closeWon directly, so no post-hoc retarget
@@ -1363,9 +1389,13 @@ export function computeFunnelSankey(
     });
   }
 
-  // Sales-sourced entry: leadless deals enter here (upstream of HPP, alongside
-  // the channel column since they have no channel-to-lead flow).
+  // Leadless-deal entry nodes (upstream of HPP, alongside the channel column
+  // since they have no channel-to-lead flow). "Sales-sourced" is used ONLY for
+  // deals proven Sales-originated by their channel; every other leadless deal
+  // enters through the neutral "No linked lead" node so the chart never claims
+  // a Sales origin the data does not support.
   pushNode({ id: 'source:sales', label: 'Sales-sourced', kind: 'stage' });
+  pushNode({ id: 'source:no-lead', label: 'No linked lead', kind: 'stage' });
 
   // Person-side stages (unique people). "No recorded MQL" sits between MQL and
   // HPP as the ingress for cohort leads whose deal reached HPP without an MQL

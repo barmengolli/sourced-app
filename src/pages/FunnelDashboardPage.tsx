@@ -325,7 +325,7 @@ export default function FunnelDashboardPage({
         {/*
         <ChartCard
           title="Funnel Flow"
-          subtitle="Cohort progression through the funnel. Channel, Leads, and MQL are unique people; HPP and later are deals (one person can source several deals), so totals are not conserved across the HPP boundary. Leads without a recorded MQL enter via 'No recorded MQL'; deals with no originating lead enter via 'Sales-sourced'. Open deals flow to an 'Open at <stage>' sink so the deal side balances."
+          subtitle="Cohort progression through the funnel. Channel, Leads, and MQL are unique people; HPP and later are deals (one person can source several deals), so totals are not conserved across the HPP boundary. Leads without a recorded MQL enter via 'No recorded MQL'. A leadless deal enters via 'Sales-sourced' only when its channel is Sales Generated; otherwise it enters via the neutral 'No linked lead'. Open deals flow to an 'Open at <stage>' sink so the deal side balances."
         >
           <FunnelSankeyView
             leads={leads}

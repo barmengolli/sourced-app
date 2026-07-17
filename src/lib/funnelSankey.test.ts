@@ -80,15 +80,42 @@ describe('computeFunnelSankey — source semantics (M5)', () => {
     expect(e.get('stage:no-mql->stage:hpp')).toBe(1);
   });
 
-  it('a leadless deal enters via "Sales-sourced", not from any lead node', () => {
+  it('a leadless deal on the Sales Generated channel enters via "Sales-sourced"', () => {
+    // A null lead_id alone is NOT enough; the channel must PROVE Sales origin.
+    const sales = channel({ id: 'sales', name: '2026 - Sales Generated' });
+    const attrs = [
+      attribution({ deal_id: 'd1', lead_id: null, stage_key: 'hpp', channel_id: 'sales', year: 2026, period_index: 1 }),
+    ];
+    const e = edgesOf(computeFunnelSankey({ leads: [], attributions: attrs, channels: [sales], year: 2026, filter: 'year', regions: ALL }));
+    expect(e.get('source:sales->stage:hpp')).toBe(1);
+    expect(e.get('source:no-lead->stage:hpp')).toBeUndefined();
+    expect(e.get('stage:mql->stage:hpp')).toBeUndefined();
+  });
+
+  it('a leadless deal on a NON-Sales channel enters via neutral "No linked lead", NOT Sales-sourced', () => {
+    // The bug this audit fixes: a null lead_id on a Marketing channel (Website,
+    // Events, Content Syndication, Marketing SDR) must not claim Sales origin.
+    for (const name of ['2026 - Website', '2026 - Events', '2026 - Marketing SDR', '2026 - Content Syndication']) {
+      const c = channel({ id: 'c1', name });
+      const attrs = [
+        attribution({ deal_id: 'd1', lead_id: null, stage_key: 'hpp', channel_id: 'c1', year: 2026, period_index: 1 }),
+      ];
+      const e = edgesOf(computeFunnelSankey({ leads: [], attributions: attrs, channels: [c], year: 2026, filter: 'year', regions: ALL }));
+      expect(e.get('source:no-lead->stage:hpp')).toBe(1);
+      expect(e.get('source:sales->stage:hpp')).toBeUndefined();
+    }
+  });
+
+  it('a leadless deal with no channel enters via neutral "No linked lead"', () => {
+    // No channel -> no proof of Sales origin -> neutral.
     const c = channel({ id: 'c1' });
     const attrs = [
-      attribution({ deal_id: 'd1', lead_id: null, stage_key: 'hpp', channel_id: 'c1', year: 2026, period_index: 1 }),
+      attribution({ deal_id: 'd1', lead_id: null, stage_key: 'hpp', channel_id: null, year: 2026, period_index: 1 }),
     ];
     const e = edgesOf(computeFunnelSankey({ leads: [], attributions: attrs, channels: [c], year: 2026, filter: 'year', regions: ALL }));
-    expect(e.get('source:sales->stage:hpp')).toBe(1);
-    expect(e.get('stage:mql->stage:hpp')).toBeUndefined();
-    expect(e.get('channel:c1->stage:hpp')).toBeUndefined();
+    // A null channel_id is filtered out before ingress, so no deal edge at all,
+    // and crucially it is never labelled Sales-sourced.
+    expect(e.get('source:sales->stage:hpp')).toBeUndefined();
   });
 
   it('one lead sourcing two deals enters HPP twice but counts the person once at MQL', () => {
@@ -165,7 +192,9 @@ describe('computeFunnelSankey — deal-stage conservation via sinks', () => {
     for (const node of ['stage:hpp', 'stage:opp', 'stage:pursuit']) {
       expect(nodeIn(e, node)).toBe(nodeOut(e, node));
     }
-    // 4 deals all entered HPP via sales-sourced.
-    expect(e.get('source:sales->stage:hpp')).toBe(4);
+    // 4 leadless deals on a NON-Sales channel entered via the neutral node, not
+    // Sales-sourced.
+    expect(e.get('source:no-lead->stage:hpp')).toBe(4);
+    expect(e.get('source:sales->stage:hpp')).toBeUndefined();
   });
 });
