@@ -8,6 +8,7 @@ import { useCampaignTags } from '../hooks/useCampaignTags';
 import { useChannels } from '../hooks/useChannels';
 import { useLeads } from '../hooks/useLeads';
 import { useAttributions } from '../hooks/useAttributions';
+import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { useOutreachSnapshots } from '../hooks/useOutreachSnapshots';
 import { useSixSenseSnapshots } from '../hooks/useSixSenseSnapshots';
 import { useLinkedinSnapshots } from '../hooks/useLinkedinSnapshots';
@@ -27,6 +28,9 @@ export default function CampaignsSection({
   const channels = useChannels();
   const { leads, loading: leadsLoading } = useLeads();
   const { attributions, loading: attrsLoading } = useAttributions();
+  // Touches let a campaign see deals it influenced without having sourced.
+  const { touches: attributionTouches, loading: touchesLoading } =
+    useAttributionTouches();
   const { snapshots: outreachSnapshots, loading: outreachLoading } =
     useOutreachSnapshots();
   const { snapshots: sixSenseSnapshots, loading: sixSenseLoading } =
@@ -53,12 +57,14 @@ export default function CampaignsSection({
       channels={channels}
       leads={leads}
       attributions={attributions}
+      attributionTouches={attributionTouches}
       outreachSnapshots={outreachSnapshots}
       sixSenseSnapshots={sixSenseSnapshots}
       linkedinSnapshots={linkedinSnapshots}
       loading={
         leadsLoading ||
         attrsLoading ||
+        touchesLoading ||
         outreachLoading ||
         sixSenseLoading ||
         linkedinLoading

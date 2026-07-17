@@ -4,9 +4,12 @@
 // Mirrors useSixSenseSnapshots: paged fetch, per-mount realtime channel,
 // optimistic local writes.
 //
-// The link table is 1:1 per asset (UNIQUE(asset_type, asset_ref)) so tagFor()
-// returns at most one tag for a given asset. linkAsset upserts on that key so
-// re-tagging an asset moves it to the new campaign.
+// An asset may belong to SEVERAL campaigns: the link table is keyed
+// UNIQUE(tag_id, asset_type, asset_ref), so tagsFor() returns every campaign
+// claiming an asset. linkAsset ADDS a campaign (upserting on that key, so
+// re-adding an existing link is a no-op); unlinkAsset removes ONE campaign and
+// must always be given the tag_id, or it would strip every campaign from the
+// asset. See migrations/2026-07-15_campaign_tag_links_multi_tag.sql.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -52,18 +55,20 @@ export interface UseCampaignTagsResult {
   renameTag: (id: string, to: string) => Promise<void>;
   setColor: (id: string, color: string | null) => Promise<void>;
   deleteTag: (id: string) => Promise<void>;
-  // Link ops. linkAsset moves the asset to the given tag (1:1 upsert).
+  // Link ops. linkAsset ADDS the asset to a campaign, leaving its other
+  // campaigns intact; unlinkAsset removes it from ONE campaign only.
   linkAsset: (
     tagId: string,
     assetType: CampaignAssetType,
     assetRef: string,
   ) => Promise<void>;
-  unlinkAsset: (assetType: CampaignAssetType, assetRef: string) => Promise<void>;
-  // Selectors.
-  tagFor: (
+  unlinkAsset: (
+    tagId: string,
     assetType: CampaignAssetType,
     assetRef: string,
-  ) => CampaignTag | null;
+  ) => Promise<void>;
+  // Selectors.
+  tagsFor: (assetType: CampaignAssetType, assetRef: string) => CampaignTag[];
   linksForTag: (tagId: string) => CampaignTagLink[];
 }
 
@@ -142,18 +147,11 @@ export function useCampaignTags(): UseCampaignTagsResult {
             return;
           }
           const next = payload.new as CampaignTagLink;
-          setLinks((prev) => [
-            next,
-            ...prev.filter(
-              (l) =>
-                l.id !== next.id &&
-                // Drop any stale link for the same asset (1:1 re-tag).
-                !(
-                  l.asset_type === next.asset_type &&
-                  l.asset_ref === next.asset_ref
-                ),
-            ),
-          ]);
+          // Replace by id ONLY. An asset legitimately holds several links now,
+          // so a new link must not evict its siblings: dropping same-asset
+          // links here would make an asset's other campaigns vanish for every
+          // other connected client.
+          setLinks((prev) => [next, ...prev.filter((l) => l.id !== next.id)]);
         },
       )
       .subscribe();
@@ -240,56 +238,65 @@ export function useCampaignTags(): UseCampaignTagsResult {
       assetType: CampaignAssetType,
       assetRef: string,
     ): Promise<void> => {
-      // Upsert on the (asset_type, asset_ref) unique key so re-tagging an asset
-      // moves it rather than erroring on the constraint.
+      // ADDITIVE: an asset can belong to several campaigns. Upsert on the
+      // (tag_id, asset_type, asset_ref) key so re-adding a campaign the asset
+      // already has is a no-op instead of a duplicate or a constraint error.
       const { data, error: upErr } = await supabase
         .from('campaign_tag_links')
         .upsert(
           { tag_id: tagId, asset_type: assetType, asset_ref: assetRef },
-          { onConflict: 'asset_type,asset_ref' },
+          { onConflict: 'tag_id,asset_type,asset_ref' },
         )
         .select()
         .single();
       if (upErr) throw upErr;
       const saved = data as CampaignTagLink;
-      setLinks((prev) => [
-        saved,
-        ...prev.filter(
-          (l) =>
-            !(l.asset_type === assetType && l.asset_ref === assetRef),
-        ),
-      ]);
+      // Replace by link id ONLY: this asset's other campaigns must survive.
+      setLinks((prev) => [saved, ...prev.filter((l) => l.id !== saved.id)]);
     },
     [],
   );
 
   const unlinkAsset = useCallback(
     async (
+      tagId: string,
       assetType: CampaignAssetType,
       assetRef: string,
     ): Promise<void> => {
+      // Scoped to ONE campaign. Without the tag_id filter this would strip the
+      // asset from every campaign at once.
       const { error: delErr } = await supabase
         .from('campaign_tag_links')
         .delete()
+        .eq('tag_id', tagId)
         .eq('asset_type', assetType)
         .eq('asset_ref', assetRef);
       if (delErr) throw delErr;
       setLinks((prev) =>
         prev.filter(
-          (l) => !(l.asset_type === assetType && l.asset_ref === assetRef),
+          (l) =>
+            !(
+              l.tag_id === tagId &&
+              l.asset_type === assetType &&
+              l.asset_ref === assetRef
+            ),
         ),
       );
     },
     [],
   );
 
-  const tagFor = useCallback(
-    (assetType: CampaignAssetType, assetRef: string): CampaignTag | null => {
-      const link = links.find(
-        (l) => l.asset_type === assetType && l.asset_ref === assetRef,
+  // Every campaign claiming this asset. Filters `tags` rather than mapping the
+  // links so the result inherits tag display order and silently drops links
+  // whose tag has been deleted.
+  const tagsFor = useCallback(
+    (assetType: CampaignAssetType, assetRef: string): CampaignTag[] => {
+      const ids = new Set(
+        links
+          .filter((l) => l.asset_type === assetType && l.asset_ref === assetRef)
+          .map((l) => l.tag_id),
       );
-      if (!link) return null;
-      return tags.find((t) => t.id === link.tag_id) ?? null;
+      return tags.filter((t) => ids.has(t.id));
     },
     [links, tags],
   );
@@ -312,7 +319,7 @@ export function useCampaignTags(): UseCampaignTagsResult {
       deleteTag,
       linkAsset,
       unlinkAsset,
-      tagFor,
+      tagsFor,
       linksForTag,
     }),
     [
@@ -327,7 +334,7 @@ export function useCampaignTags(): UseCampaignTagsResult {
       deleteTag,
       linkAsset,
       unlinkAsset,
-      tagFor,
+      tagsFor,
       linksForTag,
     ],
   );
