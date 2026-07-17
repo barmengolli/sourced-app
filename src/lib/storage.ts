@@ -16,4 +16,3 @@ export function writeJson<T>(key: string, value: T): void {
     console.warn(`Failed to write ${key} to localStorage`, e);
   }
 }
-
