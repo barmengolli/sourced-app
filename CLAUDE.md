@@ -47,7 +47,7 @@ Define these as Tailwind theme colors and CSS variables in `tailwind.config.js` 
 - **Charts**: Recharts (BarChart, Sankey, LineChart, PieChart)
 - **Database**: Supabase (PostgreSQL with realtime subscriptions)
 - **Hosting**: Vercel (auto-deploy from GitHub main branch)
-- **Auth**: Client-side password gate. Password: `HWWQa4yD5vkX` (same as DataVis 1)
+- **Auth**: Client-side password gate. The password is not stored in tracked docs; it is configured via the `VITE_APP_PASSWORD` environment variable (key in `.env.example`, real value in a local untracked `.env`). This gate is a convenience barrier only: browser-delivered credentials are discoverable, so it does not protect sensitive data. Real authorization is Supabase RLS. Do not redesign auth here.
 - **Package manager**: npm
 
 Use the same versions as the existing DataVis app at `/MarketingOps Cowork/DataVis/`. When in doubt, copy from there.
