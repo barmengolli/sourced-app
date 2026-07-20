@@ -16,11 +16,3 @@ export function writeJson<T>(key: string, value: T): void {
     console.warn(`Failed to write ${key} to localStorage`, e);
   }
 }
-
-export function removeKey(key: string): void {
-  try {
-    window.localStorage.removeItem(key);
-  } catch (e) {
-    console.warn(`Failed to remove ${key} from localStorage`, e);
-  }
-}

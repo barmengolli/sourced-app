@@ -27,6 +27,7 @@ import {
   type PeriodFilter,
 } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
+import { formatCurrency } from '../lib/formatters';
 import PeriodSelector from '../components/funnel/PeriodSelector';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView, {
@@ -69,15 +70,6 @@ type SortColumn =
   | 'daysSinceHpp'
   | 'amount';
 type SortDir = 'asc' | 'desc';
-
-function fmtMoney(v: number | null): string {
-  if (v === null) return '—';
-  return v.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  });
-}
 
 function roundOne(n: number): string {
   return (Math.round(n * 10) / 10).toString();
@@ -455,7 +447,7 @@ export default function FunnelVelocityPage({
                       {d.daysSinceHpp === null ? '—' : d.daysSinceHpp}
                     </td>
                     <td className="px-3 py-2 text-charcoal">
-                      {fmtMoney(d.amount)}
+                      {formatCurrency(d.amount, { nullDisplay: '—' })}
                     </td>
                   </tr>
                 ))}

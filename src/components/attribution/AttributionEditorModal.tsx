@@ -9,7 +9,7 @@ import type {
   AttributionStageKey,
   Channel,
 } from '../../types/db';
-import { STAGE_RANK } from '../../hooks/useAttributions';
+import { PROMOTION_STAGE_RANK } from '../../hooks/useAttributions';
 import type { UseAttributionsResult } from '../../hooks/useAttributions';
 import type {
   NewTouchInput,
@@ -267,10 +267,10 @@ export default function AttributionEditorModal({
   // that currently have a date filled. closeWon and closeLost share
   // rank 4 so terminals never cascade onto each other.
   const downstreamFilledStages = (k: AttributionStageKey): AttributionStageKey[] => {
-    const rank = STAGE_RANK[k];
+    const rank = PROMOTION_STAGE_RANK[k];
     const stages: AttributionStageKey[] = ['hpp', 'opp', 'pursuit', 'closeWon', 'closeLost'];
     return stages.filter((s) => {
-      if (STAGE_RANK[s] <= rank) return false;
+      if (PROMOTION_STAGE_RANK[s] <= rank) return false;
       const v =
         s === stageKey
           ? stageEnteredAt
@@ -302,9 +302,9 @@ export default function AttributionEditorModal({
   // DB and will be removed by deleteWithCascade on Save.
   const cascadeNoteFor = (k: AttributionStageKey): string | null => {
     if (!hasDealChain) return null;
-    const rank = STAGE_RANK[k];
+    const rank = PROMOTION_STAGE_RANK[k];
     const downstreamRowCount = Array.from(dealRowsByStage.values()).filter(
-      (r) => STAGE_RANK[r.stage_key] > rank,
+      (r) => PROMOTION_STAGE_RANK[r.stage_key] > rank,
     ).length;
     if (downstreamRowCount === 0) return null;
     return `Clearing the ${FUNNEL_STAGE_LABELS[k]} date will also remove ${downstreamRowCount} downstream stage${downstreamRowCount === 1 ? '' : 's'} on save.`;

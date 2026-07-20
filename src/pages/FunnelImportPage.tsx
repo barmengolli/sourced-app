@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useLeads, type BulkSyncResult, type SfdcSync } from '../hooks/useLeads';
+import type { SfdcSyncValues } from '../lib/leadSync';
 import {
   type ColumnMapping,
   type CoalesceResult,
@@ -7,7 +8,6 @@ import {
   type ParsedCsv,
   coalesceRows,
 } from '../lib/csv';
-import type { EditableLeadField } from '../constants/leadFields';
 import DropZone from '../components/import/DropZone';
 import ColumnMapper from '../components/import/ColumnMapper';
 import ImportDiff from '../components/import/ImportDiff';
@@ -16,7 +16,7 @@ import ImportProgressModal from '../components/import/ImportProgressModal';
 type Step = 'upload' | 'map' | 'diff' | 'running' | 'complete';
 
 function candidateToSync(c: LeadCandidate): SfdcSync {
-  const values: Partial<Record<EditableLeadField, unknown>> = {};
+  const values: SfdcSyncValues = {};
   // Copy only EditableLeadField-shaped keys.
   if (c.first_name !== undefined) values.first_name = c.first_name;
   if (c.last_name !== undefined) values.last_name = c.last_name;

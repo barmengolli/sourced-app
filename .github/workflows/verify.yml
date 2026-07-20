@@ -1,0 +1,28 @@
+name: verify
+
+# Runs the pure-unit tests, typecheck, and production build on every PR and on
+# pushes to main. No Supabase credentials are provided to this workflow: the
+# test suite is pure and must never connect to the database.
+#
+# Lint is intentionally NOT part of this gate yet. The ESLint baseline is red
+# (43 errors as of 2026-07-16); once Step 11 converges it to zero, `npm run
+# verify` will include `npm run lint` and this workflow inherits it with no YAML
+# change.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: node --version && npm --version
+      - run: npm ci
+      - run: npm run verify

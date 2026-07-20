@@ -31,7 +31,9 @@ import { quarterOfIsoDate, isoWeekOf, type IsoWeek } from './dates';
 import { VELOCITY_THRESHOLDS } from '../constants/velocityThresholds';
 import {
   EVENT_ACTIVATION_VALUES,
+  EVENT_ACTIVATION_ALL,
   type EventActivation,
+  type EventActivationValue,
 } from '../constants/eventActivations';
 
 export type PeriodFilter = 'year' | 'Q1' | 'Q2' | 'Q3' | 'Q4';
@@ -158,12 +160,9 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   //    intentionally invisible from the grid; the Opportunity Influence
   //    tabs on the Opportunities sub-tab surface them.
   //
-  //    Cells covered here populate handledByLeads so the manualActuals
-  //    fallback below knows not to also add a funnel_actuals lead/mql
-  //    row for the same (channel, year, period, stage) — without the
-  //    dedupe, 2025-style fallback rows would stack on top of real lead
-  //    counts in years where both exist.
-  const handledByLeads = new Set<string>();
+  //    The manual fallback below dedupes against sourceCoverage (built from raw
+  //    records before filtering), not against what these loops land, so a
+  //    filtered-to-zero source cell is still treated as covered.
   let unassignedLeadCount = 0;
   for (const l of leads) {
     if (!matchesRegionFilter(l.region, regions)) continue;
@@ -180,9 +179,6 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
         if (row) {
           const cell = row.cells.lead;
           cell.actual = (cell.actual ?? 0) + 1;
-          handledByLeads.add(
-            attribKey(l.source_channel_id, leadBucket.year, leadBucket.quarter, 'lead'),
-          );
         }
       }
     }
@@ -200,9 +196,6 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
           if (row) {
             const cell = row.cells.mql;
             cell.actual = (cell.actual ?? 0) + 1;
-            handledByLeads.add(
-              attribKey(l.source_channel_id, mqlBucket.year, mqlBucket.quarter, 'mql'),
-            );
           }
         }
       }
@@ -260,7 +253,6 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   // Count attributions per (channel, year, period, stage). One attribution row
   // contributes 1 to its leaf channel's stage cell. Channel rollup to parents
   // happens later in step 5. Region filter applied per attribution.
-  const handledByAttribution = new Set<string>();
   for (const a of attributions) {
     if (!a.channel_id) continue;
     if (!matchesRegionFilter(a.region, regions)) continue;
@@ -278,24 +270,51 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     if (!row) continue;
     const cell = row.cells[a.stage_key];
     cell.actual = (cell.actual ?? 0) + 1;
-    handledByAttribution.add(
+  }
+
+  // Manual fallback (M3 fix): only contribute when no SOURCE RECORD covers this
+  // (channel, year, quarter, stage) cell. Coverage is built from the raw lead
+  // and attribution records BEFORE the region filter and the HPP-cohort gate,
+  // so a cell whose source data was filtered or gated to zero is still "covered"
+  // and does NOT get a manual value layered on top of a real-but-hidden zero.
+  //
+  // handledByLeads / handledByAttribution mark what actually LANDED after
+  // filtering (used elsewhere); sourceCoverage marks what EXISTS at source.
+  // Coverage is evaluated per STORED quarter even when the view is the full year,
+  // so a Q1 manual actual can't sneak in against a real Q1 source record just
+  // because the year view aggregates.
+  //
+  // Proxy limitation (Section 4.3): with no import-completeness table, a truly
+  // empty source period is indistinguishable from an unimported one. Presence of
+  // any eligible source record is the coverage signal for this cleanup.
+  const sourceCoverage = new Set<string>();
+  for (const l of leads) {
+    if (!l.source_channel_id) continue;
+    const lb = quarterOfIsoDate(l.marketing_sourced_date);
+    if (lb) {
+      sourceCoverage.add(attribKey(l.source_channel_id, lb.year, lb.quarter, 'lead'));
+      const mqlIso = firstMqlDate(l);
+      const mb = mqlIso ? quarterOfIsoDate(mqlIso) : null;
+      if (mb) {
+        sourceCoverage.add(attribKey(l.source_channel_id, mb.year, mb.quarter, 'mql'));
+      }
+    }
+  }
+  for (const a of attributions) {
+    if (!a.channel_id) continue;
+    sourceCoverage.add(
       attribKey(a.channel_id, a.year, a.period_index, a.stage_key),
     );
   }
 
-  // Manual fallback: only contribute when no compute pass already covers
-  // this exact (channel, year, period, stage) cell. For HPP+ that means
-  // attributions win; for lead/mql that means the leads pass wins.
   for (const m of manualActuals) {
     if (m.actual === null || m.actual === undefined) continue;
     const bucket = { year: m.year, quarter: m.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
     const key = attribKey(m.channel_id, m.year, m.period_index, m.stage_key);
-    if (m.stage_key === 'lead' || m.stage_key === 'mql') {
-      if (handledByLeads.has(key)) continue;
-    } else if (handledByAttribution.has(key)) {
-      continue;
-    }
+    // Suppress the fallback whenever a source record exists for this exact
+    // stored cell, whether or not that record survives the current view filters.
+    if (sourceCoverage.has(key)) continue;
     const row = rowMap.get(m.channel_id);
     if (!row) continue;
     const cell = row.cells[m.stage_key];
@@ -925,14 +944,29 @@ export interface MonthlyChannelLeads {
   perMonth: number[];   // length 12, index 0 = Jan, 11 = Dec
 }
 
+// A quarterly manual-actual lead count that is NOT distributed into monthly
+// values (M4 fix). It is surfaced separately so the UI can show it as a labeled
+// count annotation ("Q1 Lead actual: 30 (quarterly backfill)"), never as a
+// monthly bar, point, or currency.
+export interface QuarterlyLeadFallback {
+  channelId: string;
+  channelName: string;
+  quarter: PeriodIndex; // 1..4
+  value: number; // the quarterly lead count
+}
+
 export interface MonthlyLeadsForYear {
   // One entry per top-level channel with >= 1 lead in the year.
   // Sorted by year total descending so legend order is stable.
   byChannel: MonthlyChannelLeads[];
   // Length 12. Sum across all channels (including the unsorted set,
   // which by construction equals the sum of byChannel rows since
-  // unattributed leads are excluded upstream).
+  // unattributed leads are excluded upstream). Contains ONLY source-dated
+  // monthly lead counts; quarterly backfill is never spread into it.
   monthTotals: number[];
+  // Quarterly manual actuals with NO real-lead coverage for that
+  // (top-level channel, quarter). Presented separately by the UI (Step 7).
+  quarterlyFallback: QuarterlyLeadFallback[];
 }
 
 export interface ComputeMonthlyLeadsForYearInput {
@@ -947,21 +981,6 @@ export interface ComputeMonthlyLeadsForYearInput {
   manualActuals?: FunnelActual[];
 }
 
-// Spread a quarterly integer count across its three months. The
-// spec's worked example pins the direction: 245 splits as 82/82/81
-// across Jan/Feb/Mar (front-loaded ceilings), not 81/81/83 or
-// 81/82/82. So the first `remainder` months get +1 and the rest
-// take the floor. Returns [m0, m1, m2] aligned to the quarter's
-// months.
-function spreadQuarterlyToMonths(value: number): [number, number, number] {
-  const base = Math.floor(value / 3);
-  const remainder = value - base * 3; // 0, 1, or 2
-  return [
-    remainder > 0 ? base + 1 : base,
-    remainder > 1 ? base + 1 : base,
-    base,
-  ];
-}
 
 export function computeMonthlyLeadsForYear(
   input: ComputeMonthlyLeadsForYearInput,
@@ -974,14 +993,27 @@ export function computeMonthlyLeadsForYear(
   const perChannel = new Map<string, number[]>();
   const monthTotals = new Array<number>(12).fill(0);
 
-  // Dedupe key shared between the leads pass and the funnel_actuals
-  // fallback. Same shape as computeGrid's attribKey, but keyed on
-  // month index (0..11) instead of period_index since this output
-  // is monthly.
-  const cellKey = (cid: string, mIdx: number): string =>
-    `${cid}\x1f${year}\x1f${mIdx}\x1f${'lead'}`;
-  const handledByLeads = new Set<string>();
+  // M4 fix: source coverage is keyed at (top-level channel, QUARTER) grain,
+  // built from real leads BEFORE the region filter. If any real lead covers a
+  // quarter, the whole quarterly manual fallback for that channel+quarter is
+  // suppressed. We never spread a quarterly value into invented months.
+  //
+  // Coverage is region-unfiltered on purpose (Section 4.3): a real lead that a
+  // region toggle hides still means the period is "imported", so a backfill must
+  // not fill the visible gap.
+  const coverageKey = (cid: string, quarter: number): string =>
+    `${cid}\x1f${quarter}`;
+  const sourceCoverage = new Set<string>();
+  for (const lead of leads) {
+    if (!lead.source_channel_id) continue;
+    const lm = monthOfIsoDate(lead.marketing_sourced_date);
+    if (!lm || lm.year !== year) continue;
+    const topId = resolveTopLevelChannelId(lead.source_channel_id, channelById);
+    const quarter = Math.floor((lm.month - 1) / 3) + 1;
+    sourceCoverage.add(coverageKey(topId, quarter));
+  }
 
+  // Monthly bars: source-dated real leads only (region-filtered for display).
   for (const lead of leads) {
     if (!lead.source_channel_id) continue;
     if (!matchesRegionFilter(lead.region, regions)) continue;
@@ -999,37 +1031,25 @@ export function computeMonthlyLeadsForYear(
     const idx = leadMonth.month - 1;
     row[idx] += 1;
     monthTotals[idx] += 1;
-    handledByLeads.add(cellKey(topId, idx));
   }
 
-  // Historical-year fallback: spread quarterly funnel_actuals leads
-  // across their three months. A cell already covered by real leads
-  // is skipped so years with both data sources don't double-count.
+  // Quarterly fallback: collected SEPARATELY, never added to monthly arrays. A
+  // (channel, quarter) with any real-lead coverage is suppressed entirely.
+  const quarterlyFallback: QuarterlyLeadFallback[] = [];
   for (const m of manualActuals ?? []) {
     if (m.stage_key !== 'lead') continue;
     if (m.year !== year) continue;
     if (m.actual === null || m.actual === undefined) continue;
     const value = Math.round(m.actual);
     if (value <= 0) continue;
-    const quarter = m.period_index; // 1..4
-    const monthsForQuarter: [number, number, number] = [
-      (quarter - 1) * 3,
-      (quarter - 1) * 3 + 1,
-      (quarter - 1) * 3 + 2,
-    ];
     const topId = resolveTopLevelChannelId(m.channel_id, channelById);
-    const spread = spreadQuarterlyToMonths(value);
-    let row = perChannel.get(topId);
-    if (!row) {
-      row = new Array<number>(12).fill(0);
-      perChannel.set(topId, row);
-    }
-    for (let i = 0; i < 3; i++) {
-      const monthIdx = monthsForQuarter[i];
-      if (handledByLeads.has(cellKey(topId, monthIdx))) continue;
-      row[monthIdx] += spread[i];
-      monthTotals[monthIdx] += spread[i];
-    }
+    if (sourceCoverage.has(coverageKey(topId, m.period_index))) continue;
+    quarterlyFallback.push({
+      channelId: topId,
+      channelName: channelById.get(topId)?.name ?? 'Unknown',
+      quarter: m.period_index,
+      value,
+    });
   }
 
   const byChannel: MonthlyChannelLeads[] = [];
@@ -1048,7 +1068,7 @@ export function computeMonthlyLeadsForYear(
     return bTot - aTot;
   });
 
-  return { byChannel, monthTotals };
+  return { byChannel, monthTotals, quarterlyFallback };
 }
 
 // ---------- Funnel Flow Sankey (Channel Influence chart) ----------
@@ -1099,17 +1119,6 @@ export interface ComputeFunnelSankeyInput {
   regions?: Set<RegionKey>;
 }
 
-// Stage progression on the deal side: HPP → Opp → Pursuit → CloseWon, with
-// CloseLost as a parallel terminal reachable from any of HPP / Opp /
-// Pursuit. Order matters: it determines the "did this deal progress past
-// stage X" check and which stage's outgoing edge gets the attribution.
-const DEAL_STAGE_PROGRESSION: AttributionStageKey[] = [
-  'hpp',
-  'opp',
-  'pursuit',
-  'closeWon',
-];
-
 // Walks parent_channel_id up to the root. Returns the channel id of the
 // top-level ancestor (or the input id itself if it's already top-level).
 // Cycles are guarded against via a visited set; an unresolvable id falls
@@ -1129,6 +1138,28 @@ function resolveTopLevelChannelId(
     current = node.parent_channel_id;
   }
   return channelId;
+}
+
+// The top-level channel (year prefix stripped) whose presence PROVES a deal was
+// Sales-originated. A null lead_id does NOT prove Sales origin: in the current
+// data model every deal is leadless (M7 leaves lead_id null; M8 adds the lead
+// picker), so the only positive evidence of Sales origin today is the deal's
+// channel resolving to this explicit taxonomy bucket.
+const SALES_GENERATED_CHANNEL = 'Sales Generated';
+const stripChannelYear = (name: string) => name.replace(/^\d{4}\s*-\s*/, '');
+
+// Is a deal Sales-originated? True only when its top-level channel is the
+// explicit "Sales Generated" bucket. A leadless deal on any other channel
+// (Website, Events, Marketing SDR, Content Syndication, or no channel) is NOT
+// classified as Sales-sourced; the Sankey routes it through the neutral
+// "No linked lead" node instead.
+function isSalesOriginated(
+  topLevelChannelId: string,
+  channelById: Map<string, Channel>,
+): boolean {
+  const ch = channelById.get(topLevelChannelId);
+  if (!ch) return false;
+  return stripChannelYear(ch.name) === SALES_GENERATED_CHANNEL;
 }
 
 export function computeFunnelSankey(
@@ -1181,47 +1212,63 @@ export function computeFunnelSankey(
   // attribution.channel_id.
   const dealsCountedViaLead = new Set<string>();
 
-  // Helper: emit the deal-stage edges for one deal (a chain of attribution
-  // rows sharing a deal_id) under the given color channel. Used both by
-  // the cohort-lead pass and the manual-entry pass.
+  // Emit the deal-stage edges for one deal (a chain of attribution rows sharing
+  // a deal_id) under the given color channel. Used by both the cohort-lead and
+  // sales-sourced passes.
+  //
+  // The deal subgraph (HPP and later) CONSERVES flow: every stage a deal reaches
+  // has exactly one outgoing link, either to the next progression stage, to a
+  // terminal (Won / Lost), or to an explicit OPEN sink for its highest reached
+  // stage. So "inflow to stage X == sum of X's outgoing progression + sink
+  // links". Lead/MQL upstream are unique-person counts and are NOT forced to
+  // conserve across the person-to-deal boundary at HPP.
   const emitDealEdges = (
     dealAttrs: Attribution[],
     colorChannelId: string,
   ): void => {
     const stageSet = new Set(dealAttrs.map((a) => a.stage_key));
-    // Walk the linear progression first to emit "stage → next stage"
-    // edges for every consecutive pair the deal hit.
-    for (let i = 0; i < DEAL_STAGE_PROGRESSION.length - 1; i++) {
-      const from = DEAL_STAGE_PROGRESSION[i];
-      const to = DEAL_STAGE_PROGRESSION[i + 1];
+    const reached = (['hpp', 'opp', 'pursuit'] as const).filter((s) =>
+      stageSet.has(s),
+    );
+    // Highest progression stage the deal reached among the open stages.
+    const highestOpen = reached.length ? reached[reached.length - 1] : null;
+
+    // Progression edges between consecutive open stages the deal hit.
+    const openProgression: AttributionStageKey[] = ['hpp', 'opp', 'pursuit'];
+    for (let i = 0; i < openProgression.length - 1; i++) {
+      const from = openProgression[i];
+      const to = openProgression[i + 1];
       if (stageSet.has(from) && stageSet.has(to)) {
         bumpEdge(`stage:${from}`, `stage:${to}`, colorChannelId);
       }
     }
-    // closeLost branches: the deal terminated at whichever was its
-    // highest progression stage in {hpp, opp, pursuit}. We pick the
-    // highest such stage from the deal's stage set; that's the stage
-    // whose outgoing → closeLost edge the deal contributes to.
-    if (stageSet.has('closeLost')) {
-      let lostFrom: AttributionStageKey | null = null;
-      for (const s of ['pursuit', 'opp', 'hpp'] as const) {
-        if (stageSet.has(s)) {
-          lostFrom = s;
-          break;
-        }
-      }
-      if (lostFrom) {
-        bumpEdge(
-          `stage:${lostFrom}`,
-          'terminal:closeLost',
-          colorChannelId,
-        );
-      }
+
+    // Terminal or open sink from the deal's highest reached stage. Exactly one
+    // of these fires, so the highest stage's outflow always equals its inflow.
+    if (stageSet.has('closeWon')) {
+      // Progressed to won: pursuit -> won (or the highest open -> won).
+      const from = highestOpen ?? 'pursuit';
+      bumpEdge(`stage:${from}`, 'terminal:closeWon', colorChannelId);
+    } else if (stageSet.has('closeLost')) {
+      const from = highestOpen ?? 'hpp';
+      bumpEdge(`stage:${from}`, 'terminal:closeLost', colorChannelId);
+    } else if (highestOpen) {
+      // Still open: sink to the explicit "Open at <stage>" node so the deal is
+      // accounted for and the stage conserves.
+      bumpEdge(`stage:${highestOpen}`, `open:${highestOpen}`, colorChannelId);
     }
-    // closeWon branch: handled implicitly by the linear progression above
-    // (pursuit → closeWon). We retarget that edge to the dedicated
-    // terminal node so closeWon and closeLost render side-by-side at the
-    // right edge instead of closeWon being a generic stage column.
+  };
+
+  // Route a deal into HPP through exactly ONE ingress, then emit its stage
+  // edges. `hppSource` is the node feeding HPP: an MQL node, a "no recorded
+  // MQL" node, or the sales-sourced node.
+  const enterHppAndEmit = (
+    hppSource: string,
+    dealAttrs: Attribution[],
+    colorChannelId: string,
+  ): void => {
+    bumpEdge(hppSource, 'stage:hpp', colorChannelId);
+    emitDealEdges(dealAttrs, colorChannelId);
   };
 
   // ---------- Pass 1: cohort leads ----------
@@ -1257,35 +1304,40 @@ export function computeFunnelSankey(
       dealsForLead.set(key, arr);
     }
 
+    // A lead reaching MQL is a unique-person edge; emit once per lead, not per
+    // deal, so the MQL node keeps a person count.
+    const leadReachedMql = firstMqlDate(lead) !== null;
+
     for (const [dealKey, dealAttrs] of dealsForLead) {
       const stageSet = new Set(dealAttrs.map((a) => a.stage_key));
-      // MQL → HPP edge: the lead is in the cohort, reached MQL OR went
-      // straight to HPP without a stored MQL transition. We emit the
-      // edge whenever any HPP attribution exists for this lead (matches
-      // the spec: "leads in the cohort that have a downstream HPP
-      // attribution row").
       if (stageSet.has('hpp')) {
-        bumpEdge('stage:mql', 'stage:hpp', topId);
+        // A deal enters HPP once, through the MQL node if the lead has recorded
+        // MQL history, otherwise through the explicit "No recorded MQL" node.
+        // A lead with an HPP deal but NO MQL history must NOT create an
+        // MQL -> HPP edge (M5a).
+        const hppSource = leadReachedMql ? 'stage:mql' : 'stage:no-mql';
+        enterHppAndEmit(hppSource, dealAttrs, topId);
       }
-      emitDealEdges(dealAttrs, topId);
-      // Track the deal so the manual-entry pass below skips it.
+      // Track the deal so the sales-sourced pass below skips it.
       if (dealAttrs.some((a) => a.deal_id)) {
         dealsCountedViaLead.add(dealKey);
       }
     }
   }
 
-  // ---------- Pass 2: manual-entry deals (no lead) ----------
+  // ---------- Pass 2: leadless deals ----------
+  // These have no linked lead in the app. A null lead_id does NOT prove Sales
+  // origin (M7 leaves every deal's lead_id null), so we classify by evidence:
+  //   - top-level channel is "Sales Generated" -> "Sales-sourced" (proven).
+  //   - anything else (Website / Events / Marketing SDR / Content Syndication /
+  //     no channel) -> "No linked lead" (neutral, no origin claimed).
+  const ingressFor = (topId: string): string =>
+    isSalesOriginated(topId, channelById) ? 'source:sales' : 'source:no-lead';
+
   for (const [dealId, dealAttrs] of attrsByDealId) {
     if (dealsCountedViaLead.has(dealId)) continue;
-    // A manual-entry deal has all its attributions with lead_id = null.
-    // If ANY attribution in the chain has a lead_id, this is a
-    // lead-sourced deal that should have been counted in Pass 1; skip.
     if (dealAttrs.some((a) => a.lead_id)) continue;
 
-    // Filter by the HPP row's period (the entry-point row) and the
-    // deal's canonical region derived from REGION_STAGE_PRIORITY so
-    // a chain reads the same region everywhere.
     const hpp = dealAttrs.find((a) => a.stage_key === 'hpp');
     if (!hpp) continue; // chains without an HPP entry don't enter the Sankey
     if (!matchesRegionFilter(deriveDealRegion(dealAttrs), regions)) continue;
@@ -1295,15 +1347,11 @@ export function computeFunnelSankey(
     if (!hpp.channel_id) continue;
 
     const topId = resolveTopLevelChannelId(hpp.channel_id, channelById);
-
-    // Channel → HPP direct (skips Leads + MQL columns per spec).
-    bumpEdge(`channel:${topId}`, 'stage:hpp', topId);
-    emitDealEdges(dealAttrs, topId);
+    enterHppAndEmit(ingressFor(topId), dealAttrs, topId);
   }
 
-  // Pass 2b: HPP rows that lack a deal_id entirely (one-off attribution
-  // rows with no chain). attrsByDealId already covers chains; these
-  // single rows would otherwise fall through silently.
+  // Pass 2b: HPP rows that lack a deal_id entirely (one-off rows, no chain).
+  // Same origin classification as Pass 2; a lone HPP row takes an open HPP sink.
   for (const a of attributions) {
     if (a.lead_id) continue;
     if (a.deal_id) continue;
@@ -1314,23 +1362,11 @@ export function computeFunnelSankey(
     }
     if (!a.channel_id) continue;
     const topId = resolveTopLevelChannelId(a.channel_id, channelById);
-    bumpEdge(`channel:${topId}`, 'stage:hpp', topId);
+    enterHppAndEmit(ingressFor(topId), [a], topId);
   }
 
-  // The progression's last hop (pursuit → closeWon) needs to retarget to
-  // the terminal:closeWon node so closeWon stacks alongside closeLost on
-  // the right edge instead of being a generic mid-funnel stage. Rewrite
-  // any edge whose target is "stage:closeWon" to "terminal:closeWon".
-  for (const [key, edge] of edgeMap) {
-    if (edge.target === 'stage:closeWon') {
-      edgeMap.delete(key);
-      edge.target = 'terminal:closeWon';
-      const newKey = `${edge.source}|${edge.target}|${edge.channelId}`;
-      const merged = edgeMap.get(newKey);
-      if (merged) merged.value += edge.value;
-      else edgeMap.set(newKey, edge);
-    }
-  }
+  // emitDealEdges targets terminal:closeWon directly, so no post-hoc retarget
+  // is needed.
 
   // ---------- Build the node list ----------
   // Order is load-bearing: Recharts assigns column indexes in the order
@@ -1343,10 +1379,9 @@ export function computeFunnelSankey(
     nodes.push(n);
   };
 
-  // Channels column: every top-level channel, in the same order as the
-  // grid. We always emit a node so an inactive channel still anchors the
-  // column visually; if it has no edges, the renderer will hide it via
-  // the empty-data guard.
+  // Channels column: every top-level channel, in grid order. Always emitted so
+  // an inactive channel still anchors the column; edgeless nodes are hidden by
+  // the renderer's empty-data guard.
   for (const ch of topLevelChannels) {
     pushNode({
       id: `channel:${ch.id}`,
@@ -1356,12 +1391,21 @@ export function computeFunnelSankey(
     });
   }
 
-  // Stage columns in funnel order. Closed Won and Closed Lost are the
-  // two terminal nodes — they go last so they share the rightmost
-  // column.
-  const stageNodes: { id: string; label: string; key: FunnelStageKey }[] = [
+  // Leadless-deal entry nodes (upstream of HPP, alongside the channel column
+  // since they have no channel-to-lead flow). "Sales-sourced" is used ONLY for
+  // deals proven Sales-originated by their channel; every other leadless deal
+  // enters through the neutral "No linked lead" node so the chart never claims
+  // a Sales origin the data does not support.
+  pushNode({ id: 'source:sales', label: 'Sales-sourced', kind: 'stage' });
+  pushNode({ id: 'source:no-lead', label: 'No linked lead', kind: 'stage' });
+
+  // Person-side stages (unique people). "No recorded MQL" sits between MQL and
+  // HPP as the ingress for cohort leads whose deal reached HPP without an MQL
+  // history entry.
+  const stageNodes: { id: string; label: string; key?: FunnelStageKey }[] = [
     { id: 'stage:lead', label: 'Leads', key: 'lead' },
     { id: 'stage:mql', label: 'MQL', key: 'mql' },
+    { id: 'stage:no-mql', label: 'No recorded MQL' },
     { id: 'stage:hpp', label: 'HPP (SQL)', key: 'hpp' },
     { id: 'stage:opp', label: 'Opp (SAO)', key: 'opp' },
     { id: 'stage:pursuit', label: 'Pursuit', key: 'pursuit' },
@@ -1369,15 +1413,21 @@ export function computeFunnelSankey(
   for (const s of stageNodes) {
     pushNode({ id: s.id, label: s.label, kind: 'stage', stageKey: s.key });
   }
+
+  // Open sinks: a deal still open at a stage flows to its "Open at <stage>"
+  // node so the deal subgraph conserves (Section 4.5). Terminals last.
+  pushNode({ id: 'open:hpp', label: 'Open at HPP', kind: 'terminal' });
+  pushNode({ id: 'open:opp', label: 'Open at Opp', kind: 'terminal' });
+  pushNode({ id: 'open:pursuit', label: 'Open at Pursuit', kind: 'terminal' });
   pushNode({
     id: 'terminal:closeWon',
-    label: 'Closed Won',
+    label: 'Won',
     kind: 'terminal',
     stageKey: 'closeWon',
   });
   pushNode({
     id: 'terminal:closeLost',
-    label: 'Closed Lost',
+    label: 'Lost',
     kind: 'terminal',
     stageKey: 'closeLost',
   });
@@ -1928,10 +1978,10 @@ export interface EventActivationCounts {
   channelId: string;
   channelName: string;
   totalContacts: number;        // unique contacts at this event in period
-  withAnyActivation: number;    // contacts with >= 1 activation
-  perType: Record<EventActivation, number>;
+  withAnyActivation: number;    // contacts with >= 1 ACTIVE activation (excludes Registered)
+  perType: Record<EventActivationValue, number>; // includes Registered
   preAndPost: number;           // contacts with both Pre-Event and Post-Event
-  multiActivation: number;      // contacts with >= 2 activations
+  multiActivation: number;      // contacts with >= 2 active activations
 }
 
 export interface ComputeEventActivationsInput {
@@ -1981,14 +2031,14 @@ export function computeEventActivations(
     channelName: string;
     totalContacts: number;
     withAnyActivation: number;
-    perType: Record<EventActivation, number>;
+    perType: Record<EventActivationValue, number>;
     preAndPost: number;
     multiActivation: number;
   }
   const tally = new Map<string, Tally>();
-  const blankPerType = (): Record<EventActivation, number> => {
-    const out = {} as Record<EventActivation, number>;
-    for (const v of EVENT_ACTIVATION_VALUES) out[v] = 0;
+  const blankPerType = (): Record<EventActivationValue, number> => {
+    const out = {} as Record<EventActivationValue, number>;
+    for (const v of EVENT_ACTIVATION_ALL) out[v] = 0;
     return out;
   };
 
@@ -2015,13 +2065,22 @@ export function computeEventActivations(
     }
     t.totalContacts += 1;
 
-    const activations = (lead.event_activations ?? []).filter((v) =>
-      (EVENT_ACTIVATION_VALUES as readonly string[]).includes(v),
-    ) as EventActivation[];
-    const set = new Set<EventActivation>(activations);
-    if (set.size >= 1) t.withAnyActivation += 1;
-    if (set.size >= 2) t.multiActivation += 1;
-    if (set.has('Pre-Event Meeting') && set.has('Post-Event Meeting')) {
+    // Recognize all values (4 active + Registered) for the per-type
+    // columns, but gate the "active" metrics on the 4 active types
+    // only. Registered contributes to its column/tile and Total
+    // Contacts, never to Active Contacts / % Active.
+    const recognized = (lead.event_activations ?? []).filter((v) =>
+      (EVENT_ACTIVATION_ALL as readonly string[]).includes(v),
+    ) as EventActivationValue[];
+    const set = new Set<EventActivationValue>(recognized);
+    const activeSet = new Set<EventActivation>(
+      recognized.filter((v) =>
+        (EVENT_ACTIVATION_VALUES as readonly string[]).includes(v),
+      ) as EventActivation[],
+    );
+    if (activeSet.size >= 1) t.withAnyActivation += 1;
+    if (activeSet.size >= 2) t.multiActivation += 1;
+    if (activeSet.has('Pre-Event Meeting') && activeSet.has('Post-Event Meeting')) {
       t.preAndPost += 1;
     }
     for (const v of set) {
@@ -2358,31 +2417,38 @@ export function computeChannelSpend(
     }
   }
 
-  // --- 7. Build per-channel rows. allocatedCost handles the
-  //        parent-cost-only case: when a parent has direct cost and
-  //        its direct child has none, each child gets a proportional
-  //        slice of the parent's cost based on the child's region-
-  //        filtered lead share. We compute that per parent and fan
-  //        out to children.
+  // --- 7. Distribute parent-only budget down to descendants, and track how
+  //        much of each channel's OWN direct cost was successfully distributed.
+  //        See the spend contract (CLEANUP_PLAN_EXECUTION.md Section 8):
+  //
+  //          retained direct cost = direct cost - distributed own direct cost
+  //          rolled allocated cost = retained direct + sum(child rolled)
+  //
+  //        allocatedCost starts as each channel's own direct cost. When a
+  //        parent's budget is distributed to descendants by lead share, we ADD
+  //        the slice to each descendant AND record the distributed amount on the
+  //        parent, so the roll-up (below) can subtract it and never double-count.
   const allocatedCost = new Map<string, number>();
   for (const channel of channels) {
     allocatedCost.set(channel.id, directCost.get(channel.id) ?? 0);
   }
+  // How much of a channel's own direct cost flowed OUT to descendants. Whatever
+  // is not distributed stays retained on the channel itself.
+  const distributedOwnCost = new Map<string, number>();
   for (const channel of channels) {
     const parentCost = directCost.get(channel.id) ?? 0;
     if (parentCost <= 0) continue;
     const childIds = childrenByParent.get(channel.id) ?? [];
     if (childIds.length === 0) continue;
-    // Only allocate when at least one direct child has zero direct
-    // cost (the Content Syndication shape). Otherwise the parent's
-    // cost reads as a separate aggregate and doesn't flow down.
+    // Only distribute when NO direct child has its own direct cost. When a
+    // child carries its own budget, the parent's cost is a separate aggregate
+    // that stays retained on the parent and is added (not overwritten) at
+    // roll-up. This preserves the parent-plus-child sum (M2a).
     const anyChildDirect = childIds.some(
       (cid) => (directCost.get(cid) ?? 0) > 0,
     );
     if (anyChildDirect) continue;
-    // Sum descendant leads, not just direct-child leads, so a
-    // grandchild's leads still pull their share. childrenByParent
-    // walk via BFS.
+    // Descendant leads (BFS), so a grandchild's leads still pull a share.
     const descendants = new Set<string>();
     let frontier = [...childIds];
     while (frontier.length) {
@@ -2396,6 +2462,8 @@ export function computeChannelSpend(
     }
     let totalLeads = 0;
     for (const id of descendants) totalLeads += leadsByChannel.get(id) ?? 0;
+    // No descendant leads means nothing to distribute: the parent RETAINS its
+    // full direct cost (do not zero it out).
     if (totalLeads === 0) continue;
     for (const id of descendants) {
       const share = (leadsByChannel.get(id) ?? 0) / totalLeads;
@@ -2404,6 +2472,8 @@ export function computeChannelSpend(
         (allocatedCost.get(id) ?? 0) + parentCost * share,
       );
     }
+    // The whole parent budget was distributed across descendants.
+    distributedOwnCost.set(channel.id, parentCost);
   }
 
   // --- 8. Materialize rows.
@@ -2457,23 +2527,26 @@ export function computeChannelSpend(
 
   // --- 9. Roll up sub-channel metrics to their parents.
   //
-  // A parent's displayed value = sum of its direct children's (already
-  // rolled-up) values. We walk post-order so deeper subtrees aggregate
-  // before their ancestors. `cost` (direct only) is intentionally left
-  // alone so callers that sum direct cost across rows stay
-  // double-count-free; the displayed Cost column reads `allocatedCost`.
+  // A parent's displayed value = its OWN contribution + the sum of its direct
+  // children's (already rolled-up) values. We walk post-order so deeper
+  // subtrees aggregate before their ancestors. `cost` (direct only) is left
+  // alone so callers that sum direct cost across rows stay double-count-free;
+  // the displayed Cost column reads `allocatedCost`.
   //
-  // Content Syndication case: parent.allocatedCost was already its
-  // directCost, and children's allocatedCost slices sum to that same
-  // directCost (because the redistribution loop above fully
-  // re-allocates the parent's budget). Overwriting parent.allocatedCost
-  // with sum-of-children yields the same number, so this is a no-op
-  // for that shape.
+  // For allocatedCost the parent contributes its RETAINED direct cost (own
+  // direct cost minus whatever was distributed to descendants), per the spend
+  // contract (Section 8):
   //
-  // Events case: parent.allocatedCost was 0 and children carry their
-  // own direct costs. After this pass, parent.allocatedCost equals the
-  // sum of its event children's spend, which is what the user expects
-  // when looking at the Events row.
+  //   rolled allocated = retained direct + sum(child rolled allocated)
+  //
+  //   - Distributed-down shape (e.g. Content Syndication): the parent's whole
+  //     budget went to children, so retained = 0 and the parent reads the sum
+  //     of the slices, which equals its budget. No double count.
+  //   - Zero-descendant-lead shape: nothing distributed, retained = full budget,
+  //     children contribute 0, so the parent keeps its budget instead of zeroing.
+  //   - Parent-plus-child-direct shape (M2a): allocation is skipped, retained =
+  //     the parent's own budget, and the child's own budget rolls up on top, so
+  //     the parent shows the sum of both.
   const rowsById = new Map<string, ChannelSpendBreakdown>();
   for (const r of out) rowsById.set(r.channelId, r);
   const rolledUp = new Set<string>();
@@ -2485,12 +2558,16 @@ export function computeChannelSpend(
     for (const kid of kids) rollupRow(kid);
     const r = rowsById.get(channelId);
     if (!r) return;
-    let allocCost = 0;
-    let leads = 0;
-    let mqls = 0;
-    let opps = 0;
-    let pipe = 0;
-    let won = 0;
+    // Retained direct cost: the channel's own direct cost that was NOT
+    // distributed to descendants.
+    const own = directCost.get(channelId) ?? 0;
+    const distributed = distributedOwnCost.get(channelId) ?? 0;
+    let allocCost = own - distributed;
+    let leads = leadsByChannel.get(channelId) ?? 0;
+    let mqls = mqlsByChannel.get(channelId) ?? 0;
+    let opps = firstTouchOpps.get(channelId) ?? 0;
+    let pipe = pipelineByChannel.get(channelId) ?? 0;
+    let won = wonByChannel.get(channelId) ?? 0;
     for (const kid of kids) {
       const cr = rowsById.get(kid);
       if (!cr) continue;

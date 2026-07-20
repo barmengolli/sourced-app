@@ -261,7 +261,7 @@ interface DealRecord {
 // closeLost are BOTH terminal, but they must NOT tie: a deal with both a won and
 // a lost row would otherwise resolve non-deterministically (by input order).
 // closeWon outranks closeLost so a won deal is always counted as won.
-const STAGE_RANK: Record<string, number> = {
+const DEAL_DEDUPE_PRECEDENCE: Record<string, number> = {
   hpp: 1,
   opp: 2,
   pursuit: 3,
@@ -282,7 +282,7 @@ function dedupeDealsByHighestStage(attrs: Attribution[]): DealRecord[] {
   >();
   for (const a of attrs) {
     const key = a.deal_id ?? a.id;
-    const rank = STAGE_RANK[a.stage_key] ?? 0;
+    const rank = DEAL_DEDUPE_PRECEDENCE[a.stage_key] ?? 0;
     const entry = map.get(key);
     if (!entry) {
       map.set(key, { rows: [a], topStage: a.stage_key, topRank: rank });
@@ -305,8 +305,8 @@ function dedupeDealsByHighestStage(attrs: Attribution[]): DealRecord[] {
     // Rows with no positive amount are skipped, falling BACK DOWN the ladder,
     // so a deal whose top row has no amount still reports its earlier one.
     const byStageDesc = [...entry.rows].sort((a, b) => {
-      const ra = STAGE_RANK[a.stage_key] ?? 0;
-      const rb = STAGE_RANK[b.stage_key] ?? 0;
+      const ra = DEAL_DEDUPE_PRECEDENCE[a.stage_key] ?? 0;
+      const rb = DEAL_DEDUPE_PRECEDENCE[b.stage_key] ?? 0;
       if (ra !== rb) return rb - ra;
       if (a.stage_entered_at !== b.stage_entered_at) {
         return a.stage_entered_at < b.stage_entered_at ? 1 : -1;

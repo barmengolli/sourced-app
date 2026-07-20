@@ -31,10 +31,6 @@ export const EDITABLE_LEAD_FIELDS: EditableLeadField[] = [
   'notes',
 ];
 
-export const LOCKABLE_LEAD_FIELDS: ReadonlySet<EditableLeadField> = new Set(
-  EDITABLE_LEAD_FIELDS,
-);
-
 export type LeadFieldKind =
   | 'text'
   | 'date'

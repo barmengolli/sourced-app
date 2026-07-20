@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type { Lead } from '../../types/db';
 import { EDITABLE_LEAD_FIELDS, LEAD_FIELD_LABELS } from '../../constants/leadFields';
 import type { CoalesceResult, LeadCandidate } from '../../lib/csv';
+import { comparableField } from '../../lib/leadSync';
 import LockIcon from '../common/LockIcon';
 
 interface ImportDiffProps {
@@ -72,12 +73,10 @@ export default function ImportDiff({
       }
       const changes: FieldDiff[] = [];
       const drift: FieldDiff[] = [];
-      const candRecord = cand as unknown as Record<string, unknown>;
-      const existingRecord = existing as unknown as Record<string, unknown>;
       for (const field of EDITABLE_LEAD_FIELDS) {
-        const incoming = candRecord[field];
+        const incoming = comparableField(cand, field);
         if (incoming === undefined) continue;
-        const before = existingRecord[field];
+        const before = comparableField(existing, field);
         if (eqValue(before, incoming)) continue;
         const locked = Boolean(existing.field_locks?.[field]);
         const diff: FieldDiff = { field, before, after: incoming, locked };

@@ -1,6 +1,6 @@
-# Sourced — Project Instructions for Claude Code
+# Sourced — Project Instructions for Codex
 
-This file is read on every Claude Code session. Adhere strictly. These instructions OVERRIDE any default Claude Code behavior.
+This file is read on every Codex session. Adhere strictly. These instructions OVERRIDE any default Codex behavior.
 
 ---
 
@@ -47,8 +47,10 @@ Define these as Tailwind theme colors and CSS variables in `tailwind.config.js` 
 - **Charts**: Recharts (BarChart, Sankey, LineChart, PieChart)
 - **Database**: Supabase (PostgreSQL with realtime subscriptions)
 - **Hosting**: Vercel (auto-deploy from GitHub main branch)
-- **Auth**: Client-side password gate. The password is not stored in tracked docs; it is configured via the `VITE_APP_PASSWORD` environment variable (key in `.env.example`, real value in a local untracked `.env`). This gate is a convenience barrier only: browser-delivered credentials are discoverable, so it does not protect sensitive data. Real authorization is Supabase RLS. Do not redesign auth here.
+- **Auth**: Client-side password gate. The password is not stored in tracked documentation; it is configured outside the repo via the `VITE_APP_PASSWORD` environment variable (see `.env.example` for the key, set the real value in a local, untracked `.env`).
 - **Package manager**: npm
+
+> Note on the password gate: this is a convenience barrier only, not a real access control. The gate runs in the browser, so any credential shipped to the client (including `VITE_APP_PASSWORD`) is discoverable by anyone who loads the app. Do not treat it as protecting sensitive data. Real authorization is enforced at the data layer (Supabase RLS). Redesigning authentication is out of scope here; if stronger auth is needed, open a separate security task.
 
 Use the same versions as the existing DataVis app at `/MarketingOps Cowork/DataVis/`. When in doubt, copy from there.
 

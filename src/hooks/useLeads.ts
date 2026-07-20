@@ -3,28 +3,32 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { Lead, StageHistoryEntry, StageKey } from '../types/db';
 import {
-  EDITABLE_LEAD_FIELDS,
   type EditableLeadField,
   isEditableLeadField,
 } from '../constants/leadFields';
 import { todayIso } from '../lib/dates';
+import {
+  buildSyncPatch as buildSyncPatchPure,
+  buildInsertRow as buildInsertRowPure,
+  mergePendingLeadFields,
+  type SfdcSync,
+  type SyncClock,
+} from '../lib/leadSync';
+import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
+
+// Re-export so existing callers importing SfdcSync from useLeads keep working.
+export type { SfdcSync } from '../lib/leadSync';
 
 const EDITED_BY = 'Marketing';
 const PENDING_WRITE_TTL_MS = 1500;
 const BULK_CHUNK = 100;
 const LOOKUP_CHUNK = 500;
 
-export interface SfdcSync {
-  email: string;
-  values: Partial<Record<EditableLeadField, unknown>>;
-  // Channel hierarchy from the SFDC report (Parent Campaign and Campaign
-  // Name columns). bulkSyncFromSfdc resolves these into a leaf channel id
-  // and writes that to source_channel_id during Phase 0.
-  parentChannelName?: string;
-  subChannelName?: string;
-  sfdc_lead_id?: string;
-  sfdc_contact_id?: string;
-}
+// Real clock for the pure sync builders. Tests pass a fixed clock instead.
+const SYNC_CLOCK: SyncClock = {
+  nowIso: () => new Date().toISOString(),
+  todayIso,
+};
 
 export interface BulkSyncResult {
   inserted: number;
@@ -268,6 +272,37 @@ export function useLeads(): UseLeadsResult {
     return Date.now() - ts < PENDING_WRITE_TTL_MS;
   }, []);
 
+  // One realtime handler shared by the initial subscription and the resume path
+  // (previously two identical copies with six `as unknown as` casts between
+  // them). INSERT prepends if new; UPDATE merges keeping locally-pending fields
+  // via the typed mergePendingLeadFields; DELETE removes by id.
+  const handleRealtimePayload = useCallback(
+    (payload: RealtimePostgresChangesPayload<Lead>) => {
+      if (realtimePausedRef.current) return;
+      if (payload.eventType === 'INSERT') {
+        const next = payload.new;
+        setLeads((prev) =>
+          prev.some((l) => l.id === next.id) ? prev : [next, ...prev],
+        );
+      } else if (payload.eventType === 'UPDATE') {
+        const next = payload.new;
+        setLeads((prev) => {
+          const existing = prev.find((l) => l.id === next.id);
+          if (!existing) return [next, ...prev];
+          const merged = mergePendingLeadFields(next, existing, (field) =>
+            isPending(next.id, field),
+          );
+          return prev.map((l) => (l.id === next.id ? merged : l));
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const old = payload.old as { id?: string };
+        if (!old?.id) return;
+        setLeads((prev) => prev.filter((l) => l.id !== old.id));
+      }
+    },
+    [isPending],
+  );
+
   const refresh = useCallback(async () => {
     try {
       const all = await fetchAllLeads();
@@ -301,41 +336,7 @@ export function useLeads(): UseLeadsResult {
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'leads' },
-          (payload) => {
-            if (realtimePausedRef.current) return;
-            if (payload.eventType === 'INSERT') {
-              const next = payload.new as Lead;
-              setLeads((prev) =>
-                prev.some((l) => l.id === next.id) ? prev : [next, ...prev],
-              );
-            } else if (payload.eventType === 'UPDATE') {
-              const next = payload.new as Lead;
-              setLeads((prev) => {
-                const existing = prev.find((l) => l.id === next.id);
-                if (!existing) return [next, ...prev];
-                // Per-field guard: keep our optimistic value for any column
-                // that is currently in flight, take the server value for
-                // everything else.
-                const merged = { ...next } as unknown as Record<string, unknown>;
-                const existingRecord = existing as unknown as Record<
-                  string,
-                  unknown
-                >;
-                for (const key of Object.keys(existingRecord)) {
-                  if (isPending(next.id, key)) {
-                    merged[key] = existingRecord[key];
-                  }
-                }
-                return prev.map((l) =>
-                  l.id === next.id ? (merged as unknown as Lead) : l,
-                );
-              });
-            } else if (payload.eventType === 'DELETE') {
-              const old = payload.old as { id?: string };
-              if (!old?.id) return;
-              setLeads((prev) => prev.filter((l) => l.id !== old.id));
-            }
-          },
+          handleRealtimePayload,
         )
         .subscribe();
     };
@@ -349,7 +350,7 @@ export function useLeads(): UseLeadsResult {
         channelRef.current = null;
       }
     };
-  }, [isPending]);
+  }, [channelName, handleRealtimePayload]);
 
   const pauseRealtime = useCallback(() => {
     realtimePausedRef.current = true;
@@ -367,45 +368,10 @@ export function useLeads(): UseLeadsResult {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'leads' },
-        (payload) => {
-          // Same handler logic as the initial subscription. Duplicated only
-          // because the initial copy is closed over by the useEffect; pulling
-          // it out into a module-scoped function would force us to thread
-          // the leads ref and isPending through, which is uglier than this.
-          if (realtimePausedRef.current) return;
-          if (payload.eventType === 'INSERT') {
-            const next = payload.new as Lead;
-            setLeads((prev) =>
-              prev.some((l) => l.id === next.id) ? prev : [next, ...prev],
-            );
-          } else if (payload.eventType === 'UPDATE') {
-            const next = payload.new as Lead;
-            setLeads((prev) => {
-              const existing = prev.find((l) => l.id === next.id);
-              if (!existing) return [next, ...prev];
-              const merged = { ...next } as unknown as Record<string, unknown>;
-              const existingRecord = existing as unknown as Record<
-                string,
-                unknown
-              >;
-              for (const key of Object.keys(existingRecord)) {
-                if (isPending(next.id, key)) {
-                  merged[key] = existingRecord[key];
-                }
-              }
-              return prev.map((l) =>
-                l.id === next.id ? (merged as unknown as Lead) : l,
-              );
-            });
-          } else if (payload.eventType === 'DELETE') {
-            const old = payload.old as { id?: string };
-            if (!old?.id) return;
-            setLeads((prev) => prev.filter((l) => l.id !== old.id));
-          }
-        },
+        handleRealtimePayload,
       )
       .subscribe();
-  }, [isPending]);
+  }, [channelName, handleRealtimePayload]);
 
   const applyPatch = useCallback(
     async (
@@ -578,107 +544,18 @@ export function useLeads(): UseLeadsResult {
     }
   }, []);
 
-  // Lock-aware sync patch builder. Shared by syncFromSfdc and the bulk path.
-  // `existing` is the current lead row; `sync` is the SFDC candidate values.
-  // Returns the patch to apply to the leads table for this lead.
+  // Thin wrappers over the pure lock-aware builders in lib/leadSync.ts, bound to
+  // the real clock. The edit-lock logic and its tests live there.
   const buildSyncPatch = useCallback(
-    (existing: Lead, sync: SfdcSync): Partial<Lead> => {
-      const sourceSfdc: Record<string, unknown> = { ...existing.source_sfdc };
-      const patch: Record<string, unknown> = {};
-      for (const field of EDITABLE_LEAD_FIELDS) {
-        const incoming = sync.values[field];
-        if (incoming === undefined) continue;
-        sourceSfdc[field] = incoming;
-        if (!existing.field_locks?.[field]) {
-          patch[field] = incoming;
-        }
-      }
-      // Detect Lead → MQL stage upgrade on re-import. If the incoming
-      // stage differs from what we have AND the new stage doesn't yet
-      // have a stage_history entry, append one with entered_at = today.
-      //
-      // This is intentionally always auto-append, with no lock. The
-      // existing per-entry edit_locked guards individual history
-      // entries from being overwritten; this path only ever ADDS new
-      // entries, never modifies existing ones.
-      //
-      // Date is today's import date as a best-effort approximation.
-      // The true MQL transition date isn't carried by the SFDC export
-      // today. A future n8n-based SFDC sync could supply the HubSpot
-      // lifecycle stage change date, at which point this should use
-      // that field instead of todayIso().
-      const incomingStage = sync.values.current_stage as
-        | StageKey
-        | undefined;
-      if (
-        incomingStage &&
-        incomingStage !== 'lead' &&
-        incomingStage !== existing.current_stage
-      ) {
-        const alreadyHasEntry = (existing.stage_history ?? []).some(
-          (e) => e.stage === incomingStage,
-        );
-        if (!alreadyHasEntry) {
-          const newEntry: StageHistoryEntry = {
-            stage: incomingStage,
-            entered_at: todayIso(),
-            edited_by: EDITED_BY,
-            edit_locked: false,
-          };
-          patch.stage_history = [
-            ...(existing.stage_history ?? []),
-            newEntry,
-          ];
-        }
-      }
-      if (sync.sfdc_lead_id && !existing.sfdc_lead_id) {
-        patch.sfdc_lead_id = sync.sfdc_lead_id;
-      }
-      if (sync.sfdc_contact_id && !existing.sfdc_contact_id) {
-        patch.sfdc_contact_id = sync.sfdc_contact_id;
-      }
-      patch.source_sfdc = sourceSfdc;
-      patch.last_synced_at = new Date().toISOString();
-      return patch as Partial<Lead>;
-    },
+    (existing: Lead, sync: SfdcSync): Partial<Lead> =>
+      buildSyncPatchPure(existing, sync, SYNC_CLOCK),
     [],
   );
 
-  const buildInsertRow = useCallback((sync: SfdcSync): Partial<Lead> => {
-    const sourceSfdc: Record<string, unknown> = {};
-    const row: Record<string, unknown> = {};
-    for (const field of EDITABLE_LEAD_FIELDS) {
-      const incoming = sync.values[field];
-      if (incoming === undefined) continue;
-      sourceSfdc[field] = incoming;
-      row[field] = incoming;
-    }
-    if (sync.sfdc_lead_id) row.sfdc_lead_id = sync.sfdc_lead_id;
-    if (sync.sfdc_contact_id) row.sfdc_contact_id = sync.sfdc_contact_id;
-    row.email = sync.email.trim().toLowerCase();
-    const stage =
-      (sync.values.current_stage as StageKey | undefined) ?? 'lead';
-    row.current_stage = stage;
-    // The funnel grid's MQL count reads from stage_history, so any non-'lead'
-    // default stage on a brand-new lead needs a seeded history entry.
-    // entered_at falls back to today if marketing_sourced_date is absent.
-    const history: StageHistoryEntry[] = [];
-    if (stage !== 'lead') {
-      const enteredAt =
-        (sync.values.marketing_sourced_date as string | undefined) ?? todayIso();
-      history.push({
-        stage,
-        entered_at: enteredAt,
-        edited_by: EDITED_BY,
-        edit_locked: false,
-      });
-    }
-    row.stage_history = history;
-    row.field_locks = {};
-    row.source_sfdc = sourceSfdc;
-    row.last_synced_at = new Date().toISOString();
-    return row as Partial<Lead>;
-  }, []);
+  const buildInsertRow = useCallback(
+    (sync: SfdcSync): Partial<Lead> => buildInsertRowPure(sync, SYNC_CLOCK),
+    [],
+  );
 
   const syncFromSfdc = useCallback(
     async (leadId: string, sync: SfdcSync): Promise<void> => {

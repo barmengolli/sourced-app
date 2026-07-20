@@ -38,19 +38,23 @@ import ChartCard from '../components/charts/ChartCard';
 import { CHART_COLORS } from '../constants/chartColors';
 import {
   EVENT_ACTIVATION_VALUES,
+  EVENT_ACTIVATION_ALL,
   EVENTS_PARENT_CHANNEL_NAME,
-  type EventActivation,
+  type EventActivationValue,
 } from '../constants/eventActivations';
 import type { RegionKey } from '../constants/regions';
 
 // Pluralized labels for the KPI tiles. The compute layer keys on the
 // singular SFDC names, but at the top of the page we're showing a sum
-// of contacts, so plural reads more naturally.
-const KPI_TILE_LABELS: Record<EventActivation, string> = {
+// of contacts, so plural reads more naturally. "Registered" is shown
+// but is not an activation: it counts registration volume, not
+// engagement, so it is excluded from Active Contacts / % Active.
+const KPI_TILE_LABELS: Record<EventActivationValue, string> = {
   'Pre-Event Meeting': 'Pre-Event Meetings',
   'Booth Meeting': 'Booth Meetings',
   'Session Attendee': 'Session Attendees',
   'Post-Event Meeting': 'Post-Event Meetings',
+  Registered: 'Registered',
 };
 
 interface FunnelEventsPageProps {
@@ -142,14 +146,15 @@ export default function FunnelEventsPage({
   // the current view. Column totals in the table equal these by
   // construction (same source rows).
   const totals = useMemo(() => {
-    const sum: Record<EventActivation, number> = {
+    const sum: Record<EventActivationValue, number> = {
       'Pre-Event Meeting': 0,
       'Booth Meeting': 0,
       'Session Attendee': 0,
       'Post-Event Meeting': 0,
+      Registered: 0,
     };
     for (const e of rows) {
-      for (const type of EVENT_ACTIVATION_VALUES) {
+      for (const type of EVENT_ACTIVATION_ALL) {
         sum[type] += e.perType[type];
       }
     }
@@ -205,8 +210,8 @@ export default function FunnelEventsPage({
           events in the current period and region. Always render so
           the user sees "0 across all events" rather than a blank
           card on empty periods. */}
-      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {EVENT_ACTIVATION_VALUES.map((v) => (
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+        {EVENT_ACTIVATION_ALL.map((v) => (
           <ChartCard
             key={v}
             title={KPI_TILE_LABELS[v]}
@@ -229,7 +234,7 @@ export default function FunnelEventsPage({
             <thead className="bg-muted text-xs text-slate-muted uppercase tracking-wide">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">Event</th>
-                {EVENT_ACTIVATION_VALUES.map((v) => (
+                {EVENT_ACTIVATION_ALL.map((v) => (
                   <th
                     key={v}
                     className="px-3 py-2 text-right font-medium tabular-nums"
@@ -270,7 +275,7 @@ export default function FunnelEventsPage({
                     }
                   >
                     <td className="px-3 py-2 text-charcoal">{r.channelName}</td>
-                    {EVENT_ACTIVATION_VALUES.map((v) => (
+                    {EVENT_ACTIVATION_ALL.map((v) => (
                       <td
                         key={v}
                         className="px-3 py-2 text-right text-charcoal tabular-nums"

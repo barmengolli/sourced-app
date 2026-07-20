@@ -160,7 +160,7 @@ into `useChannels.ts`. ~10 lines.
 **Observation**:
 
 ```ts
-const FALLBACK_PASSWORD = 'HWWQa4yD5vkX';
+const FALLBACK_PASSWORD = '<redacted-shared-password>';
 const ENV_PASSWORD = import.meta.env.VITE_APP_PASSWORD as string | undefined;
 if (!ENV_PASSWORD) console.warn('VITE_APP_PASSWORD is not set. Falling back to default.');
 const CORRECT_PASSWORD = ENV_PASSWORD || FALLBACK_PASSWORD;
