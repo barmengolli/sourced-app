@@ -137,6 +137,8 @@ export function previousPeriod(period: ReportingPeriod): ReportingPeriod | null 
   switch (period.grain) {
     case 'month': {
       if (period.month === 1) {
+        // January of year 1 has no valid previous month (year 0 is invalid).
+        if (period.year <= 1) return null;
         return { grain: 'month', year: period.year - 1, month: 12 };
       }
       return {
@@ -147,6 +149,8 @@ export function previousPeriod(period: ReportingPeriod): ReportingPeriod | null 
     }
     case 'quarter': {
       if (period.quarter === 1) {
+        // Q1 of year 1 has no valid previous quarter (year 0 is invalid).
+        if (period.year <= 1) return null;
         return { grain: 'quarter', year: period.year - 1, quarter: 4 };
       }
       return {
@@ -156,6 +160,8 @@ export function previousPeriod(period: ReportingPeriod): ReportingPeriod | null 
       };
     }
     case 'year': {
+      // Year 1 has no valid previous year (year 0 is invalid).
+      if (period.year <= 1) return null;
       return { grain: 'year', year: period.year - 1 };
     }
   }
@@ -167,6 +173,8 @@ export function previousYearPeriod(
   period: ReportingPeriod,
 ): ReportingPeriod | null {
   if (!isValidReportingPeriod(period)) return null;
+  // Any year-1 period has no valid prior-year counterpart (year 0 is invalid).
+  if (period.year <= 1) return null;
   switch (period.grain) {
     case 'month':
       return { grain: 'month', year: period.year - 1, month: period.month };
@@ -243,11 +251,28 @@ export function comparisonModesCollapse(grain: ReportingGrain): boolean {
 // Partial-period detection (explicit as-of date, never the clock)
 // ---------------------------------------------------------------------------
 
+// A real, existing calendar date in YYYY-MM-DD form. Beyond the fixed-width
+// shape, this rejects month 0, month 13, day 0, impossible month lengths, and
+// invalid February dates, honoring leap years (including the 1900 and 2000
+// century rules via daysInMonth). Purely string/integer math: no Date object,
+// so it stays timezone-independent.
+export function isValidIsoDate(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return false;
+  const year = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  const day = parseInt(m[3], 10);
+  if (!isValidYear(year)) return false;
+  if (!isMonthIndex(month)) return false; // rejects 0 and 13
+  if (day < 1 || day > daysInMonth(year, month)) return false; // rejects 0 and overflow
+  return true;
+}
+
 // Compare two YYYY-MM-DD strings lexicographically. Returns null if either is
-// not a well-formed date-only string. Safe because the format is fixed-width.
+// not a real calendar date. Lexicographic order is correct once both are valid
+// because the format is fixed-width and zero-padded.
 function compareIsoDates(a: string, b: string): number | null {
-  const re = /^\d{4}-\d{2}-\d{2}$/;
-  if (!re.test(a) || !re.test(b)) return null;
+  if (!isValidIsoDate(a) || !isValidIsoDate(b)) return null;
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;
@@ -257,7 +282,9 @@ function compareIsoDates(a: string, b: string): number | null {
 // data-through (or as-of) calendar date. This function NEVER reads the clock;
 // the caller must pass the date it trusts.
 //
-//   - If dataThrough is null/invalid  -> 'missing' (cannot judge; suppress).
+//   - If dataThrough is null or not a real calendar date -> 'missing'
+//     (cannot judge; suppress). Shape-valid but impossible dates such as
+//     '2026-13-40' are rejected here, not treated as trustworthy.
 //   - If dataThrough is on/after the period end -> 'complete'.
 //   - If dataThrough is before the period start -> 'missing' (no data yet).
 //   - Otherwise the period is underway -> 'partial'.

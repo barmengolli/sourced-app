@@ -13,6 +13,7 @@ import {
   isValidReportingPeriod,
   assessCompleteness,
   isPeriodComplete,
+  isValidIsoDate,
 } from './reportingPeriods';
 import type { MonthIndex, ReportingPeriod } from '../types/reporting';
 import type { PeriodIndex } from '../types/db';
@@ -136,6 +137,69 @@ describe('labels', () => {
   });
 });
 
+describe('year underflow — no function may produce year 0', () => {
+  it('January of year 1 has no valid previous month', () => {
+    expect(previousPeriod(month(1, 1))).toBeNull();
+  });
+  it('a non-January month of year 1 still steps back within the year', () => {
+    expect(previousPeriod(month(1, 2))).toEqual(month(1, 1));
+  });
+  it('Q1 of year 1 has no valid previous quarter', () => {
+    expect(previousPeriod(quarter(1, 1))).toBeNull();
+  });
+  it('a non-Q1 quarter of year 1 still steps back within the year', () => {
+    expect(previousPeriod(quarter(1, 2))).toEqual(quarter(1, 1));
+  });
+  it('year 1 has no valid previous year', () => {
+    expect(previousPeriod(year(1))).toBeNull();
+  });
+  it('previous-year comparison for any year-1 period returns null', () => {
+    expect(previousYearPeriod(month(1, 6))).toBeNull();
+    expect(previousYearPeriod(quarter(1, 3))).toBeNull();
+    expect(previousYearPeriod(year(1))).toBeNull();
+  });
+  it('comparisonPeriod inherits the null for year-1 periods', () => {
+    expect(comparisonPeriod(month(1, 1), 'previous_period')).toBeNull();
+    expect(comparisonPeriod(month(1, 6), 'previous_year')).toBeNull();
+    expect(comparisonPeriod(quarter(1, 1), 'previous_period')).toBeNull();
+    expect(comparisonPeriod(year(1), 'previous_year')).toBeNull();
+  });
+  it('year 2 still has valid predecessors (guard is exactly at year 1)', () => {
+    expect(previousPeriod(month(2, 1))).toEqual(month(1, 12));
+    expect(previousPeriod(quarter(2, 1))).toEqual(quarter(1, 4));
+    expect(previousYearPeriod(year(2))).toEqual(year(1));
+  });
+});
+
+describe('isValidIsoDate — real calendar validation', () => {
+  it('accepts ordinary valid dates', () => {
+    expect(isValidIsoDate('2026-06-30')).toBe(true);
+    expect(isValidIsoDate('2026-01-01')).toBe(true);
+    expect(isValidIsoDate('2026-12-31')).toBe(true);
+  });
+  it('rejects month 0 and month 13', () => {
+    expect(isValidIsoDate('2026-00-10')).toBe(false);
+    expect(isValidIsoDate('2026-13-40')).toBe(false);
+  });
+  it('rejects day 0 and impossible month lengths', () => {
+    expect(isValidIsoDate('2026-06-00')).toBe(false);
+    expect(isValidIsoDate('2026-06-31')).toBe(false); // June has 30
+    expect(isValidIsoDate('2026-04-31')).toBe(false); // April has 30
+  });
+  it('honors February leap-year rules including century edge cases', () => {
+    expect(isValidIsoDate('2026-02-29')).toBe(false); // common year
+    expect(isValidIsoDate('2026-02-28')).toBe(true);
+    expect(isValidIsoDate('2024-02-29')).toBe(true); // leap
+    expect(isValidIsoDate('1900-02-29')).toBe(false); // century non-leap
+    expect(isValidIsoDate('2000-02-29')).toBe(true); // century leap
+  });
+  it('rejects malformed shapes and out-of-range years', () => {
+    expect(isValidIsoDate('2026-6-30')).toBe(false);
+    expect(isValidIsoDate('not-a-date')).toBe(false);
+    expect(isValidIsoDate('0000-01-01')).toBe(false);
+  });
+});
+
 describe('assessCompleteness — explicit data-through date, never the clock', () => {
   it('marks complete when data-through reaches the period end', () => {
     const r = assessCompleteness(month(2026, 6), '2026-06-30');
@@ -165,5 +229,21 @@ describe('assessCompleteness — explicit data-through date, never the clock', (
   it('quarter completeness uses the quarter end', () => {
     expect(assessCompleteness(quarter(2026, 2), '2026-06-30').completeness).toBe('complete');
     expect(assessCompleteness(quarter(2026, 2), '2026-05-15').completeness).toBe('partial');
+  });
+
+  it('treats an impossible-but-shaped data-through date as missing and suppressed', () => {
+    for (const bad of ['2026-13-40', '2026-00-10', '2026-06-31', '2026-02-29']) {
+      const r = assessCompleteness(month(2026, 6), bad);
+      expect(r.completeness).toBe('missing');
+      expect(r.suppressDelta).toBe(true);
+    }
+  });
+
+  it('accepts a valid leap-day data-through date at a February boundary', () => {
+    // Feb 2024 is a leap month ending on the 29th; data through the 29th is complete.
+    expect(assessCompleteness(month(2024, 2), '2024-02-29').completeness).toBe('complete');
+    expect(assessCompleteness(month(2024, 2), '2024-02-15').completeness).toBe('partial');
+    // The same 29th is not a valid date in the non-leap year 2026, so it is missing.
+    expect(assessCompleteness(month(2026, 2), '2026-02-29').completeness).toBe('missing');
   });
 });

@@ -93,6 +93,19 @@ export default function ReportingFilterBar({
     (y) => ({ value: String(y), label: String(y) }),
   );
 
+  // Switching grain updates the period. It also normalizes comparison state so
+  // the controlled parent value agrees with what ComparisonControl can show:
+  // Year grain collapses previous_period and previous_year to one option, so a
+  // lingering previous_period is normalized up to previous_year. `off` and an
+  // existing previous_year are preserved, and no comparison change is emitted
+  // for grains that keep both options (month, quarter).
+  function handleGrainChange(grain: ReportingGrain) {
+    onPeriodChange(changeGrain(period, grain));
+    if (grain === 'year' && comparison === 'previous_period') {
+      onComparisonChange('previous_year');
+    }
+  }
+
   return (
     <div className="flex flex-wrap items-end gap-3" data-testid="reporting-filter-bar">
       {/* 1. Timeframe grain */}
@@ -100,7 +113,7 @@ export default function ReportingFilterBar({
         label="Timeframe"
         options={GRAIN_OPTIONS}
         value={period.grain}
-        onChange={(grain) => onPeriodChange(changeGrain(period, grain))}
+        onChange={handleGrainChange}
       />
 
       {/* 2. Period (month select or quarter segmented; hidden for year) */}
