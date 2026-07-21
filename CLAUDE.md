@@ -1,331 +1,605 @@
-# Sourced — Project Instructions for Claude Code
+# sourced: Claude Code instructions
 
-This file is read on every Claude Code session. Adhere strictly. These instructions OVERRIDE any default Claude Code behavior.
+Status: Active canonical instructions
+Last verified against the repository: 2026-07-21
+Owner: Marketing Operations
 
----
+This is the single active instruction document for Claude Code in this
+repository. Read it completely before every task and follow it strictly.
 
-## What this app is
+The checked-in code and live database are the final evidence when they conflict
+with this file. Do not silently choose one. Investigate the difference, report
+it to Benjamin, and update this file as part of an approved change.
 
-Sourced is a B2B marketing attribution and lead-tracking SPA for EIS Group's Marketing Operations function. It is a corrected mirror of Salesforce lead data, owned by Marketing, with editable fields and per-field edit-locks so MOps can fix incorrect dates, owners, and stages without those edits being overwritten by SFDC sync.
+## 1. Application overview
 
-The app's defining capabilities:
+`sourced` is an internal B2B marketing attribution and lead-tracking SPA for
+EIS Group's Marketing Operations team. It contains customer and prospect
+business-contact data and must be treated as sensitive.
 
-1. **Lead-level ledger.** One row per lead, every field editable, with provenance tracking (what SFDC says vs. what Marketing corrected to).
-2. **Computed funnel reporting.** The funnel grid (channel x quarter x stage) is computed from leads, not stored. Fix a lead's date and the grid recomputes automatically.
-3. **Two-tier campaign hierarchy.** Parent Campaigns (e.g. "2026 Pet Campaign") with Sub-Campaigns and channels attached to them.
-4. **Multi-touch attribution at the deal level.** Ordered touches (1st Touch, 2nd Touch, etc.) per opportunity, linked back to the originating lead.
-5. **Spend tracking.** Quarterly spend per campaign, enabling CPL, CPMQL, CPHPP, and ROI by campaign.
-6. **Cohort and velocity reporting.** Track cohorts over the full 2-year B2B sales cycle. Compute stage velocity (median days Lead to MQL, MQL to HPP, etc.).
+The application helps Marketing work around incomplete Salesforce data while
+preserving provenance. Its main capabilities are:
 
----
+- A corrected Salesforce lead ledger with field-level edit locks.
+- Computed funnel and conversion reporting.
+- HPP and opportunity tracking with multi-touch attribution.
+- Campaign tagging across channels and reporting sources.
+- Spend, event, BDR quota, Outreach, LinkedIn Ads, and 6sense reporting.
 
-## Brand and visual identity
+The app is not a CRM and does not replace Salesforce.
 
-- **Name**: Sourced (always lowercase in UI, "sourced" not "Sourced")
-- **Mark**: lowercase "s" from two converging ribbons, indigo to teal gradient. Located at `/brand/sourced-logo-v1.png` once vectorized to `/public/sourced-mark.svg`
-- **Palette**:
-  - Indigo `#4F46E5` (primary)
-  - Teal `#06B6D4` (secondary)
-  - Charcoal `#0F172A` (text primary)
-  - Slate `#64748B` (text secondary)
-  - Background `#FFFFFF`
-  - Muted `#F8FAFC`
-  - Border `#E2E8F0`
-  - Success `#10B981`
-  - Warning `#F59E0B`
-  - Danger `#EF4444`
-- **Typography**: Inter (loaded from `https://rsms.me/inter/inter.css`). Use system-ui as fallback. All headings sentence case, never Title Case, never ALL CAPS.
-- **Style**: minimal, flat, no gradients except in the logo mark, no drop shadows beyond Tailwind's default `shadow-sm` on cards. Generous whitespace.
+Current navigation is defined in `src/constants/sidebar.ts` and routed in
+`src/App.tsx`:
 
-Define these as Tailwind theme colors and CSS variables in `tailwind.config.js` and `index.css` so they are referenceable everywhere.
+| Area | Current pages |
+|---|---|
+| Marketing Funnel | Data Entry, Leads & MQLs, Opportunities, Events, Spend, Compare |
+| Reach & Engagement | 6sense Dashboard, Import |
+| BDR Quota | Dashboard, Quotas |
+| Outreach | Data, Dashboard, Compare |
+| LinkedIn Ads | Dashboard |
+| Campaigns | Overview, Tags |
+| Utilities | User Manual, Feedback & Bug Reports, Leads, Channels, Funnel Import, Settings |
 
----
+Some pages are marked Beta. Calculation changes on Beta pages still require
+tests and before-and-after reconciliation.
 
-## Tech stack (mirror DataVis 1)
+`src/pages/CohortPage.tsx` is retained but is not currently routed.
 
-- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS v4
-- **Charts**: Recharts (BarChart, Sankey, LineChart, PieChart)
-- **Database**: Supabase (PostgreSQL with realtime subscriptions)
-- **Hosting**: Vercel (auto-deploy from GitHub main branch)
-- **Auth**: Client-side password gate. The password is not stored in tracked docs; it is configured via the `VITE_APP_PASSWORD` environment variable (key in `.env.example`, real value in a local untracked `.env`). This gate is a convenience barrier only: browser-delivered credentials are discoverable, so it does not protect sensitive data. Real authorization is Supabase RLS. Do not redesign auth here.
-- **Package manager**: npm
+## 2. Current architecture and data sources
 
-Use the same versions as the existing DataVis app at `/MarketingOps Cowork/DataVis/`. When in doubt, copy from there.
+### Technology and delivery
 
----
+- Frontend: React 19, TypeScript 5.9, Vite 8.
+- Styling: Tailwind CSS 4 through the Vite plugin.
+- Charts: Recharts 3.
+- Database: Supabase PostgreSQL with realtime subscriptions.
+- Hosting: Vercel, automatically deployed from `main`.
+- CI: GitHub Actions on Node 24.
+- Testing: Vitest with pure and jsdom component tests.
+- Package manager: npm with a committed lockfile.
 
-## Folder structure
+AWS hosting is being discussed but has not replaced Vercel or Supabase.
 
+### Repository map
+
+| Path | Responsibility |
+|---|---|
+| `src/App.tsx` | Top-level routing and shared section state |
+| `src/constants/sidebar.ts` | Navigation structure and labels |
+| `src/pages/` | Page-level reporting and operations surfaces |
+| `src/components/` | Reusable UI grouped by domain |
+| `src/hooks/` | Supabase reads, writes, realtime, and mutations |
+| `src/lib/compute.ts` | Current consolidated reporting calculations |
+| `src/lib/leadSync.ts` | Typed edit-lock import and merge logic |
+| `src/lib/dates.ts` | Calendar and ISO-week helpers |
+| `src/lib/campaignScorecard.ts` | Cross-source campaign scoring |
+| `src/types/db.ts` | Application data interfaces |
+| `src/test/` | Test setup and factories |
+| `SCHEMA.sql` | Intended fresh-database schema |
+| `migrations/` | Incremental SQL and migration ledger |
+
+### Core database tables
+
+- `channels`: hierarchical marketing channel taxonomy.
+- `leads`: corrected Salesforce lead mirror with locks and provenance.
+- `attributions`: one row per deal stage.
+- `attribution_touches`: ordered channel touches.
+- `campaign_costs`: date-range budgets and costs by channel.
+- `funnel_projections`: stored quarterly projections.
+- `funnel_actuals`: manual quarterly fallback actuals.
+- `cell_comments`, `cell_links`: funnel-cell annotations.
+- `outreach_snapshots`: weekly cumulative sequence snapshots.
+- `linkedin_ads_snapshots`: weekly additive ad-set totals.
+- `sixsense_snapshots`: monthly point-in-time summaries.
+- `bdr_quotas`: annual HPP and Opp targets by BDR.
+- `campaign_tags`, `campaign_tag_links`: cross-source manual campaign tags.
+
+For database work, inspect `SCHEMA.sql`, relevant migrations, application
+types, and the live catalog when authorized. Migration status documentation
+alone is not proof of production state.
+
+### Data sources and ingestion
+
+#### Salesforce leads
+
+- An n8n workflow extracts leads from Salesforce into a Google Sheet.
+- The prepared Sheet data is then brought into `sourced` through the Funnel
+  Import workflow. The app does not currently query Salesforce directly.
+- Email is the canonical match key and is normalized to lowercase.
+- Parent Campaign and Campaign Name can populate the channel hierarchy.
+- Imports must honor field locks and update source provenance.
+- Event Activation is a validated label array without individual activation
+  timestamps.
+
+#### Opportunities and attribution
+
+- HPP and later stages are managed in the application.
+- Rows for one logical deal share `deal_id`.
+- `stage_entered_at` records entry into each deal stage.
+- Ordered touches are stored separately.
+- An HPP may be created without a linked lead. Source channel is the required
+  attribution evidence.
+
+#### Outreach
+
+- Populated by a scheduled n8n workflow.
+- Rows are weekly cumulative sequence snapshots.
+- Period activity is derived by differencing snapshots.
+- Outreach uses its own legacy five-region taxonomy inferred from sequence
+  names.
+
+#### LinkedIn Ads
+
+- Populated by n8n from a weekly Google Sheet.
+- Rows are additive weekly totals per ad set, not cumulative counters.
+- CTR, CPC, and CPM must be recalculated from aggregated numerators and
+  denominators.
+- The detailed mapping is in `docs/linkedin-n8n-mapping.md` and should be read
+  only when working on that integration.
+
+#### 6sense
+
+- Imported manually through the 6sense CSV Import page.
+- Rows are monthly point-in-time summaries per segment.
+- The legacy `week_number` column stores month number `1..12`. Never interpret
+  it as an ISO week in 6sense code.
+
+#### Campaigns
+
+- Campaigns are manual tags over channels, 6sense segments, Outreach
+  sequences, and LinkedIn ad sets.
+- One asset may belong to multiple tags.
+- A shared asset counts in full for each campaign claiming it. Campaign totals
+  can overlap and must not be summed into a company total.
+
+The repository does not contain sanitized exports for every live n8n workflow.
+Do not claim a complete workflow audit from repository evidence alone.
+
+## 3. Business-critical rules
+
+### Lead edit-lock contract
+
+When a user edits an editable lead field:
+
+1. Save the corrected value.
+2. Set `field_locks[field] = true`.
+3. Set `last_edited_by` and update timestamps.
+
+During Salesforce import or future synchronization:
+
+1. A locked field keeps the Marketing value.
+2. The incoming Salesforce value still updates `source_sfdc[field]`.
+3. An unlocked field may be overwritten and also updates `source_sfdc`.
+4. `last_synced_at` is always updated.
+
+The typed builders in `src/lib/leadSync.ts` are the core implementation. Any
+change requires edit-lock regression tests.
+
+### Computed actuals and stored planning values
+
+- Lead-level actuals are computed from source records.
+- Lead stage uses `marketing_sourced_date`.
+- MQL uses stage history under the view's stated cohort or activity rule.
+- HPP and later stages use attribution records.
+- Projections are stored quarterly in `funnel_projections`.
+- `funnel_actuals` is a quarterly fallback where source records do not cover a
+  historical cell.
+- Never invent monthly values from a quarterly fallback.
+
+### Deal and HPP contract
+
+- `lead_id` is optional.
+- Source channel is required when creating an HPP.
+- Never fabricate or require a lead merely to make a deal count.
+- A null `lead_id` does not prove Sales origin.
+- Label a leadless deal `Sales-sourced` only when its top-level channel is
+  `Sales Generated`. Otherwise use `No linked lead`.
+- Preserve the unique logical deal and stage relationship.
+
+### Identity and deduplication
+
+- Lead email is the canonical identity key and is stored lowercase.
+- An import matching an existing email is an update, not an insert.
+- System IDs are retained for provenance but are not the current match key.
+- Every source upsert needs a documented natural key and must be idempotent.
+
+### Regions
+
+- Funnel reporting uses `src/constants/regions.ts`.
+- Outreach uses `src/constants/outreachRegions.ts`.
+- Do not silently merge these taxonomies.
+
+### Schema changes
+
+For an approved structural database change:
+
+1. Verify the live catalog.
+2. Add an incremental migration.
+3. Update `SCHEMA.sql` in the same change.
+4. Prefer idempotent SQL where practical.
+5. Record actual migration status after execution.
+
+Do not apply a migration without explicit authorization.
+
+## 4. Reporting timeframe and delta standard
+
+These rules apply to every current reporting surface as it is migrated and to
+every future source, including email marketing. They do not authorize a bulk
+rewrite.
+
+### Standard periods
+
+- Standard grains: Month, Quarter, Year.
+- Week may remain as source detail or a diagnostic view, but it is not a
+  standard executive-reporting grain.
+- Month uses calendar-month boundaries.
+- Q1 is January through March, Q2 April through June, Q3 July through
+  September, and Q4 October through December.
+- Year is January through December.
+- Fiscal periods require an explicit product decision before implementation.
+- Preserve the finest reliable source grain even when the UI reports a larger
+  period.
+- Treat ISO date-only values as calendar dates without browser-timezone
+  conversion.
+- Timestamped sources must declare their reporting timezone.
+- Period endpoints are inclusive after source normalization.
+
+### Standard timeframe behavior
+
+Use this order:
+
+`Timeframe: [Month | Quarter | Year] [period] [year]`
+
+- Default dashboards to Month when reliable monthly data exists.
+- Default to the latest available period.
+- Mark incomplete periods as `Partial` or `Data through <date>`.
+- Omit unsupported grains instead of fabricating data.
+- Data-entry pages default to their storage grain.
+- Page-level timeframe controls apply to all primary KPIs and charts.
+- Put fixed full-year or all-time charts in a labeled context section.
+- Time controls come before region, campaign, channel, sequence, and search.
+
+### Source classification and aggregation
+
+Classify a source before designing its filters:
+
+| Model | Required aggregation |
+|---|---|
+| Additive flow | Sum deduplicated records in the period, then recompute rates from total numerators and denominators |
+| Cumulative snapshot | Subtract the last value before the period from the last value in the period; detect resets and missing baselines |
+| Point-in-time snapshot | Use the latest eligible snapshot at or before period end; never sum snapshots |
+| Date range | Prorate by inclusive overlap with the selected period |
+| Cohort | Anchor membership to one stated entry event and follow it consistently |
+| Coarser historical fallback | Keep the stored grain and annotate it; never spread it into invented smaller periods |
+
+Every report must disclose its reporting basis in plain language. Use one or
+more of these standard labels:
+
+- `Cohort`: records are grouped by a stated entry date and followed forward.
+- `Activity`: events that occurred during the selected period.
+- `Snapshot`: the latest known state as of a stated date. Snapshots are not
+  summed across the period.
+- `Derived activity`: period activity calculated from cumulative snapshots.
+- `Allocation`: a date-range amount prorated into the selected period.
+
+Place the disclosure beside the report title or directly below it. Include the
+actual anchor or effective date in the explanation, such as `Cohort based on
+marketing sourced date` or `Snapshot as of July 31, 2026`. If one page mixes
+models, label each affected section instead of applying one misleading label to
+the entire page.
+
+Current source semantics:
+
+| Domain | Model and anchor | Important constraint |
+|---|---|---|
+| Funnel lead stage | Cohort on `marketing_sourced_date` | Quarterly fallback cannot become monthly bars |
+| Funnel MQL stage | Strict cohort on first MQL history date | Keep cohort and activity views distinct |
+| Opportunities | HPP cohort or stage activity | Every surface must state which one it uses |
+| Funnel spend | Date range plus dated events | Recalculate ratios from period totals |
+| Events | Lead cohort with undated activation labels | Do not claim the activation happened in the selected period |
+| LinkedIn Ads | Weekly additive flow on `snapshot_date` | Audit exact month-boundary support |
+| Outreach | Weekly cumulative snapshots on `export_date` | Requires baselines, reset handling, and completeness checks |
+| 6sense | Monthly point-in-time snapshot | Quarter and year use the latest snapshot, never a sum |
+| BDR quota | HPP cohort against annual quota | Period quota interpretation needs business approval |
+| Funnel Data Entry | Quarterly stored values | Do not create monthly editable cells |
+| Campaign scorecards | Mixed source models | Each metric follows its source rule |
+
+### Comparison periods
+
+Use a separate control:
+
+`Compare to: [Previous period | Previous year | Off]`
+
+- Previous period means prior month, prior quarter, or prior year.
+- Previous year means the same month or quarter in the prior year.
+- For Year grain, Previous period and Previous year are identical, so show one
+  option.
+- Default to Previous period when prior data exists.
+- Name the comparison, such as `vs June`, `vs Q2`, or `vs 2025`.
+- Cross calendar boundaries correctly, including January and Q1.
+- Never silently substitute one comparison mode for another.
+- Current and comparison periods must use identical non-time filters and metric
+  definitions.
+
+### Delta calculations
+
+For count, currency, duration, and other numeric metrics:
+
+```text
+absolute delta = current value - comparison value
+relative delta = absolute delta / absolute value of comparison value * 100
 ```
-sourced-app/
-├── public/
-│   ├── sourced-mark.svg           # Logo mark
-│   ├── favicon.svg                # 32x32 mark crop
-│   └── icons.svg                  # Sprite for UI icons
-├── src/
-│   ├── App.tsx                    # Top-level routing, password gate
-│   ├── main.tsx
-│   ├── index.css                  # Tailwind + CSS variables
-│   ├── components/
-│   │   ├── PasswordGate.tsx
-│   │   ├── common/
-│   │   ├── leads/                 # Lead table, lead detail drawer, edit cell
-│   │   ├── campaigns/             # Campaign list, campaign detail
-│   │   ├── import/                # CSV importer, column mapper, diff view
-│   │   ├── funnel/                # Funnel grid (computed)
-│   │   ├── charts/                # Sankey, Bar, Donut, Funnel chart, Trends
-│   │   ├── attribution/           # Attribution editor modal, touches list
-│   │   └── reports/               # Cohort, velocity, CPL by campaign
-│   ├── pages/
-│   │   ├── LeadsPage.tsx
-│   │   ├── CampaignsPage.tsx
-│   │   ├── DashboardPage.tsx
-│   │   ├── CohortPage.tsx
-│   │   └── SettingsPage.tsx
-│   ├── hooks/
-│   │   ├── useSupabase.ts
-│   │   ├── useLeads.ts
-│   │   ├── useCampaigns.ts
-│   │   └── useFunnelGrid.ts
-│   ├── lib/
-│   │   ├── supabase.ts            # Supabase client
-│   │   ├── csv.ts                 # CSV parsing and import helpers
-│   │   ├── dates.ts               # Quarter math, date helpers
-│   │   └── compute.ts             # Funnel grid computation from leads
-│   ├── types/
-│   │   └── db.ts                  # TypeScript interfaces for all tables
-│   └── constants/
-│       ├── stages.ts              # Stage keys and labels
-│       └── countries.ts
-├── .env                           # NOT committed
-├── .env.example
-├── package.json
-├── tsconfig.json
-├── tailwind.config.js
-├── vite.config.ts
-└── README.md
+
+Calculate at full precision and round only for display.
+
+Rates must be recalculated separately for each period from aggregate
+numerators and denominators. Show the absolute difference in percentage points,
+using `pp`, plus relative change when valid.
+
+Required zero and missing states:
+
+| Current | Comparison | Display |
+|---|---|---|
+| Value | Positive | Absolute and relative delta |
+| Positive | Zero | Absolute delta and `New`, no infinite percentage |
+| Zero | Positive | Absolute and relative delta |
+| Zero | Zero | `No change` |
+| Value | Missing | `No comparison data` |
+| Missing | Any | `No current data` |
+
+Missing data and zero are different facts and must remain different.
+
+### Partial periods and completeness
+
+- Label a partial or incomplete current period.
+- Do not compare a partial month with a complete month as equivalent.
+- Use equal elapsed windows only when exact daily boundaries are reliable.
+- Otherwise suppress the delta and show `Partial period`.
+- A missed or stale import makes a completed calendar period incomplete.
+- Every source integration needs a `data through` date or equivalent
+  completeness signal before current-period deltas can be trusted.
+
+### Delta direction and color
+
+Every metric declares one direction:
+
+- `higher_is_better`
+- `lower_is_better`
+- `neutral`
+
+Use direction, not mathematical sign alone, to choose color. Leads, replies,
+clicks, pipeline, and won revenue are generally higher-is-better. CPL, CPC,
+bounce rate, opt-out rate, and days in stage are generally lower-is-better.
+Spend and impressions without a goal are neutral.
+
+Use an arrow, sign, label, and color. Color alone never carries meaning. Do not
+guess a new metric's direction. Default to neutral until the business owner
+approves it.
+
+### New reporting-source checklist
+
+Before adding a source or building its UI, document:
+
+- Business and technical owners.
+- Source system, import or workflow name, and destination table.
+- Source timezone, source grain, and model classification.
+- Period anchor and natural upsert key.
+- Imported metrics and derived metrics.
+- Supported and default reporting grains.
+- Default comparison and metric directions.
+- Delivery schedule and completeness signal.
+- Late-arriving data, reset, and missing-run behavior.
+- Source reconciliation method and PII classification.
+
+For email marketing, first determine whether the provider supplies event rows,
+daily totals, or lifetime counters. Prefer daily or event-level numerators,
+idempotent imports, declared timezones, and rates derived from aggregate totals.
+
+For n8n work, also record trigger timezone, row grain before and after workflow
+aggregation, grouping keys, upsert target, rerun behavior, boundary behavior,
+late corrections, alerts, and reconciliation. Sanitize exported workflow JSON
+to remove credentials, tokens, secrets, and customer or prospect records.
+
+## 5. Shared UI-control standard
+
+Controls with the same purpose must share one implementation. Do not create
+page-specific Tailwind versions of reporting controls.
+
+### Reporting-basis disclosure
+
+Use a consistent, accessible badge plus short explanatory text for `Cohort`,
+`Activity`, `Snapshot`, `Derived activity`, and `Allocation` reports. The badge
+is informational and must not look like a selectable filter.
+
+- Show it near the report title or subtitle, before the timeframe controls.
+- Include the anchor field or effective date in visible text or an accessible
+  information popover.
+- Do not rely on an unlabeled information icon.
+- Use neutral styling so the disclosure is not mistaken for a warning or KPI
+  status.
+- Reuse one shared component for the badge, explanation, focus behavior, and
+  responsive layout.
+
+### Control roles
+
+| Control | Use | Shape |
+|---|---|---|
+| Segmented control | One choice from a short fixed set | Joined rounded rectangle |
+| Select | One choice from a longer or changing set | Rounded rectangle matching segmented-control height |
+| Filter chip | One or more category selections | Full pill |
+| Clear or reset | Remove category selection | Neutral outline control matching its neighbors |
+
+### Visual rules
+
+- Buttons and selects use a 32 px height.
+- Segmented controls and selects use a 6 px corner radius.
+- Filter chips use a full pill radius.
+- Text is 12 px, medium weight, with tabular numerals for numbers.
+- Inactive: white background, border token, charcoal text.
+- Hover: slightly darker border without layout movement.
+- Active: indigo background and border, white text.
+- Disabled: muted background and text with an accessible explanation.
+- Focus: visible indigo focus ring with offset.
+- Use equal border widths across states.
+- Put labels directly before their controls.
+- Keep each control group together when wrapping.
+- Use a month select on constrained layouts.
+- Quarter may use a `Q1 | Q2 | Q3 | Q4` segmented control.
+- Year uses a select.
+- Do not mix isolated square buttons, rounded buttons, and pills for the same
+  period-selection purpose.
+
+### Accessibility and shared implementation
+
+- Single-select segmented controls expose one selected value and support
+  keyboard use.
+- Use `aria-pressed` or an equivalent radio-group pattern.
+- Every select has a visible label or accessible name.
+- Selection must be understandable without color.
+- Focus order is timeframe, period, year, comparison, then business filters.
+
+Implement shared equivalents of:
+
+- `ReportingFilterBar`
+- `SegmentedControl`
+- `ReportingSelect`
+- `FilterChipGroup`
+- `ComparisonControl`
+
+Names may follow repository conventions, but appearance, accessibility, and
+state behavior must have one shared implementation.
+
+### Brand rules
+
+- The UI wordmark is always lowercase `sourced`.
+- Use sentence case for headings, labels, and buttons.
+- Do not use all caps for headings.
+- Do not use em dashes in user-facing or generated copy.
+- Keep the style minimal and flat with generous whitespace.
+- Use existing theme tokens in `src/index.css`: indigo `#4F46E5`, teal
+  `#06B6D4`, charcoal `#0F172A`, slate `#64748B`, muted `#F8FAFC`, border
+  `#E2E8F0`, success `#10B981`, warning `#F59E0B`, and danger `#EF4444`.
+- Inter is the primary font with system fallbacks.
+- Use the existing app as the first visual reference. Use DataVis 1 only when
+  `sourced` has no established pattern.
+
+## 6. Security and production safeguards
+
+- Never commit CSV exports, contact lists, customer records, real PII,
+  credentials, or `.env` files.
+- Never print full lead records or secrets to logs, tests, documentation, or
+  tool output.
+- Do not expose environment values during diagnosis.
+- `VITE_APP_PASSWORD`, `VITE_REVEAL_PII_PASSWORD`, and `VITE_BDR_PASSWORD` are
+  browser-delivered convenience gates, not real authorization.
+- Current Supabase RLS uses public-read and anonymous-write policies. Treat it
+  as permissive.
+- Real authentication and role-based RLS are a separate security project.
+- Local development normally connects to production Supabase. UI actions can
+  change production data.
+- Read-only inspection is allowed when relevant.
+- Creating, editing, importing, deleting, migrating, deploying, or otherwise
+  changing production state requires explicit authorization.
+- Do not contact people, push, open or merge PRs, deploy, or change external
+  systems unless the user authorizes that action.
+
+Environment variables referenced by the source:
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
+- `VITE_APP_PASSWORD`
+- `VITE_REVEAL_PII_PASSWORD`
+- `VITE_BDR_PASSWORD`
+
+Real values belong only in ignored local files and approved hosting
+configuration. `.env.example` contains placeholders only and must be updated
+when a new required variable is introduced.
+
+## 7. Development and testing requirements
+
+### Working rules
+
+- Inspect before changing. Prefer current code over historical plans and report
+  conflicts.
+- Preserve unrelated user changes and untracked files.
+- Use `rg` for search and `apply_patch` for manual file edits.
+- Do not add unrelated features or broaden a focused task without approval.
+- Keep calculations and transformations pure where practical.
+- Update this file when work changes architecture, data contracts,
+  integrations, security assumptions, or reporting standards.
+- Ask Benjamin before making a decision that materially changes scope or
+  production behavior.
+
+### Verification
+
+Use npm and the committed lockfile:
+
+```bash
+npm ci
+npm run dev
+npm run test
+npm run typecheck
+npm run build
+npm run verify
+npm run lint
 ```
 
----
+`npm run verify` runs tests, typecheck, and the production build. It is the
+standard code gate. CI runs `npm ci` followed by `npm run verify` and has no
+Supabase credentials.
 
-## Database schema
+Lint has an existing backlog and is not yet part of `verify`. Do not suppress
+or increase existing findings.
 
-The full schema lives in `./SCHEMA.sql` at the repo root. Paste into the Supabase SQL Editor on first setup. Incremental changes go in `./migrations/` (see `./migrations/README.md` for naming, status, and apply order). When the schema changes, update `./SCHEMA.sql` in the same commit so the canonical file stays current.
+### Testing rules
 
-Tables:
-- `channels` — channel taxonomy (LinkedIn Ads, BDR Outreach, Website, Content Syndication, etc.)
-- `campaigns` — parent and sub-campaigns (self-referencing via `parent_campaign_id`)
-- `campaign_channels` — M2M between campaigns and channels
-- `campaign_spend` — quarterly spend per campaign
-- `leads` — the corrected mirror of SFDC, one row per person
-- `lead_campaigns` — M2M between leads and campaigns with `joined_at` and `reason`
-- `attributions` — deal-level opportunity records (HPP, Opp, Pursuit, Won)
-- `attribution_touches` — ordered touches per attribution
-- `funnel_projections` — manually-entered projections by channel x quarter x stage
-- `cell_comments`, `cell_links` — annotations on funnel grid cells (ported from DataVis 1)
+- Add proportional regression tests for calculations, imports, locks, and data
+  contracts.
+- Use fixed dates and deterministic inputs.
+- Tests must not use the current clock, browser timezone, network access,
+  secrets, or production data.
+- Reconcile number-changing work against a trusted fixture or approved
+  read-only diagnostic.
+- Before migrating a reporting surface, reconcile current trusted totals.
 
-RLS policies follow the DataVis 1 pattern: public read, anon write (gated by the client-side password).
+Shared period and delta tests must cover:
 
----
+- Month lengths of 28, 29, 30, and 31 days, including leap years.
+- Q1 through Q4 and year boundaries.
+- December to January and Q1 to prior-year Q4 comparisons.
+- Previous-year comparisons for every supported grain.
+- Missing comparison data versus a real zero.
+- Zero comparison displayed as `New`.
+- Rate deltas expressed in percentage points.
+- Higher-is-better, lower-is-better, and neutral metrics.
+- Partial-period suppression or valid equal-window comparison.
+- Identical non-time filters for current and comparison periods.
+- Additive, cumulative, snapshot, date-range, cohort, reset, and missing-run
+  cases as applicable.
+- Reconciliation against a known source total.
 
-## TypeScript data model
+A reporting surface is complete only when its source classification, period
+anchor, supported grains, aggregation, comparison, delta states, partial-data
+behavior, direction, reporting-basis disclosure, tests, reconciliation, copy,
+and shared controls all conform to this file.
 
-Define all interfaces in `src/types/db.ts`. Mirror the DB schema exactly. Stage keys are typed:
+## 8. Known deferred work
 
-```typescript
-export type StageKey = 'lead' | 'mql' | 'hpp' | 'opp' | 'pursuit' | 'closeWon' | 'cold' | 'disqualified';
-export type AttributionStageKey = 'hpp' | 'opp' | 'pursuit' | 'closeWon';
-export type PeriodIndex = 1 | 2 | 3 | 4;
+Do not turn a focused task into one of these projects without approval:
 
-export interface StageHistoryEntry {
-  stage: StageKey;
-  entered_at: string;            // ISO date
-  edited_by?: string;
-  edit_locked?: boolean;
-  notes?: string;
-}
-
-export interface Lead {
-  id: string;
-  email: string;
-  first_name?: string;
-  last_name?: string;
-  sfdc_lead_id?: string;
-  sfdc_contact_id?: string;
-  hubspot_contact_id?: string;
-  account?: string;
-  title?: string;
-  country?: string;
-  owner?: string;
-  lead_source?: string;
-  current_stage: StageKey;
-  marketing_sourced_date?: string;
-  source_channel_id?: string;
-  stage_history: StageHistoryEntry[];
-  field_locks: Record<string, boolean>;
-  source_sfdc: Record<string, unknown>;
-  notes?: string;
-  created_at: string;
-  updated_at: string;
-  last_synced_at?: string;
-  last_edited_by?: string;
-}
-```
-
-Define the rest in the same shape.
-
----
-
-## Core conventions
-
-### The edit-lock contract
-
-This is the most important behavior in the app. Read carefully.
-
-Every Lead field except `id`, `email`, system IDs, and timestamps has an entry in `field_locks` (a JSONB object). When the user edits a field in the UI:
-
-1. The new value is saved.
-2. `field_locks[fieldName] = true`.
-3. `last_edited_by` is set to the current user (for now, hardcode "Benjamin" or "Marketing").
-4. `updated_at` is set.
-
-When CSV import runs (or, in v2, n8n sync):
-
-1. For each lead matched by email, compare incoming SFDC values to existing values.
-2. For each field where `field_locks[fieldName] === true`: do NOT overwrite the field. Instead, only update `source_sfdc[fieldName]` so the user can see drift.
-3. For unlocked fields: overwrite normally and update `source_sfdc[fieldName]` as well.
-4. Always update `last_synced_at`.
-
-The Leads table UI must visually indicate locked fields (small lock icon next to the value) and show a tooltip on hover with: current value, SFDC value, who edited and when, and a "Revert to SFDC" button.
-
-### Computed actuals, stored projections
-
-Funnel grid actuals are NEVER stored. They are always computed live from `leads.stage_history`:
-
-```
-actuals(channel, year, quarter, stage) =
-  count(leads where
-    source_channel_id = channel
-    AND any stage_history entry has stage = stage AND entered_at in quarter
-    AND (no country filter OR country matches selected filter)
-  )
-```
-
-The Lead-stage actual specifically uses `marketing_sourced_date` instead of stage_history for the 'lead' stage:
-
-```
-actuals(channel, year, quarter, 'lead') =
-  count(leads where
-    source_channel_id = channel
-    AND marketing_sourced_date in quarter
-  )
-```
-
-Projections ARE stored, in `funnel_projections`, keyed by (channel_id, year, period_index, stage_key).
-
-### Date semantics
-
-`marketing_sourced_date` is the bucketing field for Lead-stage attribution. It is the editable mirror of SFDC's Member First Associated Date. The default rule for stage transition dates: take whatever SFDC provides, allow the user to override, lock if overridden.
-
-For the cold-and-re-source edge case (lead joined a campaign 2+ years ago, went cold, re-engaged): default to the strict rule (first-touch wins) and add a "Re-source" action on the lead detail page that pushes a new entry into stage_history. We can revisit if it doesn't match Benjamin's mental model.
-
-### Identity and dedupe
-
-Email is the canonical identity key. Lower-case all emails on save. When CSV import finds a row with an email that already exists, treat it as an update, not an insert. Show the diff to the user before committing.
-
-System IDs (sfdc_lead_id, sfdc_contact_id, hubspot_contact_id) are tracked but not used for matching. They exist for future bidirectional sync.
-
-### Stage transitions
-
-When a user changes `current_stage` in the UI, automatically append an entry to `stage_history` with `entered_at` defaulting to today. The user can edit the date. The new entry is NOT edit-locked by default.
-
-### Country and territory
-
-Country is a free-text field for now (use ISO country names: "United States", "United Kingdom", "Germany"). On the funnel grid, country becomes a top-level filter alongside year and quarter. Aggregate views can group by country to show territory traction.
-
-### Outreach.io domain
-
-NOT in scope for v1. The Outreach domain stays in DataVis 1 for now. Do not build sequence performance views in Sourced. We may port them in a later phase.
-
----
-
-## Build order (strict)
-
-Build features in this order. Do not start a later feature until the prior one is working end-to-end.
-
-### Milestone 1: Foundation
-1. Scaffold Vite + React 19 + TS + Tailwind v4 project
-2. Install Supabase JS client, recharts, uuid
-3. Wire up `.env` and `src/lib/supabase.ts`
-4. Implement password gate (mirror `DataVis/src/components/PasswordGate.tsx`)
-5. Stub all five page routes (Leads, Campaigns, Dashboard, Cohort, Settings) with placeholder content
-
-### Milestone 2: Lead ledger
-6. Build `src/types/db.ts` with all interfaces
-7. Build `useLeads` hook (CRUD, realtime subscription)
-8. Build LeadsPage table view: sortable columns, basic filtering by stage, country, owner
-9. Build LeadDetailDrawer: edit any field inline, lock indicator, provenance tooltip, stage history editor
-
-### Milestone 3: CSV import
-10. Build CSV importer: drag-and-drop CSV file, parse with PapaParse
-11. Build column mapper: map CSV columns to Lead fields, save mapping to localStorage for re-use
-12. Build diff view: show new leads, updated leads (with field-level diff), unchanged leads. Indicate which fields are locked and would NOT be updated. Allow user to confirm or cancel.
-13. Apply changes respecting field_locks contract
-
-### Milestone 4: Channels and campaigns
-14. Build ChannelManager (mirror DataVis 1 channels manager)
-15. Build CampaignsPage: list parent campaigns, expand to show sub-campaigns and member counts
-16. Build CampaignDetail: edit name, dates, owner, attached channels, quarterly spend table
-17. Wire lead_campaigns membership: surface in LeadDetailDrawer, allow add/remove
-
-### Milestone 5: Funnel grid (computed)
-18. Build `lib/compute.ts`: pure functions to compute funnel grid actuals from leads array. Memoize.
-19. Port `FunnelTable` component from DataVis 1, point at computed inputs. Drop the cell-edit handlers for actuals (they are read-only now). Keep cell-edit for projections.
-20. Port `EditableCell`, `CommentsList`, `CellLinks` from DataVis 1
-21. Click an actual cell -> show the underlying leads in a side panel (drilldown)
-
-### Milestone 6: Charts
-22. Port BarChartView (Actuals vs Projections), DonutChartView (channel distribution), FunnelChartView (conversion funnel), TrendLineChartView (quarterly trends), AttributionSummaryView (Sankey)
-23. Re-point all of them at computed lead aggregates instead of stored cells
-
-### Milestone 7: Attribution
-24. Build attributions and attribution_touches CRUD
-25. Port CreateHPPModal, AttributionEditorModal, OpportunitiesListModal from DataVis 1
-26. Wire attribution.lead_id back to leads so an attribution can show "Sourced from: [lead name] via [channel] on [date]"
-
-### Milestone 8: Reports
-27. Build CohortPage: cohort survival curve (Q3 2024 leads, what % HPP today). Use stage_history.
-28. Build velocity report: median days Lead to MQL, MQL to HPP, by channel. Box plot or simple table.
-29. Build CPL by campaign: campaign_spend / leads sourced. Show CPL, CPMQL, CPHPP, CPOpp, CPWon.
-30. Build marketing-sourced revenue: sum of attribution.amount where stage = closeWon, grouped by first-touch channel.
-
----
-
-## Things to avoid
-
-- Do NOT store funnel grid actuals as numbers in the DB. Always compute from leads.
-- Do NOT use Title Case anywhere in the UI. Sentence case for labels, headings, buttons. The lowercase wordmark "sourced" is the brand standard.
-- Do NOT use em dashes in any user-facing copy or generated text. Use commas, colons, parentheses, or periods.
-- Do NOT add features not on the build-order list without checking in. The scope is intentionally tight.
-- Do NOT pull contact lists into the codebase or print full lead records to logs. Treat lead data as sensitive PII.
-- Do NOT fabricate field names that aren't in this spec. If a needed field is missing, flag it.
-- Do NOT use localStorage to persist anything beyond user preferences (column visibility, last-used CSV column mapping). All real data lives in Supabase.
-
----
-
-## Reference: DataVis 1
-
-The existing DataVis app at `/Users/barmengolli/Desktop/MarketingOps Cowork/DataVis/` is the design reference. Visual style, component shape, and reporting layout should match. Specifically:
-
-- `DataVis/src/components/table/FunnelTable.tsx` — port to `sourced-app/src/components/funnel/FunnelTable.tsx`
-- `DataVis/src/components/charts/*` — port directly, re-point inputs
-- `DataVis/src/components/PasswordGate.tsx` — port directly with new password and brand colors
-- `DataVis/src/components/table/AttributionEditorModal.tsx`, `CreateHPPModal.tsx`, `OpportunitiesListModal.tsx` — port to attribution/
-
-Do NOT port: `App.tsx` reducer logic (the data model is different), the migrations chain, the JSONB write paths.
-
----
-
-## When in doubt
-
-Match DataVis 1 visually. Keep the data model lean. Ask Benjamin before adding scope.
+- Standardized Month, Quarter, Year, delta, comparison, and reporting controls
+  are specified here but not yet implemented across the app.
+- A complete n8n audit awaits sanitized workflow exports.
+- Real authentication and restrictive role-based RLS are not implemented.
+- `Channel.year` is used by the application and listed as applied in the
+  migration ledger, but `SCHEMA.sql` lacks the column and the named
+  `2026-05-19_channels_year.sql` migration is absent. Verify the live catalog
+  before repairing this documentation drift.
+- `.env.example` lacks the `VITE_BDR_PASSWORD` placeholder. Add it without a
+  real value in a focused configuration-documentation change.
+- ESLint convergence remains deferred. Do not suppress or increase findings.
+- Splitting `src/lib/compute.ts` remains deferred.
+- Leads-table virtualization is a separate performance project.
+- Content Syndication budget allocation may be revisited separately.
+- AWS migration is planning only. Production remains Vercel plus Supabase.
