@@ -137,3 +137,24 @@ LIMIT 20;
 Then in Sourced: **LinkedIn Ads → Dashboard** should show the week/month with
 matching spend/impressions/clicks, and tagging an ad set on **Campaigns → Tags**
 surfaces it in that campaign's **LinkedIn Ads Performance** tile.
+
+## Reconciliation (Bite 2, read-only)
+
+Verified against the supplied workbook (read-only; no source rows, ad-set names,
+campaign names, or account IDs were copied into code, tests, or this doc). The
+`Week` values in the workbook export are Excel date serials that all resolve to
+Sundays, confirming the week-ending-Sunday convention.
+
+Aggregating all ad-set rows for the week ending **2026-07-19** (summing
+`Spend ($)`, `Impressions`, `Clicks`) reconciles exactly, after rounding, to:
+
+| metric | reconciled total |
+|---|---|
+| Spend | $3,981 |
+| Impressions | 68,572 |
+| Clicks | 935 |
+
+The Sourced summation path is covered by a deterministic test that reproduces
+only these three aggregate figures with synthetic rows
+(`src/lib/linkedinReporting.test.ts`). No workbook or production data was
+modified.

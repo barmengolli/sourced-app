@@ -94,8 +94,23 @@ describe('DeltaDisplay', () => {
   });
 
   it('appends a pp unit for rate deltas', () => {
-    render(<DeltaDisplay unit="pp" result={computeRateDelta({ state: 'present', value: 4 }, { state: 'present', value: 3.2 }, 'higher_is_better')} />);
+    render(<DeltaDisplay format="pp" result={computeRateDelta({ state: 'present', value: 4 }, { state: 'present', value: 3.2 }, 'higher_is_better')} />);
     expect(screen.getByTestId('delta-display').textContent).toContain('+0.8pp');
+  });
+
+  it('formats currency deltas generically (with a $ prefix and thousands)', () => {
+    render(<DeltaDisplay format={{ kind: 'currency', decimals: 0 }} result={computeDelta({ state: 'present', value: 5000 }, { state: 'present', value: 1019 }, 'neutral')} />);
+    expect(screen.getByTestId('delta-display').textContent).toContain('+$3,981');
+  });
+
+  it('formats count deltas generically (thousands separators, no unit)', () => {
+    render(<DeltaDisplay format={{ kind: 'number' }} result={computeDelta({ state: 'present', value: 68572 }, { state: 'present', value: 60000 }, 'higher_is_better')} />);
+    expect(screen.getByTestId('delta-display').textContent).toContain('+8,572');
+  });
+
+  it('formats percentage-point deltas generically', () => {
+    render(<DeltaDisplay format={{ kind: 'points', decimals: 2 }} result={computeRateDelta({ state: 'present', value: 1.36 }, { state: 'present', value: 1.0 }, 'higher_is_better')} />);
+    expect(screen.getByTestId('delta-display').textContent).toContain('+0.36pp');
   });
 });
 

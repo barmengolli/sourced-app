@@ -3,13 +3,15 @@
 // every state also has an arrow/label and an accessible name. Neutral metrics
 // and the no-data / no-change states read as neutral.
 
-import type { DeltaResult } from '../../lib/reportingDeltas';
+import type { DeltaResult, DeltaValueFormat } from '../../lib/reportingDeltas';
 import { describeDelta } from '../../lib/reportingDeltas';
 
 interface DeltaDisplayProps {
   result: DeltaResult;
-  // Unit appended to the absolute value, e.g. "pp" for rate deltas.
-  unit?: string;
+  // How to format the absolute value. A string is a plain unit suffix (the
+  // original behavior, e.g. "pp"); a DeltaValueFormat formats generically
+  // (currency, number, points, percent). Metric-agnostic and shared.
+  format?: string | DeltaValueFormat;
 }
 
 // Tone -> text color token. Kept minimal and flat per brand rules.
@@ -31,8 +33,8 @@ function glyphFor(result: DeltaResult): string {
   return '–'; // en dash for no_change / no_*_data
 }
 
-export default function DeltaDisplay({ result, unit = '' }: DeltaDisplayProps) {
-  const text = describeDelta(result, unit);
+export default function DeltaDisplay({ result, format = '' }: DeltaDisplayProps) {
+  const text = describeDelta(result, format);
   const glyph = glyphFor(result);
   return (
     <span

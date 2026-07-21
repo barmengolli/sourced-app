@@ -1,47 +1,92 @@
-// LinkedinDashboardPage — the LinkedIn Ads section dashboard. Year selector +
-// Week/Month toggle at top; summary tiles (spend, impressions, clicks, CTR, CPC,
-// CPM) for the selected period; breakdowns by Product, Region, and Ad Set.
+// LinkedinDashboardPage — the LinkedIn Ads section dashboard, migrated onto the
+// shared reporting foundation (Bite 2).
 //
-// LinkedIn metrics are PER-WEEK (not cumulative), so a period is just the sum of
-// its matching rows. No delta math (unlike the Outreach dashboard).
+// Timeframe is Month / Quarter / Year via the shared ReportingFilterBar, with a
+// Previous period / Previous year / Off comparison. Week is no longer an
+// executive control (weekly rows remain in storage; they are simply summed into
+// the selected period). A whole week is assigned to the month, quarter, and year
+// containing its week-ending Sunday, never prorated.
+//
+// All period math, totals, rate recomputation, comparison, breakdowns, and
+// completeness live in the pure src/lib/linkedinReporting.ts helpers. This file
+// is presentation only.
 
 import { useMemo, useState } from 'react';
 import type { LinkedinAdSnapshot } from '../types/db';
-import { monthOfSnapshotDate } from '../hooks/useLinkedinSnapshots';
+import type {
+  ComparisonMode,
+  MetricDirection,
+  MetricValue,
+  ReportingPeriod,
+} from '../types/reporting';
+import {
+  comparePeriods,
+  periodBreakdowns,
+  ratesFromTotals,
+  assessLinkedinCompleteness,
+  defaultMonthPeriod,
+  availableYears,
+  type BreakdownRow,
+  type LinkedinTotals,
+} from '../lib/linkedinReporting';
+import {
+  computeDelta,
+  computeRateDelta,
+  type DeltaValueFormat,
+} from '../lib/reportingDeltas';
+import {
+  periodLabel,
+  comparisonLabel,
+} from '../lib/reportingPeriods';
+import ReportingFilterBar from '../components/reporting/ReportingFilterBar';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import DeltaDisplay from '../components/reporting/DeltaDisplay';
 import ChartCard from '../components/charts/ChartCard';
 
+// Timezone-safe "Jul 19, 2026" from a YYYY-MM-DD string (no Date construction).
 const MONTHS_SHORT = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ] as const;
-
-type Granularity = 'week' | 'month';
-
-interface Totals {
-  spend: number;
-  impressions: number;
-  clicks: number;
+function formatWeekEnding(iso: string | null): string {
+  if (!iso) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return '';
+  const mo = parseInt(m[2], 10);
+  const day = parseInt(m[3], 10);
+  if (mo < 1 || mo > 12) return '';
+  return `${MONTHS_SHORT[mo - 1]} ${day}, ${m[1]}`;
 }
 
-function sumRows(rows: LinkedinAdSnapshot[]): Totals {
-  const t: Totals = { spend: 0, impressions: 0, clicks: 0 };
-  for (const r of rows) {
-    t.spend += r.spend ?? 0;
-    t.impressions += r.impressions ?? 0;
-    t.clicks += r.clicks ?? 0;
-  }
-  return t;
-}
-
-const money = (n: number) =>
+// Display formatters for KPI values (period totals). Rates show em dash when the
+// denominator is zero (undefined rate), matching the pre-migration behavior.
+const money0 = (n: number) =>
   `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 const money2 = (n: number) => `$${n.toFixed(2)}`;
-const pct = (num: number, den: number) =>
-  den > 0 ? `${((num / den) * 100).toFixed(2)}%` : '—';
-const ctr = (t: Totals) => pct(t.clicks, t.impressions);
-const cpc = (t: Totals) => (t.clicks > 0 ? money2(t.spend / t.clicks) : '—');
-const cpm = (t: Totals) =>
-  t.impressions > 0 ? money2((t.spend / t.impressions) * 1000) : '—';
+const count = (n: number) => n.toLocaleString();
+const rateOrDash = (v: number | null, fmt: (n: number) => string) =>
+  v === null ? '—' : fmt(v);
+
+// KPI spec: label, direction, how to read the current value, the MetricValue
+// pair for the delta, and the delta's display format. Directions come from
+// CLAUDE.md section 6 (Step 6 of the migration brief).
+interface Kpi {
+  key: string;
+  label: string;
+  title?: string;
+  direction: MetricDirection;
+  isRate: boolean;
+  format: string | DeltaValueFormat;
+}
+
+const KPIS: Kpi[] = [
+  { key: 'spend', label: 'Spend', direction: 'neutral', isRate: false, format: { kind: 'currency', decimals: 0 } },
+  { key: 'impressions', label: 'Impressions', direction: 'neutral', isRate: false, format: { kind: 'number' } },
+  { key: 'clicks', label: 'Clicks', direction: 'higher_is_better', isRate: false, format: { kind: 'number' } },
+  { key: 'ctrPercent', label: 'CTR', title: 'Clicks / Impressions', direction: 'higher_is_better', isRate: true, format: { kind: 'points', decimals: 2 } },
+  { key: 'cpc', label: 'CPC', title: 'Spend / Clicks', direction: 'lower_is_better', isRate: false, format: { kind: 'currency', decimals: 2 } },
+  { key: 'cpm', label: 'CPM', title: 'Spend / Impressions x 1000', direction: 'neutral', isRate: false, format: { kind: 'currency', decimals: 2 } },
+];
 
 export default function LinkedinDashboardPage({
   snapshots,
@@ -50,162 +95,90 @@ export default function LinkedinDashboardPage({
   snapshots: LinkedinAdSnapshot[];
   loading: boolean;
 }) {
-  const [granularity, setGranularity] = useState<Granularity>('week');
+  // Default period: the Month containing the latest imported week (clock-free).
+  // Fallback keeps a valid shape when there is no data yet.
+  const initialPeriod: ReportingPeriod = useMemo(
+    () => defaultMonthPeriod(snapshots) ?? { grain: 'year', year: 2026 },
+    [snapshots],
+  );
+  const [period, setPeriod] = useState<ReportingPeriod>(initialPeriod);
+  const [comparison, setComparison] = useState<ComparisonMode>('previous_period');
 
-  const yearOptions = useMemo(() => {
-    const ys = new Set<number>([new Date().getFullYear()]);
-    for (const s of snapshots) ys.add(s.year);
-    return [...ys].sort((a, b) => b - a);
-  }, [snapshots]);
-  const [year, setYear] = useState<number>(() =>
-    snapshots.length ? snapshots[0].year : new Date().getFullYear(),
+  const years = useMemo(
+    () => availableYears(snapshots, period.year),
+    [snapshots, period.year],
   );
 
-  // Rows in the active year.
-  const yearRows = useMemo(
-    () => snapshots.filter((s) => s.year === year),
-    [snapshots, year],
+  const cmp = useMemo(
+    () => comparePeriods(snapshots, period, comparison),
+    [snapshots, period, comparison],
+  );
+  const completeness = useMemo(
+    () => assessLinkedinCompleteness(snapshots, period),
+    [snapshots, period],
+  );
+  const breakdowns = useMemo(
+    () => periodBreakdowns(snapshots, period),
+    [snapshots, period],
   );
 
-  // The ordered period list for the toggle. Week = distinct week_numbers;
-  // Month = distinct calendar months present in the year (by snapshot_date).
-  const periods = useMemo(() => {
-    if (granularity === 'week') {
-      const weeks = [...new Set(yearRows.map((s) => s.week_number))].sort(
-        (a, b) => a - b,
-      );
-      return weeks.map((w) => ({
-        key: `W${w}`,
-        label: `W${w}`,
-        match: (s: LinkedinAdSnapshot) => s.week_number === w,
-      }));
+  const cmpLabel = comparisonLabel(period, comparison);
+  const suppress = completeness.suppressDelta;
+
+  // Build the delta for a KPI: rates use pp deltas, counts/currency use absolute
+  // deltas. Suppressed for a partial current period.
+  function deltaFor(kpi: Kpi) {
+    const curV = cmp.current.values[kpi.key as keyof typeof cmp.current.values] as MetricValue;
+    const cmpV = (cmp.comparison?.values[kpi.key as keyof typeof cmp.current.values] ?? { state: 'missing' }) as MetricValue;
+    return kpi.isRate
+      ? computeRateDelta(curV, cmpV, kpi.direction)
+      : computeDelta(curV, cmpV, kpi.direction);
+  }
+
+  function kpiValueText(kpi: Kpi): string {
+    const t = cmp.current.totals;
+    const r = cmp.current.rates;
+    if (!cmp.current.hasData) return '—';
+    switch (kpi.key) {
+      case 'spend': return money0(t.spend);
+      case 'impressions': return count(t.impressions);
+      case 'clicks': return count(t.clicks);
+      case 'ctrPercent': return rateOrDash(r.ctrPercent, (n) => `${n.toFixed(2)}%`);
+      case 'cpc': return rateOrDash(r.cpc, money2);
+      case 'cpm': return rateOrDash(r.cpm, money2);
+      default: return '—';
     }
-    const months = new Set<number>();
-    for (const s of yearRows) {
-      const m = monthOfSnapshotDate(s.snapshot_date);
-      if (m) months.add(m.month);
-    }
-    return [...months]
-      .sort((a, b) => a - b)
-      .map((mo) => ({
-        key: `M${mo}`,
-        label: MONTHS_SHORT[mo - 1],
-        match: (s: LinkedinAdSnapshot) => {
-          const m = monthOfSnapshotDate(s.snapshot_date);
-          return m !== null && m.month === mo;
-        },
-      }));
-  }, [granularity, yearRows]);
-
-  const [periodKey, setPeriodKey] = useState<string | null>(null);
-  const currentPeriod =
-    periods.find((p) => p.key === periodKey) ?? periods[periods.length - 1];
-
-  const rows = useMemo(
-    () => (currentPeriod ? yearRows.filter(currentPeriod.match) : []),
-    [yearRows, currentPeriod],
-  );
-
-  const totals = useMemo(() => sumRows(rows), [rows]);
-
-  // Group helper for the breakdown tables.
-  const groupBy = (key: (s: LinkedinAdSnapshot) => string) => {
-    const m = new Map<string, Totals>();
-    for (const s of rows) {
-      const k = key(s) || '—';
-      const t = m.get(k) ?? { spend: 0, impressions: 0, clicks: 0 };
-      t.spend += s.spend ?? 0;
-      t.impressions += s.impressions ?? 0;
-      t.clicks += s.clicks ?? 0;
-      m.set(k, t);
-    }
-    return [...m.entries()]
-      .map(([name, t]) => ({ name, ...t }))
-      .sort((a, b) => b.spend - a.spend);
-  };
-  const byProduct = useMemo(() => groupBy((s) => s.product ?? ''), [rows]);
-  const byRegion = useMemo(() => groupBy((s) => s.region ?? ''), [rows]);
-  const byAdset = useMemo(() => groupBy((s) => s.adset_name), [rows]);
+  }
 
   return (
     <div className="p-8 space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-charcoal">
-            LinkedIn Ads — Dashboard
-          </h1>
-          <p className="mt-1 text-sm text-slate-muted">
-            Paid LinkedIn performance by {granularity === 'week' ? 'week' : 'month'}.
-            Spend, impressions, clicks, and derived CTR / CPC / CPM.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-slate-muted">
-            Year
-            <select
-              value={year}
-              onChange={(e) => setYear(parseInt(e.target.value, 10))}
-              className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-            >
-              {yearOptions.map((y) => (
-                <option key={y} value={y}>
-                  {y}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="flex items-center gap-1">
-            {(['week', 'month'] as const).map((g) => {
-              const active = g === granularity;
-              return (
-                <button
-                  key={g}
-                  type="button"
-                  onClick={() => {
-                    setGranularity(g);
-                    setPeriodKey(null);
-                  }}
-                  className={
-                    'text-xs px-2 py-1 rounded border transition-colors capitalize ' +
-                    (active
-                      ? 'bg-indigo text-white border-indigo'
-                      : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                  }
-                >
-                  {g}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+      <header className="space-y-2">
+        <h1 className="text-2xl font-semibold text-charcoal">
+          LinkedIn Ads — Dashboard
+        </h1>
+        <ReportingBasisDisclosure
+          basis="activity"
+          explanation="Weekly LinkedIn Ads activity assigned by week-ending Sunday."
+        />
+        <p className="text-xs text-slate-muted" data-testid="linkedin-data-through">
+          {completeness.dataThrough
+            ? `Data through week ending ${formatWeekEnding(completeness.dataThrough)}`
+            : 'No imported weeks yet'}
+          {completeness.completeness === 'partial' && (
+            <span className="ml-2 rounded-md border border-border bg-muted px-2 py-0.5 font-medium text-charcoal">
+              Partial period
+            </span>
+          )}
+        </p>
       </header>
 
-      {/* Period pills */}
-      {periods.length > 0 && (
-        <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-xs text-slate-muted mr-1">
-            {granularity === 'week' ? 'Week' : 'Month'}
-          </span>
-          {periods.map((p) => {
-            const active = currentPeriod?.key === p.key;
-            return (
-              <button
-                key={p.key}
-                type="button"
-                onClick={() => setPeriodKey(p.key)}
-                className={
-                  'text-xs px-2 py-1 rounded border transition-colors ' +
-                  (active
-                    ? 'bg-indigo text-white border-indigo'
-                    : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                }
-              >
-                {p.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <ReportingFilterBar
+        period={period}
+        comparison={comparison}
+        years={years}
+        onPeriodChange={setPeriod}
+        onComparisonChange={setComparison}
+      />
 
       {loading && snapshots.length === 0 ? (
         <p className="text-sm text-slate-muted italic">Loading…</p>
@@ -216,26 +189,37 @@ export default function LinkedinDashboardPage({
         </div>
       ) : (
         <>
+          <p className="text-xs text-slate-muted">
+            {periodLabel(period)}
+            {!suppress && cmpLabel ? ` · ${cmpLabel}` : ''}
+          </p>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            <Tile label="Spend" value={money(totals.spend)} />
-            <Tile label="Impressions" value={totals.impressions.toLocaleString()} />
-            <Tile label="Clicks" value={totals.clicks.toLocaleString()} />
-            <Tile label="CTR" value={ctr(totals)} />
-            <Tile label="CPC" value={cpc(totals)} />
-            <Tile label="CPM" value={cpm(totals)} />
+            {KPIS.map((kpi) => (
+              <Tile
+                key={kpi.key}
+                label={kpi.label}
+                title={kpi.title}
+                value={kpiValueText(kpi)}
+                delta={
+                  suppress ? null : (
+                    <DeltaDisplay result={deltaFor(kpi)} format={kpi.format} />
+                  )
+                }
+              />
+            ))}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <ChartCard title="By Product" subtitle="Spend and delivery per product.">
-              <BreakdownTable rows={byProduct} firstLabel="Product" />
+              <BreakdownTable rows={breakdowns.byProduct} firstLabel="Product" />
             </ChartCard>
             <ChartCard title="By Region" subtitle="Spend and delivery per region.">
-              <BreakdownTable rows={byRegion} firstLabel="Region" />
+              <BreakdownTable rows={breakdowns.byRegion} firstLabel="Region" />
             </ChartCard>
           </div>
 
           <ChartCard title="By Ad Set" subtitle="Spend and delivery per ad set.">
-            <BreakdownTable rows={byAdset} firstLabel="Ad set" />
+            <BreakdownTable rows={breakdowns.byAdset} firstLabel="Ad set" />
           </ChartCard>
         </>
       )}
@@ -243,42 +227,59 @@ export default function LinkedinDashboardPage({
   );
 }
 
-function Tile({ label, value }: { label: string; value: string }) {
+function Tile({
+  label,
+  title,
+  value,
+  delta,
+}: {
+  label: string;
+  title?: string;
+  value: string;
+  delta: React.ReactNode;
+}) {
   return (
-    <div className="border border-border rounded bg-muted/40 px-3 py-2">
+    <div className="border border-border rounded bg-muted/40 px-3 py-2" title={title}>
       <p className="text-[10px] uppercase tracking-wider text-slate-muted">
         {label}
       </p>
       <p className="mt-0.5 text-lg font-semibold text-charcoal tabular-nums">
         {value}
       </p>
+      {delta ? <div className="mt-0.5">{delta}</div> : null}
     </div>
   );
 }
 
-// Bordered/zebra breakdown table with a blended Total row (rates recomputed
-// from the summed counts).
+// Breakdown table. Rates are recomputed from each row's aggregate counts, and
+// the Total row recomputes from the summed counts, so the table reconciles to
+// the KPI totals for the same period and filters.
 function BreakdownTable({
   rows,
   firstLabel,
 }: {
-  rows: (Totals & { name: string })[];
+  rows: BreakdownRow[];
   firstLabel: string;
 }) {
-  const cols: { key: string; label: string; title?: string; value: (t: Totals) => string }[] = [
-    { key: 'spend', label: 'Spend', value: (t) => money(t.spend) },
-    { key: 'impr', label: 'Impr.', value: (t) => t.impressions.toLocaleString() },
-    { key: 'clicks', label: 'Clicks', value: (t) => t.clicks.toLocaleString() },
-    { key: 'ctr', label: 'CTR', title: 'Clicks / Impressions', value: (t) => ctr(t) },
-    { key: 'cpc', label: 'CPC', title: 'Spend / Clicks', value: (t) => cpc(t) },
-    { key: 'cpm', label: 'CPM', title: 'Spend / Impressions × 1000', value: (t) => cpm(t) },
+  const cols: {
+    key: string;
+    label: string;
+    title?: string;
+    value: (totals: LinkedinTotals) => string;
+  }[] = [
+    { key: 'spend', label: 'Spend', value: (t) => money0(t.spend) },
+    { key: 'impr', label: 'Impr.', value: (t) => count(t.impressions) },
+    { key: 'clicks', label: 'Clicks', value: (t) => count(t.clicks) },
+    { key: 'ctr', label: 'CTR', title: 'Clicks / Impressions', value: (t) => rateOrDash(ratesFromTotals(t).ctrPercent, (n) => `${n.toFixed(2)}%`) },
+    { key: 'cpc', label: 'CPC', title: 'Spend / Clicks', value: (t) => rateOrDash(ratesFromTotals(t).cpc, money2) },
+    { key: 'cpm', label: 'CPM', title: 'Spend / Impressions x 1000', value: (t) => rateOrDash(ratesFromTotals(t).cpm, money2) },
   ];
   const shadeAt = (i: number) => (i % 2 === 1 ? 'bg-muted/50' : '');
-  const total = rows.reduce(
+  const total = rows.reduce<LinkedinTotals>(
     (acc, r) => ({
-      spend: acc.spend + r.spend,
-      impressions: acc.impressions + r.impressions,
-      clicks: acc.clicks + r.clicks,
+      spend: acc.spend + r.totals.spend,
+      impressions: acc.impressions + r.totals.impressions,
+      clicks: acc.clicks + r.totals.clicks,
     }),
     { spend: 0, impressions: 0, clicks: 0 },
   );
@@ -313,7 +314,7 @@ function BreakdownTable({
               </td>
               {cols.map((col, i) => (
                 <td key={col.key} className={`${cell} text-right tabular-nums text-slate-muted ${shadeAt(i)}`}>
-                  {col.value(r)}
+                  {col.value(r.totals)}
                 </td>
               ))}
             </tr>
