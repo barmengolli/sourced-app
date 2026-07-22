@@ -24,10 +24,13 @@ import {
   periodBreakdowns,
   ratesFromTotals,
   assessLinkedinCompleteness,
+  latestImportedSunday,
   defaultMonthPeriod,
   availableYears,
   type BreakdownRow,
   type LinkedinTotals,
+  type LinkedinCompleteness,
+  type LinkedinBreakdowns,
 } from '../lib/linkedinReporting';
 import {
   computeDelta,
@@ -95,39 +98,66 @@ export default function LinkedinDashboardPage({
   snapshots: LinkedinAdSnapshot[];
   loading: boolean;
 }) {
-  // Default period: the Month containing the latest imported week (clock-free).
-  // Fallback keeps a valid shape when there is no data yet.
-  const initialPeriod: ReportingPeriod = useMemo(
-    () => defaultMonthPeriod(snapshots) ?? { grain: 'year', year: 2026 },
-    [snapshots],
-  );
-  const [period, setPeriod] = useState<ReportingPeriod>(initialPeriod);
+  // Period selection is DERIVED, not stored-with-an-effect. `userPeriod` holds
+  // only an explicit user choice (null until the user picks). The effective
+  // period is the user's choice if any, otherwise the Month containing the
+  // latest imported week, computed during render. This means:
+  //   - The first render mounts with snapshots=[] (loading) so there is no
+  //     default yet; we never guess a hardcoded year.
+  //   - Once snapshots arrive, the default resolves to the latest Month with no
+  //     effect and no setState-in-effect.
+  //   - Realtime updates change `snapshots` but not `userPeriod`, so a user's
+  //     selection is never reset; and before the user picks, a realtime insert
+  //     only advances the derived default (expected: follow the latest data).
+  const [userPeriod, setUserPeriod] = useState<ReportingPeriod | null>(null);
   const [comparison, setComparison] = useState<ComparisonMode>('previous_period');
+  const period: ReportingPeriod | null = userPeriod ?? defaultMonthPeriod(snapshots);
+
+  function handlePeriodChange(next: ReportingPeriod) {
+    setUserPeriod(next);
+  }
 
   const years = useMemo(
-    () => availableYears(snapshots, period.year),
-    [snapshots, period.year],
+    () => availableYears(snapshots, period?.year),
+    [snapshots, period?.year],
   );
 
-  const cmp = useMemo(
-    () => comparePeriods(snapshots, period, comparison),
-    [snapshots, period, comparison],
-  );
-  const completeness = useMemo(
-    () => assessLinkedinCompleteness(snapshots, period),
-    [snapshots, period],
-  );
-  const breakdowns = useMemo(
-    () => periodBreakdowns(snapshots, period),
-    [snapshots, period],
-  );
+  // Comparison is effectively off until a period is initialized, and honored as
+  // chosen after. When the user turns comparison off, no comparison is computed,
+  // no delta renders, and no comparison label is shown.
+  const showComparison = period !== null && comparison !== 'off';
 
-  const cmpLabel = comparisonLabel(period, comparison);
-  const suppress = completeness.suppressDelta;
+  const cmp = useMemo(() => {
+    const p = period;
+    if (!p) return null;
+    return comparePeriods(snapshots, p, showComparison ? comparison : 'off');
+  }, [snapshots, period, comparison, showComparison]);
+  const completeness = useMemo((): LinkedinCompleteness => {
+    const p = period;
+    if (!p) {
+      return {
+        completeness: 'missing',
+        finalSunday: null,
+        dataThrough: latestImportedSunday(snapshots),
+        suppressDelta: true,
+      };
+    }
+    return assessLinkedinCompleteness(snapshots, p);
+  }, [snapshots, period]);
+  const breakdowns = useMemo((): LinkedinBreakdowns => {
+    const p = period;
+    if (!p) return { byProduct: [], byRegion: [], byAdset: [] };
+    return periodBreakdowns(snapshots, p);
+  }, [snapshots, period]);
+
+  const cmpLabel = period ? comparisonLabel(period, comparison) : '';
+  // Deltas are hidden when the period is incomplete OR when comparison is off.
+  const suppress = completeness.suppressDelta || !showComparison;
 
   // Build the delta for a KPI: rates use pp deltas, counts/currency use absolute
   // deltas. Suppressed for a partial current period.
   function deltaFor(kpi: Kpi) {
+    if (!cmp) return computeDelta({ state: 'missing' }, { state: 'missing' }, kpi.direction);
     const curV = cmp.current.values[kpi.key as keyof typeof cmp.current.values] as MetricValue;
     const cmpV = (cmp.comparison?.values[kpi.key as keyof typeof cmp.current.values] ?? { state: 'missing' }) as MetricValue;
     return kpi.isRate
@@ -136,9 +166,9 @@ export default function LinkedinDashboardPage({
   }
 
   function kpiValueText(kpi: Kpi): string {
+    if (!cmp || !cmp.current.hasData) return '—';
     const t = cmp.current.totals;
     const r = cmp.current.rates;
-    if (!cmp.current.hasData) return '—';
     switch (kpi.key) {
       case 'spend': return money0(t.spend);
       case 'impressions': return count(t.impressions);
@@ -172,13 +202,15 @@ export default function LinkedinDashboardPage({
         </p>
       </header>
 
-      <ReportingFilterBar
-        period={period}
-        comparison={comparison}
-        years={years}
-        onPeriodChange={setPeriod}
-        onComparisonChange={setComparison}
-      />
+      {period && (
+        <ReportingFilterBar
+          period={period}
+          comparison={comparison}
+          years={years}
+          onPeriodChange={handlePeriodChange}
+          onComparisonChange={setComparison}
+        />
+      )}
 
       {loading && snapshots.length === 0 ? (
         <p className="text-sm text-slate-muted italic">Loading…</p>
@@ -187,12 +219,22 @@ export default function LinkedinDashboardPage({
           No LinkedIn Ads data yet. The n8n workflow populates
           linkedin_ads_snapshots from the weekly Google Sheet.
         </div>
+      ) : !period ? (
+        <p className="text-sm text-slate-muted italic">Loading…</p>
       ) : (
         <>
           <p className="text-xs text-slate-muted">
             {periodLabel(period)}
             {!suppress && cmpLabel ? ` · ${cmpLabel}` : ''}
           </p>
+          {completeness.completeness === 'missing' && (
+            <div
+              className="border border-border rounded p-4 text-sm text-slate-muted"
+              data-testid="linkedin-no-period-data"
+            >
+              No data for selected period.
+            </div>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             {KPIS.map((kpi) => (
               <Tile

@@ -222,6 +222,41 @@ describe('completeness — latest data-through and final-Sunday', () => {
   });
 });
 
+describe('completeness — accounts for rows in the SELECTED period', () => {
+  // Global data lives only in July 2026.
+  const july = [
+    snap({ snapshot_date: '2026-07-05', spend: 10, impressions: 100, clicks: 1 }),
+    snap({ snapshot_date: '2026-07-26', spend: 10, impressions: 100, clicks: 1 }),
+  ];
+
+  it('a FUTURE period with no rows is missing and suppressed, keeping the global data-through', () => {
+    const c = assessLinkedinCompleteness(july, month(2026, 9)); // September, no rows
+    expect(c.completeness).toBe('missing');
+    expect(c.suppressDelta).toBe(true);
+    expect(c.dataThrough).toBe('2026-07-26'); // global latest preserved
+  });
+
+  it('a HISTORICAL period with no rows is missing even though newer global data exists', () => {
+    const c = assessLinkedinCompleteness(july, month(2026, 3)); // March, no rows
+    expect(c.completeness).toBe('missing'); // NOT complete just because dataThrough > March
+    expect(c.suppressDelta).toBe(true);
+    expect(c.dataThrough).toBe('2026-07-26');
+  });
+
+  it('a PARTIAL period with rows is partial (final Sunday not yet reached)', () => {
+    const partial = [snap({ snapshot_date: '2026-07-05' })]; // July final Sunday is Jul 26
+    const c = assessLinkedinCompleteness(partial, month(2026, 7));
+    expect(c.completeness).toBe('partial');
+    expect(c.suppressDelta).toBe(true);
+  });
+
+  it('a COMPLETE period with rows reaching the final Sunday is complete', () => {
+    const c = assessLinkedinCompleteness(july, month(2026, 7)); // includes Jul 26 (final Sunday)
+    expect(c.completeness).toBe('complete');
+    expect(c.suppressDelta).toBe(false);
+  });
+});
+
 describe('defaultMonthPeriod', () => {
   it('defaults to the month containing the latest imported week', () => {
     const rows = [snap({ snapshot_date: '2026-06-28' }), snap({ snapshot_date: '2026-07-19' })];

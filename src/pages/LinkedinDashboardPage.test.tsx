@@ -129,3 +129,80 @@ describe('LinkedinDashboardPage — states and breakdowns', () => {
     expect(screen.getByText('By Ad Set')).toBeTruthy();
   });
 });
+
+describe('LinkedinDashboardPage — async default-period initialization', () => {
+  it('defaults to the latest Month once snapshots arrive after an empty+loading mount', async () => {
+    // First mount: still loading, no data. The dashboard cannot know the month.
+    const { rerender } = render(<LinkedinDashboardPage snapshots={[]} loading={true} />);
+    expect(screen.getByText('Loading…')).toBeTruthy();
+
+    // Fetch completes with data whose latest week ends 2026-07-26 (July).
+    rerender(<LinkedinDashboardPage snapshots={completeJulyData()} loading={false} />);
+
+    // The Month grain is selected and the Month select shows July (not a
+    // hardcoded fallback year, and not Year grain).
+    const timeframe = await screen.findByRole('radiogroup', { name: 'Timeframe' });
+    expect(within(timeframe).getByRole('radio', { name: 'Month', checked: true })).toBeTruthy();
+    // Target the month <select> (combobox) specifically, not the "Month" grain radio.
+    expect((screen.getByRole('combobox', { name: 'Month' }) as HTMLSelectElement).value).toBe('7');
+    expect((screen.getByRole('combobox', { name: 'Year' }) as HTMLSelectElement).value).toBe('2026');
+  });
+
+  it('does not override a user selection when a later realtime update arrives', async () => {
+    const user = userEvent.setup();
+    const initial = completeJulyData();
+    const { rerender } = render(<LinkedinDashboardPage snapshots={initial} loading={false} />);
+
+    // User switches to Year grain.
+    await user.click(screen.getByRole('radio', { name: 'Year' }));
+    let timeframe = screen.getByRole('radiogroup', { name: 'Timeframe' });
+    expect(within(timeframe).getByRole('radio', { name: 'Year', checked: true })).toBeTruthy();
+
+    // A realtime insert adds a new August week; the selection must NOT reset to
+    // the latest month.
+    rerender(<LinkedinDashboardPage snapshots={[...initial, snap({ snapshot_date: '2026-08-02' })]} loading={false} />);
+    timeframe = screen.getByRole('radiogroup', { name: 'Timeframe' });
+    expect(within(timeframe).getByRole('radio', { name: 'Year', checked: true })).toBeTruthy();
+  });
+});
+
+describe('LinkedinDashboardPage — comparison Off', () => {
+  it('renders no delta chips and no comparison label when comparison is Off', async () => {
+    const user = userEvent.setup();
+    render(<LinkedinDashboardPage snapshots={completeJulyData()} loading={false} />);
+    // Complete July -> deltas present initially.
+    expect(screen.getAllByTestId('delta-display').length).toBeGreaterThan(0);
+
+    // Turn comparison off.
+    const compare = screen.getByRole('radiogroup', { name: 'Compare to' });
+    await user.click(within(compare).getByRole('radio', { name: 'Off' }));
+
+    // No delta chips remain, and no "vs <period>" comparison label is shown.
+    expect(screen.queryByTestId('delta-display')).toBeNull();
+    expect(screen.queryByText(/·\s*vs /)).toBeNull();
+    // And it must NOT read as "No comparison data" (that is for enabled-but-empty).
+    expect(screen.queryByText(/No comparison data/)).toBeNull();
+  });
+});
+
+describe('LinkedinDashboardPage — no data for selected period', () => {
+  it('shows a clear status when the selected period has no rows (in-year gap)', async () => {
+    const user = userEvent.setup();
+    // Data only in July 2026. Default lands on July.
+    render(<LinkedinDashboardPage snapshots={completeJulyData()} loading={false} />);
+    // Navigate to March 2026 (same year, so it is a valid year option) which has
+    // no rows even though newer global data exists.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Month' }), '3');
+    expect(screen.getByTestId('linkedin-no-period-data').textContent).toContain(
+      'No data for selected period.',
+    );
+    // The global data-through label is preserved.
+    expect(screen.getByTestId('linkedin-data-through').textContent).toContain(
+      'Data through week ending Jul 26, 2026',
+    );
+    // Deltas are suppressed for a missing period.
+    expect(screen.queryByTestId('delta-display')).toBeNull();
+    // And the partial marker is NOT shown for a missing (empty) period.
+    expect(screen.queryByText('Partial period')).toBeNull();
+  });
+});

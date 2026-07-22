@@ -363,18 +363,28 @@ export interface LinkedinCompleteness {
   suppressDelta: boolean;
 }
 
-// Assess completeness for the selected period using the week-ending convention.
-// A period is complete when the latest imported Sunday reaches the period's
-// final Sunday. Otherwise Partial (or Missing when there is no data at all).
-// This deliberately does NOT try to detect a missing intermediate weekly run;
-// see docs/linkedin-n8n-mapping.md.
+// Assess completeness for the SELECTED period using the week-ending convention.
+// The status depends on both global coverage and whether the selected period
+// actually contains rows:
+//   - No rows fall in the selected period -> `missing` (deltas suppressed).
+//     This covers a future period and a historical gap where newer global data
+//     exists but this period has none.
+//   - Rows present, but the latest imported Sunday has not reached the period's
+//     final Sunday -> `partial`.
+//   - Rows present and coverage has reached the final Sunday -> `complete`.
+// `dataThrough` is always the GLOBAL latest imported Sunday, independent of the
+// selected period, so the "Data through week ending ..." label stays stable.
+// This deliberately does NOT detect a missing intermediate weekly run; see
+// docs/linkedin-n8n-mapping.md.
 export function assessLinkedinCompleteness(
   allRows: readonly LinkedinAdSnapshot[],
   period: ReportingPeriod,
 ): LinkedinCompleteness {
   const finalSunday = finalSundayOfPeriod(period);
   const dataThrough = latestImportedSunday(allRows);
-  if (finalSunday === null || dataThrough === null) {
+  const hasRowsInPeriod = filterSnapshots(allRows, period).length > 0;
+  // No rows for this period (or an unusable period/date) -> missing.
+  if (finalSunday === null || dataThrough === null || !hasRowsInPeriod) {
     return { completeness: 'missing', finalSunday, dataThrough, suppressDelta: true };
   }
   if (dataThrough >= finalSunday) {
