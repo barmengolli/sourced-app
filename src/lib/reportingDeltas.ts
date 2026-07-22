@@ -174,10 +174,53 @@ export function roundForDisplay(value: number, decimals = 1): number {
   return rounded / factor;
 }
 
+// Generic formatting for the absolute part of a delta. Kept metric-agnostic so
+// any dashboard (LinkedIn, Outreach, funnel, ...) reuses it rather than writing
+// a bespoke delta component.
+//   - kind 'number'    -> thousands-separated integer/decimal (counts)
+//   - kind 'currency'  -> "$" prefixed (spend, CPC, CPM)
+//   - kind 'points'    -> "pp" suffix (rate differences)
+//   - kind 'percent'   -> "%" suffix
+// `decimals` controls display rounding; the sign is always shown.
+export type DeltaValueFormat =
+  | { kind: 'number'; decimals?: number }
+  | { kind: 'currency'; decimals?: number }
+  | { kind: 'points'; decimals?: number }
+  | { kind: 'percent'; decimals?: number };
+
+function formatSignedValue(value: number, fmt: DeltaValueFormat): string {
+  const decimals = fmt.decimals ?? (fmt.kind === 'points' ? 1 : 0);
+  const rounded = roundForDisplay(value, decimals);
+  const sign = rounded >= 0 ? '+' : '-';
+  const magnitude = Math.abs(rounded);
+  const body = magnitude.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  switch (fmt.kind) {
+    case 'currency':
+      return `${sign}$${body}`;
+    case 'points':
+      return `${sign}${body}pp`;
+    case 'percent':
+      return `${sign}${body}%`;
+    case 'number':
+      return `${sign}${body}`;
+  }
+}
+
 // A concise, color-free textual summary of a delta for accessibility and
 // snapshotting in tests. Does not include arrows or color; the component layer
-// adds those. `unit` is appended to the absolute value (e.g. "pp" for rates).
-export function describeDelta(result: DeltaResult, unit = ''): string {
+// adds those.
+//
+// Backward compatible: when `format` is a string it is treated as a plain unit
+// suffix appended to a 1-decimal absolute value (the original Bite 1 behavior).
+// When `format` is a DeltaValueFormat, the absolute value is formatted
+// generically (currency, count, pp, percent).
+export function describeDelta(
+  result: DeltaResult,
+  format: string | DeltaValueFormat = '',
+): string {
   switch (result.kind) {
     case 'no_current_data':
       return 'No current data';
@@ -190,7 +233,10 @@ export function describeDelta(result: DeltaResult, unit = ''): string {
     case 'delta': {
       const abs = result.absolute ?? 0;
       const rel = result.relativePercent ?? 0;
-      const absStr = `${abs >= 0 ? '+' : ''}${roundForDisplay(abs)}${unit}`;
+      const absStr =
+        typeof format === 'string'
+          ? `${abs >= 0 ? '+' : ''}${roundForDisplay(abs)}${format}`
+          : formatSignedValue(abs, format);
       const relStr = `${rel >= 0 ? '+' : ''}${roundForDisplay(rel)}%`;
       return `${absStr} (${relStr})`;
     }

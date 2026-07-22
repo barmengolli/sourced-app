@@ -133,8 +133,24 @@ alone is not proof of production state.
 
 - Populated by n8n from a weekly Google Sheet.
 - Rows are additive weekly totals per ad set, not cumulative counters.
+- `snapshot_date` is the **week-ending Sunday**. The source `Week` column is
+  `MM/DD/YYYY` and always names that Sunday.
+- **Reporting basis: Activity.** A whole week is assigned to the month, quarter,
+  and year that contain its week-ending Sunday. Weeks are never prorated or
+  split across calendar months, and no daily values are invented. The dashboard
+  discloses "Activity: Weekly LinkedIn Ads activity assigned by week-ending
+  Sunday" and shows "Data through week ending <date>".
+- Standard grains are Month, Quarter, and Year (Bite 2 migration). Week is
+  retained in storage but is not an executive-dashboard control.
+- Completeness uses the week-ending convention: a period is complete when the
+  latest imported `snapshot_date` reaches the final Sunday belonging to that
+  period; otherwise it is Partial and deltas are suppressed. This cannot detect
+  a missing intermediate weekly run.
 - CTR, CPC, and CPM must be recalculated from aggregated numerators and
-  denominators.
+  denominators, never averaged across weeks.
+- Current n8n limitations (separate follow-up, not app work): the workflow
+  timezone is not stored explicitly (schedule is "Every Monday 12:00 Mountain"),
+  and the read tab is hardcoded to `Q3 S`.
 - The detailed mapping is in `docs/linkedin-n8n-mapping.md` and should be read
   only when working on that integration.
 
@@ -298,7 +314,7 @@ Current source semantics:
 | Opportunities | HPP cohort or stage activity | Every surface must state which one it uses |
 | Funnel spend | Date range plus dated events | Recalculate ratios from period totals |
 | Events | Lead cohort with undated activation labels | Do not claim the activation happened in the selected period |
-| LinkedIn Ads | Weekly additive flow on `snapshot_date` | Audit exact month-boundary support |
+| LinkedIn Ads | Weekly additive flow on `snapshot_date` (week-ending Sunday) | Whole week assigned by its week-ending Sunday; never prorated across months |
 | Outreach | Weekly cumulative snapshots on `export_date` | Requires baselines, reset handling, and completeness checks |
 | 6sense | Monthly point-in-time snapshot | Quarter and year use the latest snapshot, never a sum |
 | BDR quota | HPP cohort against annual quota | Period quota interpretation needs business approval |
