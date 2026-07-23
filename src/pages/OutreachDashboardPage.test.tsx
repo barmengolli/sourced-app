@@ -361,6 +361,21 @@ describe('Sequence Performance table', () => {
     expect(total.textContent).toContain('90.0%');
   });
 
+  it('keeps the full sequence name accessible when its visual display is clamped', () => {
+    const long = '[2026] - NA - Enterprise insurance core-platform nurture wave three, decision makers and influencers, North America';
+    render(<Harness initialSnapshots={fullSummer(1, long)} initialPeriod={july} />);
+    const name = within(table()).getByTestId('seq-name-1');
+    // The full name stays in the DOM (clamping is CSS-only), on the hover
+    // tooltip, and on the accessible label; the element is keyboard-reachable.
+    expect(name.textContent).toBe(long);
+    expect(name.getAttribute('title')).toBe(long);
+    expect(name.getAttribute('aria-label')).toBe(long);
+    expect(name.getAttribute('tabindex')).toBe('0');
+    // Two-line wrap + clamp replaced single-line ellipsis truncation.
+    expect(name.className).toContain('line-clamp-2');
+    expect(name.className).not.toContain('truncate');
+  });
+
   it('default sort is by Delivered descending', () => {
     const rows = [
       // Small deliverer first in input order.

@@ -941,12 +941,23 @@ function SequencePerformanceTable({
               {rows.map((r) => (
                 <tr key={r.sequence_id} data-testid={`seq-row-${r.sequence_id}`}>
                   <td className={`${cell} text-charcoal max-w-[260px]`}>
-                    <span className="truncate inline-block max-w-[220px] align-bottom" title={r.name}>{r.name}</span>
-                    {!r.enabled && (
-                      <span className="ml-1 rounded-full border border-border bg-muted px-1.5 text-[9px] text-slate-muted" title="Sequence was disabled as of the period end. Its historical activity is still reported.">
-                        off
+                    {/* Names wrap to two lines then clamp; tabIndex keeps the full-name tooltip reachable by keyboard. */}
+                    <div className="flex max-w-[230px] items-start gap-1">
+                      <span
+                        className="line-clamp-2 min-w-0 break-words rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo"
+                        title={r.name}
+                        aria-label={r.name}
+                        tabIndex={0}
+                        data-testid={`seq-name-${r.sequence_id}`}
+                      >
+                        {r.name}
                       </span>
-                    )}
+                      {!r.enabled && (
+                        <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 text-[9px] text-slate-muted" title="Sequence was disabled as of the period end. Its historical activity is still reported.">
+                          off
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className={`${cell} text-right tabular-nums text-slate-muted`} title="Snapshot as of the latest run on or before the period end; not period activity.">
                     {r.prospectsActive !== null ? r.prospectsActive.toLocaleString() : '—'}
@@ -1187,7 +1198,7 @@ function HeatCell({
   if (a.state === 'missing') {
     return (
       <td className="px-1 py-1 text-center" data-state="missing">
-        <div className="rounded px-1 py-0.5 text-[9px]" title={`${seqName} — ${cell.label}: no data`} />
+        <div className="rounded px-1 py-0.5 text-[9px]" title={`${seqName}, ${cell.label}: no data`} />
       </td>
     );
   }
@@ -1198,7 +1209,7 @@ function HeatCell({
       <td className="px-1 py-1 text-center" data-state={a.state}>
         <div
           className="rounded px-1 py-0.5 text-[9px] font-medium border border-dashed border-border text-slate-muted"
-          title={`${seqName} — ${cell.label}: ${sequenceActivityReason(a)}`}
+          title={`${seqName}, ${cell.label}: ${sequenceActivityReason(a)}`}
         >
           ·
         </div>
@@ -1221,7 +1232,7 @@ function HeatCell({
       <div
         className="rounded px-1 py-0.5 text-[9px] font-medium tabular-nums"
         style={{ backgroundColor: bg, color: text }}
-        title={`${seqName} — ${cell.label}: ${a.value.toLocaleString()}${titleNote}`}
+        title={`${seqName}, ${cell.label}: ${a.value.toLocaleString()}${titleNote}`}
       >
         {a.value.toLocaleString()}
         {suffix}
