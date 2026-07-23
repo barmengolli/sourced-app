@@ -123,11 +123,30 @@ alone is not proof of production state.
 
 #### Outreach
 
-- Populated by a scheduled n8n workflow.
-- Rows are weekly cumulative sequence snapshots.
-- Period activity is derived by differencing snapshots.
+- Populated by a scheduled n8n workflow intended for Thursdays 8:00 Mountain;
+  the exported workflow stores no explicit timezone.
+- Rows are weekly cumulative lifetime counters per sequence, keyed by
+  (`export_date`, `sequence_id`). `sequence_id` is the stable identity;
+  sequence names can change. The stored `week_number` is a custom formula, not
+  ISO; period math must use `export_date` calendar boundaries.
+- Reporting basis is Derived activity: end-of-period counter minus a real
+  pre-period baseline. A sequence's first-ever snapshot is lifetime volume,
+  never period activity; negative diffs are resets, never clamped; duplicate
+  natural keys are never summed; missing stays distinct from zero.
+- Only the audited cumulative counters may be differenced.
+  `contacted_prospects`, `replied_prospects`, `prospects_added`, and
+  `total_tasks` decrease in real data and are not activity counters.
+  `linkedin_tasks_completed` has a source coverage break; rates are always
+  recomputed from aggregated counts.
+- Known source limitations: hardcoded `[2026]` name filter, `page[size]=200`
+  with no cursor pagination, Sheet append vs Supabase upsert divergence,
+  `parseInt||0` missing-to-zero coercion, and unresolved `calls_answered`
+  schema drift.
 - Outreach uses its own legacy five-region taxonomy inferred from sequence
   names.
+- The full audited contract, reconciliation, and the future email-variant
+  design are in `docs/outreach-n8n-mapping.md`; read it when working on this
+  integration.
 
 #### LinkedIn Ads
 
