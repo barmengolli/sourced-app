@@ -244,6 +244,33 @@ change requires edit-lock regression tests.
   `Sales Generated`. Otherwise use `No linked lead`.
 - Preserve the unique logical deal and stage relationship.
 
+### Funnel cohort and attribution contract (foundation)
+
+`docs/funnel-source-contract.md` is the canonical contract for funnel cohort,
+lifecycle-history, and attribution semantics. Summary:
+
+- Stage counts are non-additive memberships: never sum stages into a
+  total-person or total-opportunity count. Unique totals come from unique
+  people (`leadId`) and unique deals (`deal_id`).
+- Leads belong to the acquisition cohort of their original Lead date; deals
+  to the cohort of their HPP entry. Later transitions update the original
+  cohort. Every cohort calculation takes an explicit `asOf` date.
+- Lifecycle is a repeatable event history (Lead > MQL > Lead > MQL). First
+  valid conversion drives cohort MQLs; later ones are requalifications.
+  Dates carry provenance (`salesforce_confirmed`, `n8n_observed`,
+  `unknown`); unknown dates are never invented, reverse dates are flagged.
+- Primary source (earliest valid touch, mutually exclusive, locks win) is
+  separate from campaign influence (overlapping by design, never an
+  efficiency denominator).
+- Efficiency comparisons across cohorts of different maturity are suppressed
+  until a maturity-alignment rule is selected.
+
+Pure implementation: `src/lib/funnelCohorts.ts` and
+`src/lib/campaignAttribution.ts` (not yet wired into any dashboard;
+`computeGrid` unchanged). The contract doc also records the current nightly
+SFDC CampaignMember workflow's verified gaps and the open Salesforce
+field-name questions.
+
 ### Identity and deduplication
 
 - Lead email is the canonical identity key and is stored lowercase.
@@ -650,3 +677,8 @@ Do not turn a focused task into one of these projects without approval:
 - Leads-table virtualization is a separate performance project.
 - Content Syndication budget allocation may be revisited separately.
 - AWS migration is planning only. Production remains Vercel plus Supabase.
+- The funnel cohort/attribution contract (`docs/funnel-source-contract.md`)
+  is implemented as pure modules only. Wiring it into dashboards, migrating
+  single-entry `stage_history` data, fixing the nightly SFDC workflow's
+  lifecycle gaps, and confirming Salesforce date-field API names are all
+  future, separately approved work.
