@@ -262,9 +262,90 @@ This is a stopgap until the n8n workflow preserves nulls end-to-end; arbitrary
 zeros and future dates are never blanket-nulled, and the date list lives beside
 this doc's coverage notes.
 
-Still pending for later bites: migrating Data/Compare, and the visible-copy
-correction on the Data tab ("populated by the n8n cron each Monday" should say
-Thursday).
+Still pending for later bites: migrating Data, and the visible-copy correction
+on the Data tab ("populated by the n8n cron each Monday" should say Thursday).
+
+## Bite 3C: Sequence Performance table, clearer quality disclosures, Compare retired
+
+### Sequence Performance table
+
+The Dashboard's one-metric "Sequence Rankings" card is replaced by a
+screenshot-ready **Sequence performance** table: one row per sequence with all
+metrics visible at once (no metric dropdown). Column groups:
+
+- **Sequence** - name resolved from the latest snapshot on or before the
+  selected period end (identity is `sequence_id`; a later rename never alters a
+  historical report), with a compact "off" chip when the sequence was disabled
+  as of the period end. Historical activity is still shown for a
+  later-disabled sequence.
+- **Audience - Prospects** - `prospects_active` from the latest raw snapshot on
+  or before the period end. Point-in-time snapshot, labeled "as of", **not**
+  period activity. Not totaled: the Total row shows a dash with an explanation,
+  because prospect counts are per-sequence snapshots and a prospect can appear
+  in several sequences, so a sum is not proven meaningful.
+- **Email performance** - Sent, Delivered, Delivery rate, Open rate, Click
+  rate, Reply rate, Bounce rate, Opt-out rate.
+- **Sales activity** - Outbound calls, LinkedIn tasks.
+
+Counts are safe period activity from the Bite 3A engine. Rate definitions and
+denominators (recomputed from aggregate counts, never averaged):
+
+| Rate | Numerator / Denominator |
+|---|---|
+| Delivery | delivered / sent |
+| Open | opened / delivered |
+| Click | clicked / delivered |
+| Reply | replied / delivered |
+| Bounce | bounced / sent |
+| Opt-out | opted out / delivered |
+
+Behavior: default sort by **Delivered** descending; every sequence with
+measured activity OR a data-quality issue in the period appears (incomplete
+sequences are **not** silently dropped, unlike the retired ranking card); the
+Total row's counts come from the same aggregate totals the KPI cards use, so it
+**reconciles with the cards** under the same period, region, and sequence
+filters, and its rates are recomputed from those summed counts. The table shows
+the selected period only, with no per-cell comparison deltas.
+
+### Reason-specific data-quality disclosures
+
+Incomplete safe-known values keep a visible `*` (`†` for a partial cadence
+column in the heatmap) plus an accessible hover/focus explanation. Every reason
+string is produced by `src/lib/outreachQualityText.ts` directly from the same
+Bite 3A result (`MetricTotal.issues`, `SequenceActivity` state,
+`OutreachCompleteness`) that marked the value incomplete, so the displayed
+cause always matches the calculation and never claims more than the engine
+proved. The causes are distinguished, not collapsed into a generic label:
+
+- Missing exact boundary baseline (includes the required boundary date, e.g.
+  "the required May 28 baseline")
+- Missing measurement for the metric
+- Counter reset / correction
+- Ambiguous duplicate snapshot
+- Missing scheduled Thursday / reporting cadence
+
+A concise section disclosure summarizes the period's issues (e.g. "Incomplete:
+3 sequences lacked the required May 28 baseline; values shown are the activity
+we can safely prove.") and explains that `0*` means zero in the safely measured
+data while the complete value is unknown - distinct from a complete zero, a
+missing value, a reset, and a missing cadence. These warnings show regardless
+of the comparison mode: **Comparison Off disables comparisons only, never the
+data-quality disclosures.**
+
+### Compare tab retired
+
+The Outreach **Compare** navigation item is removed. The legacy
+`outreach-compare` route redirects to the Outreach **Dashboard**
+(`redirectRetiredPage` in `src/lib/retiredRoutes.ts`, applied in both
+navigation and initial-page resolution) so old bookmarks and persisted
+"last tab" values do not break. The Compare page **source is retained** (not
+deleted) but is no longer routed. The Outreach **Data** tab is unchanged.
+
+### Out of scope (unchanged)
+
+Email-step and A/B email-variant reporting remains a future ingestion project
+(see the design section below); a dedicated presentation/screenshot mode is
+deferred to Bite 3D.
 
 ## Future email-variant analytics (design only; not implemented)
 

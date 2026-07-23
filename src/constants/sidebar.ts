@@ -79,7 +79,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     children: [
       { key: 'outreach-data', label: 'Data' },
       { key: 'outreach-dashboard', label: 'Dashboard' },
-      { key: 'outreach-compare', label: 'Compare' },
+      // Compare retired in Bite 3C; the old route redirects to Dashboard.
     ],
   },
   {

@@ -274,30 +274,6 @@ describe('panels on the safe engine', () => {
     expect(funnel.textContent).toContain('90.0%');
   });
 
-  it('Sequence Rankings excludes reset sequences with a visible count instead of ranking them as zero', async () => {
-    const user = userEvent.setup();
-    const resetSeq = [
-      // seq 2 resets inside July (100 -> 40) then partially recovers.
-      snap({ export_date: '2026-06-25', sequence_id: 2, sequence_name: '[2026] - NA - Reset', outbound_calls: 100 }),
-      snap({ export_date: '2026-07-09', sequence_id: 2, sequence_name: '[2026] - NA - Reset', outbound_calls: 40 }),
-      snap({ export_date: '2026-07-30', sequence_id: 2, sequence_name: '[2026] - NA - Reset', outbound_calls: 60 }),
-    ];
-    render(
-      <Harness initialSnapshots={[...fullSummer(), ...resetSeq]} initialPeriod={{ grain: 'month', year: 2026, month: 7 }} />,
-    );
-    const rankings = screen.getByTestId('outreach-rankings');
-    // Select the Outbound Calls count metric: seq 1 qualifies (+10), seq 2 is
-    // a reset and must be EXCLUDED with a visible count, never ranked as 0.
-    await user.selectOptions(
-      within(rankings).getByRole('combobox', { name: 'Ranking metric' }),
-      '3', // index of Outbound Calls in RANK_METRICS
-    );
-    expect(within(rankings).getByTestId('outreach-rankings-excluded').textContent).toContain(
-      '1 sequence excluded (incomplete data)',
-    );
-    expect(within(rankings).queryByText('[2026] - NA - Reset')).toBeNull();
-  });
-
   it('Heatmap renders missing cells blank and distinct from measured zeros', () => {
     // Seq with a measured zero July delta (flat counters) + a month gap.
     const flat = ['2026-05-28', '2026-06-04', '2026-06-11', '2026-06-18', '2026-06-25', '2026-07-02', '2026-07-09', '2026-07-16', '2026-07-23', '2026-07-30'].map((d) =>
@@ -338,66 +314,164 @@ describe('filters apply identically to both periods', () => {
   });
 });
 
-describe('rankings eligibility (hardening)', () => {
+describe('Sequence Performance table', () => {
   const july = { grain: 'month', year: 2026, month: 7 } as const;
 
-  it('excludes a debut sequence (baselineIncomplete) with a visible count', async () => {
-    const user = userEvent.setup();
-    // Debut inside July: measurable growth but unknown pre-debut activity.
+  function table() {
+    return screen.getByTestId('outreach-sequence-performance');
+  }
+
+  it('replaces the old Rankings card and has no metric dropdown', () => {
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
+    expect(screen.getByTestId('outreach-sequence-performance')).toBeTruthy();
+    expect(screen.queryByTestId('outreach-rankings')).toBeNull();
+    expect(within(table()).queryByRole('combobox', { name: 'Ranking metric' })).toBeNull();
+  });
+
+  it('shows all metric columns together for a sequence in one row', () => {
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
+    for (const h of ['Sent', 'Delivered', 'Delivery', 'Open', 'Click', 'Reply', 'Bounce', 'Opt-out', 'Calls', 'LinkedIn', 'Prospects']) {
+      expect(within(table()).getByText(h)).toBeTruthy();
+    }
+    // Seq 1 row exists with its safe July Sent activity (Jul 30 190 - Jun 25 140 = 50).
+    const row = within(table()).getByTestId('seq-row-1');
+    expect(row.textContent).toContain('50');
+  });
+
+  it('recomputes each rate from that row\'s aggregate numerator and denominator', () => {
+    // Seq A July: Sent +50, Delivered +45 -> Delivery 90.0%; Opened +20 over
+    // Delivered 45 -> Open 44.4%. Rates never averaged.
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
+    const row = within(table()).getByTestId('seq-row-1');
+    expect(row.textContent).toContain('90.0%');
+    expect(row.textContent).toContain('44.4%');
+  });
+
+  it('Total-row rates recompute from summed counts and the counts reconcile with the KPI cards', () => {
+    const rows = [...fullSummer(1, '[2026] - NA - Seq A'), ...fullSummer(2, '[2026] - EMEA - Seq B')];
+    render(<Harness initialSnapshots={rows} initialPeriod={july} />);
+    const total = within(table()).getByTestId('seq-total-row');
+    // Two identical sequences: Sent 50+50=100, Delivered 45+45=90 in the total;
+    // matches the KPI card totals under the same filters.
+    expect(total.textContent).toContain('100');
+    expect(screen.getByTestId('kpi-total_sent').textContent).toContain('100');
+    expect(screen.getByTestId('kpi-delivered').textContent).toContain('90');
+    // Delivery rate is recomputed from summed counts (90/100 = 90.0%), not an
+    // average of two 90.0% rows expressed differently.
+    expect(total.textContent).toContain('90.0%');
+  });
+
+  it('keeps the full sequence name accessible when its visual display is clamped', () => {
+    const long = '[2026] - NA - Enterprise insurance core-platform nurture wave three, decision makers and influencers, North America';
+    render(<Harness initialSnapshots={fullSummer(1, long)} initialPeriod={july} />);
+    const name = within(table()).getByTestId('seq-name-1');
+    // The full name stays in the DOM (clamping is CSS-only), on the hover
+    // tooltip, and on the accessible label; the element is keyboard-reachable.
+    expect(name.textContent).toBe(long);
+    expect(name.getAttribute('title')).toBe(long);
+    expect(name.getAttribute('aria-label')).toBe(long);
+    expect(name.getAttribute('tabindex')).toBe('0');
+    // Two-line wrap + clamp replaced single-line ellipsis truncation.
+    expect(name.className).toContain('line-clamp-2');
+    expect(name.className).not.toContain('truncate');
+  });
+
+  it('default sort is by Delivered descending', () => {
+    const rows = [
+      // Small deliverer first in input order.
+      ...fullSummer(2, '[2026] - NA - Small').map((s) => ({ ...s, delivered: Math.round(s.delivered / 3) })),
+      ...fullSummer(1, '[2026] - NA - Big'),
+    ];
+    render(<Harness initialSnapshots={rows} initialPeriod={july} />);
+    const body = within(table()).getAllByTestId(/^seq-row-/);
+    // First data row is the bigger deliverer (seq 1).
+    expect(body[0].getAttribute('data-testid')).toBe('seq-row-1');
+  });
+
+  it('keeps an incomplete (debut) sequence visible and marked, not excluded', () => {
     const debut = ['2026-07-02', '2026-07-30'].map((d, i) =>
-      snap({ export_date: d, sequence_id: 5, sequence_name: '[2026] - NA - Debut', outbound_calls: 30 + i * 20, created_at: `${d}T08:00:00Z` }),
+      snap({ export_date: d, sequence_id: 5, sequence_name: '[2026] - NA - Debut', total_sent: 30 + i * 20, delivered: 28 + i * 18, created_at: `${d}T08:00:00Z` }),
     );
     render(<Harness initialSnapshots={[...fullSummer(), ...debut]} initialPeriod={july} />);
-    const rankings = screen.getByTestId('outreach-rankings');
-    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
-    expect(within(rankings).getByTestId('outreach-rankings-excluded').textContent).toContain('1 sequence excluded');
-    expect(within(rankings).queryByText('[2026] - NA - Debut')).toBeNull();
+    // The debut sequence IS present in the table (not silently excluded)...
+    const row = within(table()).getByTestId('seq-row-5');
+    expect(row).toBeTruthy();
+    // ...and its measured count carries the * incomplete marker.
+    expect(row.textContent).toContain('*');
   });
 
-  it('excludes a sequence with missingMeasurements with a visible count', async () => {
-    const user = userEvent.setup();
+  it('a missing exact baseline shows the boundary date and a distinct reason', () => {
+    // Seq existed before July (Jun 18) but its exact July boundary (Jun 25) is
+    // absent, and no July end value pairs with a baseline -> missing_baseline.
+    const gap = [
+      snap({ export_date: '2026-06-18', sequence_id: 9, sequence_name: '[2026] - NA - NoBoundary', total_sent: 40, created_at: '2026-06-18T08:00:00Z' }),
+      // no Jun 25 (July's boundary Thursday); single July row -> no usable baseline
+      snap({ export_date: '2026-07-30', sequence_id: 9, sequence_name: '[2026] - NA - NoBoundary', total_sent: 90, created_at: '2026-07-30T08:00:00Z' }),
+    ];
+    render(<Harness initialSnapshots={[...fullSummer(), ...gap]} initialPeriod={july} />);
+    const row = within(table()).getByTestId('seq-row-9');
+    const sentCell = row.querySelector('td[data-state="missing_baseline"]');
+    expect(sentCell).toBeTruthy();
+    expect(sentCell?.getAttribute('title')).toContain('Jun 25');
+    expect(sentCell?.getAttribute('title')).toContain('baseline');
+  });
+
+  it('reset, missing-measurement, and cadence reasons are distinct in the disclosure/tooltips', () => {
     render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
-    const rankings = screen.getByTestId('outreach-rankings');
-    // LinkedIn Tasks: the adapter nulls 7/16+7/23, so seq 1's July linkedin is
-    // present-with-missingMeasurements -> excluded, never ranked.
-    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '4');
-    expect(within(rankings).getByTestId('outreach-rankings-excluded').textContent).toContain('1 sequence excluded');
-    expect(within(rankings).getByText('No sequences with enough data')).toBeTruthy();
+    // fullSummer nulls linkedin on 7/16+7/23 -> the section disclosure explains
+    // the missing-measurement cause specifically, not a generic message.
+    const disclosure = within(table()).getByTestId('sequence-performance-disclosure');
+    expect(disclosure.textContent).toContain('missing measurements');
+    // And it explains the 0* convention.
+    expect(disclosure.textContent).toContain('0*');
   });
 
-  it('omits a disabled sequence as inactive without counting it as a quality exclusion', async () => {
-    const user = userEvent.setup();
-    const disabled = fullSummer(6, '[2026] - NA - Disabled').map((s) => ({ ...s, enabled: false }));
-    render(<Harness initialSnapshots={[...fullSummer(), ...disabled]} initialPeriod={july} />);
-    const rankings = screen.getByTestId('outreach-rankings');
-    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
-    expect(within(rankings).queryByText('[2026] - NA - Disabled')).toBeNull();
-    // No data-quality exclusion note: disabled is inactive, not a quality issue.
-    expect(within(rankings).queryByTestId('outreach-rankings-excluded')).toBeNull();
+  it('0* (measured zero, incomplete) differs from a complete zero and from missing', () => {
+    // Seq with a flat linkedin trend (measured 0 activity) but the 7/16+7/23
+    // nulls make July linkedin present-with-missingMeasurements: value 0, marked *.
+    const rows = fullSummer(1, '[2026] - NA - Seq A').map((s) => ({ ...s, linkedin_tasks_completed: 50 }));
+    render(<Harness initialSnapshots={rows} initialPeriod={july} />);
+    const row = within(table()).getByTestId('seq-row-1');
+    // The LinkedIn cell is 0 with an incomplete marker (data-incomplete=true).
+    const liCell = [...row.querySelectorAll('td[data-incomplete="true"]')].find((c) => c.textContent?.startsWith('0'));
+    expect(liCell).toBeTruthy();
+    expect(liCell?.textContent).toBe('0*');
   });
 
-  it('keeps a fully measured enabled sequence ranked', async () => {
-    const user = userEvent.setup();
-    render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
-    const rankings = screen.getByTestId('outreach-rankings');
-    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
-    expect(within(rankings).getByText('[2026] - NA - Seq A')).toBeTruthy();
-  });
-
-  it('resolves name and enabled status as of the selected period end (no future leakage)', async () => {
-    const user = userEvent.setup();
-    // Enabled + old name through July; renamed AND disabled in an August row.
+  it('does not let a future rename/disable leak into a historical report', () => {
     const renamedLater = [
       ...fullSummer(7, '[2026] - NA - Old Name'),
-      snap({ export_date: '2026-08-06', sequence_id: 7, sequence_name: '[2026] - NA - New Name', enabled: false, outbound_calls: 999, created_at: '2026-08-06T08:00:00Z' }),
+      snap({ export_date: '2026-08-06', sequence_id: 7, sequence_name: '[2026] - NA - New Name', enabled: false, total_sent: 999, created_at: '2026-08-06T08:00:00Z' }),
     ];
     render(<Harness initialSnapshots={renamedLater} initialPeriod={july} />);
-    const rankings = screen.getByTestId('outreach-rankings');
-    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
-    // As of July's end the sequence was enabled and named Old Name: it ranks
-    // under the old name; the future August rename/disable does not leak back.
-    expect(within(rankings).getByText('[2026] - NA - Old Name')).toBeTruthy();
-    expect(within(rankings).queryByText('[2026] - NA - New Name')).toBeNull();
+    const row = within(table()).getByTestId('seq-row-7');
+    expect(row.textContent).toContain('Old Name');
+    expect(row.textContent).not.toContain('New Name');
+    // Enabled as of July end -> no "off" chip.
+    expect(within(row).queryByText('off')).toBeNull();
+  });
+
+  it('keeps historical activity for a sequence disabled later, marking it off as of period end', () => {
+    // Enabled through the historical period, disabled only in a later August row.
+    const disabledLater = [
+      ...fullSummer(8, '[2026] - NA - Later Off'),
+      snap({ export_date: '2026-08-06', sequence_id: 8, sequence_name: '[2026] - NA - Later Off', enabled: false, total_sent: 999, created_at: '2026-08-06T08:00:00Z' }),
+    ];
+    render(<Harness initialSnapshots={disabledLater} initialPeriod={july} />);
+    // Its July activity is still reported (enabled as of July end -> no off chip here).
+    expect(within(table()).getByTestId('seq-row-8').textContent).toContain('50');
+  });
+
+  it('Current Prospects is a snapshot column and is not totaled', () => {
+    const rows = fullSummer(1, '[2026] - NA - Seq A').map((s) => ({ ...s, prospects_active: 120 }));
+    render(<Harness initialSnapshots={rows} initialPeriod={july} />);
+    // The sequence row shows the point-in-time prospects value...
+    expect(within(table()).getByTestId('seq-row-1').textContent).toContain('120');
+    // ...but the Total row's Prospects cell is a dash with an explanation.
+    const totalCells = within(table()).getByTestId('seq-total-row').querySelectorAll('td');
+    const prospectsTotal = totalCells[1];
+    expect(prospectsTotal.textContent).toBe('—');
+    expect(prospectsTotal.getAttribute('title')).toContain('snapshot');
   });
 });
 
