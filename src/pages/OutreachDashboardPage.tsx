@@ -42,6 +42,12 @@ import {
   type OutreachCompleteness,
 } from '../lib/outreachReporting';
 import { toOutreachReportingRows } from '../lib/outreachSnapshotAdapter';
+import {
+  metricIssueReasons,
+  cadenceIssueReasons,
+  sequenceActivityReason,
+  incompleteDisclosure,
+} from '../lib/outreachQualityText';
 import { computeDelta, type DeltaResult } from '../lib/reportingDeltas';
 import ReportingFilterBar from '../components/reporting/ReportingFilterBar';
 import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
@@ -195,6 +201,35 @@ export default function OutreachDashboardPage({
   const cmpLabel = period ? comparisonLabel(period, dashboardComparison) : '';
   const showComparison = dashboardComparison !== 'off';
 
+  // Aggregate totals for the counters the Sequence Performance table's Total
+  // row shows. Computed once from the same filtered feed the KPI cards use, so
+  // the table reconciles with the cards by construction.
+  const tableTotals = useMemo(() => {
+    if (!period) return {};
+    const keys: TableCounter[] = [
+      'total_sent', 'delivered', 'bounced', 'opened', 'clicked',
+      'replied', 'opted_out', 'outbound_calls', 'linkedin_tasks_completed',
+    ];
+    const out: Partial<Record<TableCounter, MetricTotal>> = {};
+    for (const k of keys) out[k] = aggregateActivity(deduped, k, period);
+    return out;
+  }, [deduped, period]);
+
+  // A single concise, page-level data-quality disclosure built from the same
+  // engine results (metric issue counts + cadence). Shown regardless of the
+  // comparison mode, so Comparison Off never hides quality warnings.
+  const pageDisclosure = useMemo(() => {
+    const reasons = new Set<string>();
+    for (const t of Object.values(tableTotals)) {
+      if (!t) continue;
+      for (const r of metricIssueReasons(t, completeness)) reasons.add(r);
+    }
+    if (completeness.completeness !== 'complete') {
+      for (const r of cadenceIssueReasons(completeness)) reasons.add(r);
+    }
+    return reasons.size > 0 ? incompleteDisclosure([...reasons]) : '';
+  }, [tableTotals, completeness]);
+
   const regionChips: FilterChip<OutreachRegionKey>[] = OUTREACH_REGIONS.map((r) => ({
     value: r,
     label: r,
@@ -286,7 +321,15 @@ export default function OutreachDashboardPage({
             period={period}
             comparison={dashboardComparison}
             cadenceSuppress={cadenceSuppress}
+            completeness={completeness}
           />
+
+          {pageDisclosure && (
+            <p className="text-xs text-slate-muted" data-testid="outreach-quality-disclosure">
+              {pageDisclosure} A value like <span className="tabular-nums">0*</span> means zero
+              in the safely measured data; the complete value is unknown.
+            </p>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <RegionPerformanceCard
@@ -298,9 +341,16 @@ export default function OutreachDashboardPage({
               comparison={dashboardComparison}
               cadenceSuppress={cadenceSuppress}
               cmpLabel={cmpLabel}
+              completeness={completeness}
             />
-            <EngagementFunnelCard deduped={deduped} period={period} />
-            <SequenceRankingsCard deduped={deduped} period={period} />
+            <EngagementFunnelCard deduped={deduped} period={period} completeness={completeness} />
+            <SequencePerformanceTable
+              deduped={deduped}
+              period={period}
+              snapshots={snapshots}
+              completeness={completeness}
+              kpiTotals={tableTotals}
+            />
             <ActivityHeatmapCard deduped={deduped} period={period} feedRows={reportingRows} />
           </div>
         </>
@@ -349,11 +399,13 @@ function KpiCards({
   period,
   comparison,
   cadenceSuppress,
+  completeness,
 }: {
   deduped: DedupedSeries;
   period: ReportingPeriod;
   comparison: ComparisonMode;
   cadenceSuppress: boolean;
+  completeness: OutreachCompleteness;
 }) {
   const cards = useMemo(
     () =>
@@ -391,9 +443,13 @@ function KpiCards({
             <div className="mt-1 text-2xl font-semibold text-charcoal tabular-nums">
               {totalText(cur)}
             </div>
-            {incomplete && (
-              <div className="text-[10px] text-slate-muted" data-testid={`kpi-${key}-incomplete`}>
-                Incomplete data
+            {incomplete && cur.state === 'present' && (
+              <div
+                className="text-[10px] text-slate-muted"
+                data-testid={`kpi-${key}-incomplete`}
+                title={incompleteDisclosure(metricIssueReasons(cur, completeness))}
+              >
+                Incomplete*
               </div>
             )}
             {delta && (
@@ -419,6 +475,7 @@ function RegionPerformanceCard({
   comparison,
   cadenceSuppress,
   cmpLabel,
+  completeness,
 }: {
   fullDeduped: DedupedSeries;
   sequenceOptions: { id: number; name: string }[];
@@ -428,6 +485,7 @@ function RegionPerformanceCard({
   comparison: ComparisonMode;
   cadenceSuppress: boolean;
   cmpLabel: string;
+  completeness: OutreachCompleteness;
 }) {
   // One column per SELECTED region that has any sequences (never hardcoded to
   // NA/EMEA). The same sequence filter applies inside each region; region and
@@ -503,8 +561,11 @@ function RegionPerformanceCard({
                           data-incomplete={incomplete ? 'true' : undefined}
                         >
                           {totalText(cur)}
-                          {incomplete && (
-                            <span aria-label="incomplete data" title="Incomplete data: safe-known value">
+                          {incomplete && cur.state === 'present' && (
+                            <span
+                              aria-label="incomplete data"
+                              title={incompleteDisclosure(metricIssueReasons(cur, completeness))}
+                            >
                               *
                             </span>
                           )}
@@ -541,9 +602,11 @@ const FUNNEL_STAGES: { key: ActivityCounter; label: string; color: string }[] = 
 function EngagementFunnelCard({
   deduped,
   period,
+  completeness,
 }: {
   deduped: DedupedSeries;
   period: ReportingPeriod;
+  completeness: OutreachCompleteness;
 }) {
   const stages = useMemo(() => {
     const totals = FUNNEL_STAGES.map((stage) => ({
@@ -560,20 +623,28 @@ function EngagementFunnelCard({
         prev !== null ? rateFromTotals(stage.total, prev) : { state: 'missing' as const };
       const value = stage.total.state === 'present' ? stage.total.value : null;
       const incomplete = stage.total.state === 'present' && stage.total.incomplete;
+      const reason = incomplete && stage.total.state === 'present'
+        ? incompleteDisclosure(metricIssueReasons(stage.total, completeness))
+        : undefined;
       return {
         ...stage,
         value,
         incomplete,
+        reason,
         rateText:
           i === 0
             ? ''
             : rate.state === 'present'
               ? `${rate.percent.toFixed(1)}%${rate.incomplete ? '*' : ''}`
               : 'n/a',
+        rateTitle:
+          i > 0 && rate.state === 'missing'
+            ? 'Conversion rate unavailable: a stage total is missing or incomplete in this period.'
+            : undefined,
         widthPct: value !== null ? Math.max((value / maxVal) * 100, 8) : 8,
       };
     });
-  }, [deduped, period]);
+  }, [deduped, period, completeness]);
 
   // Measured data exists when ANY stage total is present, even at a measured
   // zero. "No data" is reserved for every stage being genuinely missing.
@@ -600,19 +671,21 @@ function EngagementFunnelCard({
                     minWidth: '60px',
                   }}
                 >
-                  <span className="text-white text-xs font-bold tabular-nums">
+                  <span className="text-white text-xs font-bold tabular-nums" title={stage.reason}>
                     {stage.value !== null ? stage.value.toLocaleString() : '—'}
                     {stage.incomplete ? '*' : ''}
                   </span>
                 </div>
               </div>
-              <div className="w-14 text-right text-xs text-slate-muted shrink-0">
+              <div className="w-14 text-right text-xs text-slate-muted shrink-0" title={stage.rateTitle}>
                 {stage.rateText}
               </div>
             </div>
           ))}
           {stages.some((s) => s.incomplete) && (
-            <p className="text-[10px] text-slate-muted">* incomplete data</p>
+            <p className="text-[10px] text-slate-muted" title={stages.find((s) => s.reason)?.reason}>
+              * incomplete data (hover a value for the reason)
+            </p>
           )}
         </div>
       )}
@@ -620,26 +693,7 @@ function EngagementFunnelCard({
   );
 }
 
-// ---------- Sequence Rankings ----------
-
-type RankMetric =
-  | { kind: 'rate'; key: 'open_rate' | 'reply_rate' | 'click_rate'; label: string; num: ActivityCounter; den: ActivityCounter }
-  | { kind: 'count'; key: 'outbound_calls' | 'linkedin_tasks'; label: string; counter: ActivityCounter };
-
-const RANK_METRICS: RankMetric[] = [
-  { kind: 'rate', key: 'open_rate', label: 'Open Rate', num: 'opened', den: 'delivered' },
-  { kind: 'rate', key: 'reply_rate', label: 'Reply Rate', num: 'replied', den: 'delivered' },
-  { kind: 'rate', key: 'click_rate', label: 'Click Rate', num: 'clicked', den: 'delivered' },
-  { kind: 'count', key: 'outbound_calls', label: 'Outbound Calls', counter: 'outbound_calls' },
-  { kind: 'count', key: 'linkedin_tasks', label: 'LinkedIn Tasks', counter: 'linkedin_tasks_completed' },
-];
-
-interface RankedSequence {
-  sequence_id: number;
-  name: string;
-  value: number; // rate as fraction or count
-  display: string;
-}
+// ---------- Sequence Performance ----------
 
 // The sequence's name and enabled status AS OF the selected period end: taken
 // from the latest snapshot on or before the period's end. Never reads a future
@@ -659,176 +713,279 @@ function statusAsOfPeriodEnd(
   return { name, enabled };
 }
 
-// A ranking-grade activity value: only a fully trustworthy 'present' result
-// qualifies. present-with-baselineIncomplete (unknown pre-debut activity) and
-// present-with-missingMeasurements (metric coverage gaps) are still incomplete
-// and are excluded as data-quality issues, alongside reset and
-// missing_baseline. A plain 'missing' (no rows) is simply inactive-for-period.
-type RankEligibility =
-  | { kind: 'ranked'; value: number }
-  | { kind: 'excluded' } // data-quality exclusion (counted visibly)
-  | { kind: 'inactive' }; // nothing to rank; not a quality issue
+// Table metric spec. All counts are safe period activity from the Bite 3A
+// engine; every rate is recomputed from the row's aggregate numerator and
+// denominator (never averaged).
+const TABLE_COUNTERS = [
+  'total_sent',
+  'delivered',
+  'bounced',
+  'opened',
+  'clicked',
+  'replied',
+  'opted_out',
+  'outbound_calls',
+  'linkedin_tasks_completed',
+] as const;
+type TableCounter = (typeof TABLE_COUNTERS)[number];
 
-function rankEligibility(a: SequenceActivity): RankEligibility {
-  switch (a.state) {
-    case 'present':
-      if (a.baselineIncomplete || a.missingMeasurements) return { kind: 'excluded' };
-      return { kind: 'ranked', value: a.value };
-    case 'missing':
-      return { kind: 'inactive' };
-    case 'reset':
-    case 'missing_baseline':
-    case 'ambiguous_duplicate':
-      return { kind: 'excluded' };
-  }
+interface SeqCell {
+  activity: SequenceActivity;
 }
 
-function SequenceRankingsCard({
-  deduped,
-  period,
-}: {
-  deduped: DedupedSeries;
-  period: ReportingPeriod;
-}) {
-  const [metricIdx, setMetricIdx] = useState(0);
-  const metric = RANK_METRICS[metricIdx];
+interface SeqRow {
+  sequence_id: number;
+  name: string;
+  enabled: boolean;
+  // Point-in-time audience snapshot: prospects_active from the latest raw
+  // snapshot on or before the period end. null when no such snapshot exists.
+  prospectsActive: number | null;
+  cells: Record<TableCounter, SeqCell>;
+  anyPresent: boolean;
+  anyIncomplete: boolean;
+}
 
-  const { ranked, excluded } = useMemo(() => {
-    const out: RankedSequence[] = [];
-    let excludedCount = 0;
-    for (const [id, series] of deduped.bySequence) {
-      const status = statusAsOfPeriodEnd(series, period);
-      // Disabled sequences are inactive, omitted without inflating the
-      // data-quality exclusion count.
-      if (!status.enabled) continue;
-      if (metric.kind === 'count') {
-        const e = rankEligibility(
-          sequencePeriodActivity(series, metric.counter, period, deduped.feedStart ?? undefined),
-        );
-        if (e.kind === 'excluded') {
-          excludedCount += 1;
-          continue;
-        }
-        if (e.kind === 'inactive') continue;
-        out.push({ sequence_id: id, name: status.name, value: e.value, display: e.value.toLocaleString() });
-      } else {
-        const num = rankEligibility(
-          sequencePeriodActivity(series, metric.num, period, deduped.feedStart ?? undefined),
-        );
-        const den = rankEligibility(
-          sequencePeriodActivity(series, metric.den, period, deduped.feedStart ?? undefined),
-        );
-        if (num.kind === 'excluded' || den.kind === 'excluded') {
-          excludedCount += 1;
-          continue;
-        }
-        if (num.kind === 'inactive' || den.kind === 'inactive') continue;
-        // Meaningful rates need real delivery volume in the period.
-        if (den.value <= 10) continue;
-        out.push({
-          sequence_id: id,
-          name: status.name,
-          value: num.value / den.value,
-          display: `${((num.value / den.value) * 100).toFixed(1)}%`,
-        });
-      }
-    }
-    out.sort((a, b) => b.value - a.value);
-    return { ranked: out, excluded: excludedCount };
-  }, [deduped, period, metric]);
+function cellValue(c: SeqCell): number | null {
+  return c.activity.state === 'present' ? c.activity.value : null;
+}
 
-  const top5 = ranked.slice(0, 5);
-  const bottom5 = ranked.length > 5 ? ranked.slice(-5).reverse() : [];
-  const maxVal = ranked.length > 0 ? ranked[0].value : 1;
+// Rate text from a row's aggregate numerator/denominator cells. Undefined when
+// either side is not a measured value or the denominator is zero. Marked with
+// * when either side is an incomplete measured value.
+function rowRate(num: SeqCell, den: SeqCell): string {
+  const nv = cellValue(num);
+  const dv = cellValue(den);
+  if (nv === null || dv === null || dv <= 0) return '—';
+  const incomplete =
+    (num.activity.state === 'present' && (num.activity.baselineIncomplete || num.activity.missingMeasurements)) ||
+    (den.activity.state === 'present' && (den.activity.baselineIncomplete || den.activity.missingMeasurements));
+  return `${((nv / dv) * 100).toFixed(1)}%${incomplete ? '*' : ''}`;
+}
 
+// One table count cell: measured values (including 0) render as numbers with a
+// * marker + reason tooltip when incomplete; non-present states render an em
+// dash with the exact engine reason.
+function CountCell({ cell, boundary }: { cell: SeqCell; boundary: string | null }) {
+  const a = cell.activity;
+  if (a.state !== 'present') {
+    return (
+      <td
+        className="border border-border px-2 py-1 text-right text-slate-muted"
+        title={sequenceActivityReason(a, boundary)}
+        data-state={a.state}
+      >
+        {'—'}
+      </td>
+    );
+  }
+  const incomplete = a.baselineIncomplete || a.missingMeasurements;
   return (
-    <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-rankings">
-      <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-semibold text-charcoal">Sequence Rankings</h3>
-        <select
-          value={metricIdx}
-          onChange={(e) => setMetricIdx(Number(e.target.value))}
-          aria-label="Ranking metric"
-          className="text-xs border border-border rounded px-2 py-1 bg-bg text-charcoal focus:outline-none focus:ring-2 focus:ring-indigo/30"
-        >
-          {RANK_METRICS.map((m, i) => (
-            <option key={m.key} value={i}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {ranked.length === 0 ? (
-        <p className="py-6 text-center text-slate-muted text-sm italic">
-          No sequences with enough data
-        </p>
-      ) : (
-        <div className="space-y-4">
-          <RankList title="Top Performers" tone="green" items={top5} maxVal={maxVal} startRank={1} />
-          {bottom5.length > 0 && (
-            <RankList
-              title="Needs Attention"
-              tone="red"
-              items={bottom5}
-              maxVal={maxVal}
-              startRank={ranked.length - bottom5.length + 1}
-            />
-          )}
-        </div>
-      )}
-      {excluded > 0 && (
-        <p className="mt-3 text-[10px] text-slate-muted" data-testid="outreach-rankings-excluded">
-          {excluded} sequence{excluded === 1 ? '' : 's'} excluded (incomplete data)
-        </p>
-      )}
-    </div>
+    <td
+      className="border border-border px-2 py-1 text-right tabular-nums text-charcoal"
+      title={incomplete ? sequenceActivityReason(a, boundary) : undefined}
+      data-state="present"
+      data-incomplete={incomplete ? 'true' : undefined}
+    >
+      {a.value.toLocaleString()}
+      {incomplete ? '*' : ''}
+    </td>
   );
 }
 
-function RankList({
-  title,
-  tone,
-  items,
-  maxVal,
-  startRank,
+function SequencePerformanceTable({
+  deduped,
+  period,
+  snapshots,
+  completeness,
+  kpiTotals,
 }: {
-  title: string;
-  tone: 'green' | 'red';
-  items: RankedSequence[];
-  maxVal: number;
-  startRank: number;
+  deduped: DedupedSeries;
+  period: ReportingPeriod;
+  // Raw snapshots for the point-in-time audience column only.
+  snapshots: OutreachSubPageProps['snapshots'];
+  completeness: OutreachCompleteness;
+  // The KPI totals for the same period/filters; the Total row reuses them so
+  // the table reconciles with the cards by construction.
+  kpiTotals: Partial<Record<TableCounter, MetricTotal>>;
 }) {
-  const toneCls =
-    tone === 'green'
-      ? { label: 'text-green-600', track: 'bg-green-100', bar: 'bg-green-400', value: 'text-green-700' }
-      : { label: 'text-red-500', track: 'bg-red-50', bar: 'bg-red-300', value: 'text-red-600' };
+  const bounds = periodBounds(period);
+  const boundary = completeness.requiredBaselineThursday;
+
+  const rows = useMemo(() => {
+    // Latest prospects_active per sequence on or before the period end
+    // (snapshot semantics; never summed as activity).
+    const audience = new Map<number, { date: string; value: number }>();
+    if (bounds) {
+      for (const s of snapshots) {
+        if (s.export_date > bounds.end) continue;
+        const prev = audience.get(s.sequence_id);
+        if (!prev || s.export_date > prev.date) {
+          audience.set(s.sequence_id, { date: s.export_date, value: s.prospects_active });
+        }
+      }
+    }
+    const out: SeqRow[] = [];
+    for (const [id, series] of deduped.bySequence) {
+      const status = statusAsOfPeriodEnd(series, period);
+      const cells = {} as Record<TableCounter, SeqCell>;
+      let anyPresent = false;
+      let anyIncomplete = false;
+      for (const key of TABLE_COUNTERS) {
+        const activity = sequencePeriodActivity(series, key, period, deduped.feedStart ?? undefined);
+        cells[key] = { activity };
+        if (activity.state === 'present') {
+          anyPresent = true;
+          if (activity.baselineIncomplete || activity.missingMeasurements) anyIncomplete = true;
+        } else if (activity.state !== 'missing') {
+          anyIncomplete = true; // reset / missing_baseline / ambiguous are quality issues
+        }
+      }
+      // Include every sequence contributing measured activity OR carrying a
+      // quality issue for the period; skip only fully inactive sequences.
+      if (!anyPresent && !anyIncomplete) continue;
+      out.push({
+        sequence_id: id,
+        name: status.name,
+        enabled: status.enabled,
+        prospectsActive: audience.get(id)?.value ?? null,
+        cells,
+        anyPresent,
+        anyIncomplete,
+      });
+    }
+    // Default sort: Delivered descending; non-measured delivered sorts last.
+    out.sort((a, b) => (cellValue(b.cells.delivered) ?? -1) - (cellValue(a.cells.delivered) ?? -1));
+    return out;
+  }, [deduped, period, snapshots, bounds]);
+
+  // Section disclosure summarizing the period's quality issues, from the same
+  // engine results that mark individual values (delivered as representative;
+  // metric-specific gaps like LinkedIn surface via linkedin's own total).
+  const disclosureReasons = useMemo(() => {
+    const seen = new Set<string>();
+    for (const key of TABLE_COUNTERS) {
+      const t = kpiTotals[key];
+      if (!t) continue;
+      for (const r of metricIssueReasons(t, completeness)) seen.add(r);
+    }
+    for (const r of cadenceIssueReasons(completeness)) {
+      if (completeness.completeness !== 'complete') seen.add(r);
+    }
+    return [...seen];
+  }, [kpiTotals, completeness]);
+
+  const totalCell = (key: TableCounter): string => {
+    const t = kpiTotals[key];
+    if (!t || t.state !== 'present') return '—';
+    return `${t.value.toLocaleString()}${t.incomplete ? '*' : ''}`;
+  };
+  const totalRate = (numKey: TableCounter, denKey: TableCounter): string => {
+    const n = kpiTotals[numKey];
+    const d = kpiTotals[denKey];
+    if (!n || !d || n.state !== 'present' || d.state !== 'present' || d.value <= 0) return '—';
+    const incomplete = n.incomplete || d.incomplete;
+    return `${((n.value / d.value) * 100).toFixed(1)}%${incomplete ? '*' : ''}`;
+  };
+  const totalTitle = (key: TableCounter): string | undefined => {
+    const t = kpiTotals[key];
+    if (!t || t.state !== 'present' || !t.incomplete) return undefined;
+    return incompleteDisclosure(metricIssueReasons(t, completeness));
+  };
+
+  const cell = 'border border-border px-2 py-1';
+  const head = `${cell} text-right font-medium`;
+
   return (
-    <div>
-      <p className={`text-[10px] ${toneCls.label} font-semibold uppercase tracking-wider mb-1.5`}>
-        {title}
-      </p>
-      <div className="space-y-1">
-        {items.map((s, i) => (
-          <div key={s.sequence_id} className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-muted w-4 shrink-0">{startRank + i}.</span>
-            <div className="flex-1 min-w-0">
-              <div className={`h-5 rounded-full ${toneCls.track} relative overflow-hidden`}>
-                <div
-                  className={`h-full rounded-full ${toneCls.bar}`}
-                  style={{ width: `${maxVal > 0 ? (s.value / maxVal) * 100 : 0}%` }}
-                />
-                <span className="absolute inset-0 flex items-center px-2 text-[10px] text-charcoal font-medium truncate">
-                  {s.name}
-                </span>
-              </div>
-            </div>
-            <span className={`text-xs font-semibold ${toneCls.value} shrink-0 w-16 text-right tabular-nums`}>
-              {s.display}
-            </span>
-          </div>
-        ))}
+    <div className="bg-white rounded-lg border border-border shadow-sm p-4 lg:col-span-2" data-testid="outreach-sequence-performance">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+        <h3 className="text-sm font-semibold text-charcoal">Sequence performance</h3>
+        <span className="text-[10px] text-slate-muted">
+          Selected period activity; sorted by Delivered. Prospects is a snapshot as of the latest run on or before the period end.
+        </span>
       </div>
+      {disclosureReasons.length > 0 && (
+        <p className="mb-2 text-[10px] text-slate-muted" data-testid="sequence-performance-disclosure">
+          {incompleteDisclosure(disclosureReasons)} A value like 0* is zero in the safely measured data; the complete value is unknown.
+        </p>
+      )}
+      {rows.length === 0 ? (
+        <p className="py-6 text-center text-slate-muted text-sm italic">
+          No sequence activity in the selected period
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs border-collapse border border-border">
+            <thead className="text-[10px] text-slate-muted bg-muted/40">
+              <tr>
+                <th className={`${cell} text-left font-medium`} rowSpan={2}>Sequence</th>
+                <th className={head} rowSpan={2} title="Active prospects, snapshot as of the latest run on or before the period end. Not period activity.">
+                  Prospects
+                </th>
+                <th className={`${cell} text-center font-medium`} colSpan={8}>Email performance</th>
+                <th className={`${cell} text-center font-medium`} colSpan={2}>Sales activity</th>
+              </tr>
+              <tr>
+                <th className={head}>Sent</th>
+                <th className={head}>Delivered</th>
+                <th className={head} title="Delivered / Sent">Delivery</th>
+                <th className={head} title="Opened / Delivered">Open</th>
+                <th className={head} title="Clicked / Delivered">Click</th>
+                <th className={head} title="Replied / Delivered">Reply</th>
+                <th className={head} title="Bounced / Sent">Bounce</th>
+                <th className={head} title="Opted out / Delivered">Opt-out</th>
+                <th className={head}>Calls</th>
+                <th className={head}>LinkedIn</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.sequence_id} data-testid={`seq-row-${r.sequence_id}`}>
+                  <td className={`${cell} text-charcoal max-w-[260px]`}>
+                    <span className="truncate inline-block max-w-[220px] align-bottom" title={r.name}>{r.name}</span>
+                    {!r.enabled && (
+                      <span className="ml-1 rounded-full border border-border bg-muted px-1.5 text-[9px] text-slate-muted" title="Sequence was disabled as of the period end. Its historical activity is still reported.">
+                        off
+                      </span>
+                    )}
+                  </td>
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`} title="Snapshot as of the latest run on or before the period end; not period activity.">
+                    {r.prospectsActive !== null ? r.prospectsActive.toLocaleString() : '—'}
+                  </td>
+                  <CountCell cell={r.cells.total_sent} boundary={boundary} />
+                  <CountCell cell={r.cells.delivered} boundary={boundary} />
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`}>{rowRate(r.cells.delivered, r.cells.total_sent)}</td>
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`}>{rowRate(r.cells.opened, r.cells.delivered)}</td>
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`}>{rowRate(r.cells.clicked, r.cells.delivered)}</td>
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`}>{rowRate(r.cells.replied, r.cells.delivered)}</td>
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`}>{rowRate(r.cells.bounced, r.cells.total_sent)}</td>
+                  <td className={`${cell} text-right tabular-nums text-slate-muted`}>{rowRate(r.cells.opted_out, r.cells.delivered)}</td>
+                  <CountCell cell={r.cells.outbound_calls} boundary={boundary} />
+                  <CountCell cell={r.cells.linkedin_tasks_completed} boundary={boundary} />
+                </tr>
+              ))}
+              <tr className="font-medium" data-testid="seq-total-row">
+                <td className={`${cell} text-charcoal`}>Total</td>
+                <td
+                  className={`${cell} text-right text-slate-muted`}
+                  title="Not totaled: prospects is a point-in-time snapshot per sequence and the same prospect can appear in several sequences, so a sum is not proven meaningful."
+                >
+                  {'—'}
+                </td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`} title={totalTitle('total_sent')}>{totalCell('total_sent')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`} title={totalTitle('delivered')}>{totalCell('delivered')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`}>{totalRate('delivered', 'total_sent')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`}>{totalRate('opened', 'delivered')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`}>{totalRate('clicked', 'delivered')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`}>{totalRate('replied', 'delivered')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`}>{totalRate('bounced', 'total_sent')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`}>{totalRate('opted_out', 'delivered')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`} title={totalTitle('outbound_calls')}>{totalCell('outbound_calls')}</td>
+                <td className={`${cell} text-right tabular-nums text-charcoal`} title={totalTitle('linkedin_tasks_completed')}>{totalCell('linkedin_tasks_completed')}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -1035,14 +1192,13 @@ function HeatCell({
     );
   }
   if (a.state !== 'present') {
-    // reset / missing_baseline / ambiguous: visually distinct from zero.
-    const label =
-      a.state === 'reset' ? 'reset/correction' : a.state === 'missing_baseline' ? 'no baseline' : 'ambiguous data';
+    // reset / missing_baseline / ambiguous: visually distinct from zero, with
+    // the exact engine reason so the marker is understandable on hover.
     return (
       <td className="px-1 py-1 text-center" data-state={a.state}>
         <div
           className="rounded px-1 py-0.5 text-[9px] font-medium border border-dashed border-border text-slate-muted"
-          title={`${seqName} — ${cell.label}: ${label}`}
+          title={`${seqName} — ${cell.label}: ${sequenceActivityReason(a)}`}
         >
           ·
         </div>
