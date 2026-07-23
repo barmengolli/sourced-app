@@ -65,6 +65,10 @@ export interface OutreachReportingRow {
   sequence_id: number;
   sequence_name: string;
   created_at: string | null;
+  // Point-in-time sequence status at this snapshot (optional; presentation
+  // concerns like ranking eligibility read it as-of a period end). Not an
+  // activity counter and never differenced.
+  enabled?: boolean;
   counters: Partial<Record<ActivityCounter, number | null>>;
 }
 
@@ -186,6 +190,29 @@ export function dedupeSnapshots(rows: readonly OutreachReportingRow[]): DedupedS
     if (feedStart === null || r.export_date < feedStart) feedStart = r.export_date;
   }
   return { bySequence, ambiguousKeys, feedStart };
+}
+
+// Subset a deduplicated feed to the given sequence ids while PRESERVING the
+// feed-wide feedStart. Filtering must never shift the feed's birth date: a
+// filter that removed the earliest sequences would otherwise fabricate a later
+// feedStart and grant false pre-feed boundary exemptions. Ambiguous keys are
+// kept only for retained sequences (an excluded sequence's ambiguity cannot
+// affect a result computed without it). An empty keep-set means "all
+// sequences" (the app's multi-select convention) and returns the input as-is.
+export function filterDedupedSeries(
+  deduped: DedupedSeries,
+  keepSequenceIds: ReadonlySet<number>,
+): DedupedSeries {
+  if (keepSequenceIds.size === 0) return deduped;
+  const bySequence = new Map<number, OutreachReportingRow[]>();
+  for (const [id, series] of deduped.bySequence) {
+    if (keepSequenceIds.has(id)) bySequence.set(id, series);
+  }
+  return {
+    bySequence,
+    ambiguousKeys: deduped.ambiguousKeys.filter((k) => keepSequenceIds.has(k.sequence_id)),
+    feedStart: deduped.feedStart, // feed-wide, never re-derived from the subset
+  };
 }
 
 // ---------------------------------------------------------------------------

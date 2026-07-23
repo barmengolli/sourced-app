@@ -144,9 +144,15 @@ alone is not proof of production state.
   schema drift.
 - Outreach uses its own legacy five-region taxonomy inferred from sequence
   names.
-- The full audited contract, reconciliation, and the future email-variant
-  design are in `docs/outreach-n8n-mapping.md`; read it when working on this
-  integration.
+- **The Outreach Dashboard is migrated (Bite 3B):** it uses Month, Quarter,
+  and Year with Derived activity, exact Thursday baselines, standardized
+  Previous period / Previous year / Off comparisons, and combined
+  metric-level + cadence-level delta suppression. Weekly rows are retained
+  only as source/diagnostic detail on the Data tab; the Dashboard has no
+  Week control. The Data and Compare tabs are not yet migrated.
+- The full audited contract, reconciliation, the Bite 3B implementation
+  status, and the future email-variant design are in
+  `docs/outreach-n8n-mapping.md`; read it when working on this integration.
 
 #### LinkedIn Ads
 
@@ -334,7 +340,7 @@ Current source semantics:
 | Funnel spend | Date range plus dated events | Recalculate ratios from period totals |
 | Events | Lead cohort with undated activation labels | Do not claim the activation happened in the selected period |
 | LinkedIn Ads | Weekly additive flow on `snapshot_date` (week-ending Sunday) | Whole week assigned by its week-ending Sunday; never prorated across months |
-| Outreach | Weekly cumulative snapshots on `export_date` | Requires baselines, reset handling, and completeness checks |
+| Outreach | Weekly cumulative snapshots on `export_date` (Derived activity, exact Thursday baselines) | Dashboard migrated to Month/Quarter/Year with reset, coverage, and completeness suppression; Data/Compare tabs pending |
 | 6sense | Monthly point-in-time snapshot | Quarter and year use the latest snapshot, never a sum |
 | BDR quota | HPP cohort against annual quota | Period quota interpretation needs business approval |
 | Funnel Data Entry | Quarterly stored values | Do not create monthly editable cells |

@@ -218,8 +218,53 @@ every sequence's lifetime-to-date counter as March activity:
 
 "Safe-known" counts only increases above an existing prior baseline. The truth
 lies at or above safe-known but far below current-style; the difference is
-pre-tracking lifetime volume, not March activity. Bite 3B will migrate the
-dashboard to the safe calculation with explicit incompleteness labeling.
+pre-tracking lifetime volume, not March activity.
+
+## Bite 3B implementation status (Outreach Dashboard migrated)
+
+The Outreach **Dashboard** now runs on this contract; the **Data** and
+**Compare** tabs are not yet migrated (Data keeps its weekly diagnostic view).
+
+Visible behavior:
+
+- Timeframe is the shared `Month | Quarter | Year` control with a
+  `Previous period | Previous year | Off` comparison (Year collapses to one
+  option). The legacy Week/Month toggle, quarter buttons, and W-number pills
+  are gone from the Dashboard; weekly rows remain in storage and on Data.
+- The page discloses `Derived activity: Weekly lifetime counters converted to
+  period activity using exact Thursday baselines.` and shows the global
+  `Data through <date>` from the latest valid `export_date`, a `Partial
+  period` marker, and a `No data for selected period` status. Missing stays
+  distinct from measured zero everywhere.
+- The default period is the Month containing the latest `export_date`,
+  derived from data (never the browser clock); explicit user selections are
+  lifted to App state and survive realtime inserts and tab navigation.
+- Every panel (KPI cards, Region Performance, Engagement Funnel, Sequence
+  Rankings, Activity Heatmap) computes through `src/lib/outreachReporting.ts`.
+  The old `toDeltaSnapshots` (debut-volume counting, negative-diff clamping,
+  nonmonotonic fields) is deleted. Deltas render only when the metric-level
+  `compareOutreachActivity(...).suppressDelta` AND both calendar periods'
+  `assessOutreachCompleteness(...).suppressDelta` all allow it. Rankings
+  exclude reset / no-baseline sequences with a visible excluded count;
+  heatmap cells distinguish measured zeros, missing, and reset/no-baseline
+  states; funnel conversion rates recompute from aggregate stage totals and
+  show `n/a` when a side is missing.
+- The migrated Dashboard reproduces the March 2026 safe-known totals above
+  exactly (503 / 491 / 177 / 285 / 70), with every March metric flagged
+  incomplete because tracking began mid-month (safe-known, not a claim of
+  full capture).
+
+Temporary source normalization: `src/lib/outreachSnapshotAdapter.ts` maps
+database rows into the calculation input and converts
+`linkedin_tasks_completed` to null (missing) on the two VERIFIED gap dates
+(2026-07-16 and 2026-07-23) that the ingest's `parseInt||0` stored as zeros.
+This is a stopgap until the n8n workflow preserves nulls end-to-end; arbitrary
+zeros and future dates are never blanket-nulled, and the date list lives beside
+this doc's coverage notes.
+
+Still pending for later bites: migrating Data/Compare, and the visible-copy
+correction on the Data tab ("populated by the n8n cron each Monday" should say
+Thursday).
 
 ## Future email-variant analytics (design only; not implemented)
 

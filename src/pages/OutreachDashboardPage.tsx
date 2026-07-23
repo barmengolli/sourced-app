@@ -1,410 +1,307 @@
-// OutreachDashboardPage — the Dashboard sub-tab of the Outreach section.
-// Mirrors DataVis 1's outreach dashboard panels (RegionCompare,
-// EngagementFunnel, TopPerformers / Sequence Rankings, ActivityHeatmap),
-// adapted to Sourced's IA: shared selectors live on App.tsx (year, quarter,
-// week, regions, selectedSequences) and a single useOutreachSnapshots()
-// query feeds every panel.
+// OutreachDashboardPage — the Outreach executive dashboard, migrated onto the
+// shared reporting standard (Bite 3B) and the Bite 3A calculation contract.
 //
-// Computation: filter the snapshot stream by year/region/sequence in-memory
-// per panel, then bucket by ISO week. Region is inferred client-side from
-// sequence_name via inferRegionFromSequenceName.
+// Timeframe is Month / Quarter / Year via the shared ReportingFilterBar with a
+// Previous period / Previous year / Off comparison. Week is no longer an
+// executive control (weekly rows stay in storage and on the Data tab). Every
+// panel computes through src/lib/outreachReporting.ts: exact Thursday
+// baselines, intermediate reset detection, metric-specific missing coverage,
+// scoped duplicate handling, and explicit partial/missing states. Nothing here
+// re-implements calculation logic; the page is presentation.
+//
+// Period membership uses export_date calendar boundaries only; the stored
+// week_number and stored year are never used for calendar math.
 
 import { useMemo, useState } from 'react';
+import type { OutreachSubPageProps } from '../App';
+import type {
+  ComparisonMode,
+  MetricDirection,
+  ReportingPeriod,
+  MonthIndex,
+} from '../types/reporting';
 import {
-  isoWeekStart,
-  weeksInQuarter,
-  type IsoWeek,
-} from '../lib/dates';
+  periodLabel,
+  comparisonLabel,
+  previousPeriod,
+  periodBounds,
+} from '../lib/reportingPeriods';
+import {
+  dedupeSnapshots,
+  filterDedupedSeries,
+  aggregateActivity,
+  sequencePeriodActivity,
+  rateFromTotals,
+  compareOutreachActivity,
+  assessOutreachCompleteness,
+  type ActivityCounter,
+  type DedupedSeries,
+  type MetricTotal,
+  type OutreachReportingRow,
+  type SequenceActivity,
+  type OutreachCompleteness,
+} from '../lib/outreachReporting';
+import { toOutreachReportingRows } from '../lib/outreachSnapshotAdapter';
+import { computeDelta, type DeltaResult } from '../lib/reportingDeltas';
+import ReportingFilterBar from '../components/reporting/ReportingFilterBar';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import FilterChipGroup, { type FilterChip } from '../components/reporting/FilterChipGroup';
+import DeltaDisplay from '../components/reporting/DeltaDisplay';
+import SequenceMultiSelect from '../components/outreach/SequenceMultiSelect';
 import {
   OUTREACH_REGIONS,
   OUTREACH_REGION_LABELS,
   type OutreachRegionKey,
 } from '../constants/outreachRegions';
 import { inferRegionFromSequenceName } from '../lib/outreach';
-import { monthOfExportDate } from '../hooks/useOutreachSnapshots';
-import type { OutreachSnapshot } from '../types/db';
-import type { OutreachSubPageProps } from '../App';
-import SequenceMultiSelect from '../components/outreach/SequenceMultiSelect';
 
-const QUARTER_VALUES = [1, 2, 3, 4] as const;
-
-function fmtDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function weekRangeLabel(w: IsoWeek): string {
-  const mon = isoWeekStart(w.year, w.week);
-  const sun = new Date(mon);
-  sun.setUTCDate(mon.getUTCDate() + 6);
-  return `${fmtDate(mon)} – ${fmtDate(sun)}`;
-}
-
-const MONTH_LABELS = [
+// Timezone-safe "Jul 23, 2026" from YYYY-MM-DD (no Date construction).
+const MONTHS_SHORT = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ] as const;
-
-// The count columns are CUMULATIVE lifetime counters per sequence (verified:
-// every field is monotonically non-decreasing across all sequences). To report
-// per-period VOLUME we diff each snapshot against the sequence's previous
-// snapshot. Summing these consecutive deltas within a period telescopes to
-// (period-end cumulative − prior-period-end cumulative), i.e. the true volume,
-// so every existing per-period sum (aggregate, funnel, heatmap) stays correct.
-const CUMULATIVE_FIELDS = [
-  'total_sent', 'delivered', 'bounced', 'failed', 'opened', 'clicked',
-  'replied', 'positive_replies', 'neutral_replies', 'negative_replies',
-  'opted_out', 'contacted_prospects', 'replied_prospects', 'prospects_added',
-  'outbound_calls', 'linkedin_tasks_completed', 'total_tasks',
-] as const;
-
-// Convert cumulative snapshots into per-period-delta rows. Identity, dates,
-// week_number, rates and non-cumulative fields are preserved so period.match
-// and downstream filters work unchanged; only the cumulative counts are
-// replaced with (this − previous-for-this-sequence). The first snapshot of a
-// sequence keeps its value (it's the sequence's debut volume).
-function toDeltaSnapshots(snaps: OutreachSnapshot[]): OutreachSnapshot[] {
-  const bySeq = new Map<number, OutreachSnapshot[]>();
-  for (const s of snaps) {
-    (bySeq.get(s.sequence_id) ?? bySeq.set(s.sequence_id, []).get(s.sequence_id)!).push(s);
-  }
-  const out: OutreachSnapshot[] = [];
-  for (const rows of bySeq.values()) {
-    const sorted = [...rows].sort((a, b) =>
-      a.export_date < b.export_date ? -1 : a.export_date > b.export_date ? 1 : 0,
-    );
-    for (let i = 0; i < sorted.length; i++) {
-      const cur = sorted[i];
-      const prev = i > 0 ? sorted[i - 1] : null;
-      const delta = { ...cur };
-      for (const f of CUMULATIVE_FIELDS) {
-        const d = prev ? cur[f] - prev[f] : cur[f];
-        // Guard against any non-monotonic blip (none in data, but safe).
-        delta[f] = d > 0 ? d : 0;
-      }
-      out.push(delta);
-    }
-  }
-  return out;
+function formatIsoDate(iso: string | null): string {
+  if (!iso) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return '';
+  const mo = parseInt(m[2], 10);
+  if (mo < 1 || mo > 12) return '';
+  return `${MONTHS_SHORT[mo - 1]} ${parseInt(m[3], 10)}, ${m[1]}`;
 }
 
-// A selectable time bucket. In week mode each period is one ISO week; in month
-// mode each is one calendar month. `match` decides if a snapshot belongs to it,
-// so every panel filters by period instead of hard-coding week_number.
-interface Period {
-  key: string; // 'W23' | '2026-03'
-  label: string; // 'W23' | 'Mar'
-  match: (s: OutreachSnapshot) => boolean;
+// The Month period containing the latest valid export_date (clock-free
+// data-driven default).
+function defaultMonthFromRows(rows: readonly OutreachReportingRow[]): ReportingPeriod | null {
+  let latest: string | null = null;
+  for (const r of rows) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(r.export_date)) continue;
+    if (latest === null || r.export_date > latest) latest = r.export_date;
+  }
+  if (latest === null) return null;
+  const [y, m] = latest.split('-').map((s) => parseInt(s, 10));
+  return { grain: 'month', year: y, month: m as MonthIndex };
+}
+
+// KPI cards, directions per the Bite 3B brief: Opened/Replied higher-is-better;
+// volume metrics neutral until a business target is approved.
+const KPI_METRICS: { key: ActivityCounter; label: string; direction: MetricDirection }[] = [
+  { key: 'total_sent', label: 'Emails Sent', direction: 'neutral' },
+  { key: 'delivered', label: 'Delivered', direction: 'neutral' },
+  { key: 'opened', label: 'Opened', direction: 'higher_is_better' },
+  { key: 'replied', label: 'Replied', direction: 'higher_is_better' },
+  { key: 'outbound_calls', label: 'Outbound Calls', direction: 'neutral' },
+  { key: 'linkedin_tasks_completed', label: 'LinkedIn Tasks', direction: 'neutral' },
+];
+
+// Aggregate value -> display string, missing stays a dash, incomplete flagged.
+function totalText(t: MetricTotal): string {
+  return t.state === 'present' ? t.value.toLocaleString() : '—';
 }
 
 export default function OutreachDashboardPage({
-  year,
-  quarter,
-  week,
-  granularity,
-  month,
+  dashboardPeriod,
+  dashboardComparison,
   regions,
   selectedSequences,
-  onYearChange,
-  onQuarterChange,
-  onWeekChange,
-  onGranularityChange,
-  onMonthChange,
+  onDashboardPeriodChange,
+  onDashboardComparisonChange,
   onRegionsChange,
   onSelectedSequencesChange,
   snapshots,
   loading,
 }: OutreachSubPageProps) {
-  const yearOptions = useMemo(() => {
-    const ys = new Set<number>([new Date().getFullYear()]);
-    for (const s of snapshots) ys.add(s.year);
-    return [...ys].sort((a, b) => a - b);
-  }, [snapshots]);
+  // Normalize + dedupe the COMPLETE feed once (missing-vs-zero restored by the
+  // adapter; duplicates resolved; feed-wide feedStart preserved).
+  const reportingRows = useMemo(() => toOutreachReportingRows(snapshots), [snapshots]);
+  const fullDeduped = useMemo(() => dedupeSnapshots(reportingRows), [reportingRows]);
 
-  const quarterWeeks = useMemo(
-    () => weeksInQuarter(year, quarter),
-    [year, quarter],
-  );
+  // Effective period: the user's lifted selection, else the Month containing
+  // the latest export_date. Derived during render (no effect), so realtime
+  // updates and tab navigation never reset an explicit choice. The default is
+  // memoized UNCONDITIONALLY to keep hook order fixed.
+  const defaultPeriod = useMemo(() => defaultMonthFromRows(reportingRows), [reportingRows]);
+  const period: ReportingPeriod | null = dashboardPeriod ?? defaultPeriod;
 
-  // Sequences for the multi-select (distinct ids in the data).
+  // Sequence options from the deduped feed, using the LATEST name per
+  // sequence_id so a rename shows its current label without splitting history.
   const sequenceOptions = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const s of snapshots) {
-      if (!m.has(s.sequence_id)) m.set(s.sequence_id, s.sequence_name);
+    const out: { id: number; name: string }[] = [];
+    for (const [id, series] of fullDeduped.bySequence) {
+      const name = series.length ? series[series.length - 1].sequence_name : String(id);
+      out.push({ id, name });
     }
-    return [...m.entries()]
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [snapshots]);
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }, [fullDeduped]);
 
-  // Convert cumulative counters to per-period-delta rows ONCE, across each
-  // sequence's full history (so the first row of the selected year still diffs
-  // against the prior year's last snapshot when present). All downstream
-  // aggregation sees real volume, not running totals.
-  const deltaSnapshots = useMemo(() => toDeltaSnapshots(snapshots), [snapshots]);
-
-  // Pre-filter the delta rows for the active year + region + sequences set.
-  // Empty selectedSequences = "All Sequences" (DataVis convention).
-  const scopedSnapshots = useMemo(() => {
+  // Resolve region + sequence filters into ONE keep-set of sequence_ids,
+  // applied identically to current and comparison periods. Region is inferred
+  // from the latest sequence name (rename keeps identity via sequence_id).
+  const keepSequenceIds = useMemo(() => {
     const allRegionsOn = regions.size === OUTREACH_REGIONS.length;
     const allSeqs =
       selectedSequences.size === 0 ||
       selectedSequences.size === sequenceOptions.length;
-    return deltaSnapshots.filter((s) => {
-      if (s.year !== year) return false;
-      if (!allRegionsOn) {
-        const r = inferRegionFromSequenceName(s.sequence_name);
-        if (!regions.has(r)) return false;
-      }
-      if (!allSeqs && !selectedSequences.has(s.sequence_id)) return false;
-      return true;
-    });
-  }, [deltaSnapshots, year, regions, selectedSequences, sequenceOptions]);
-
-  // The ordered period list for the active granularity. Week mode mirrors the
-  // quarter's weeks (oldest -> newest); month mode is the calendar months that
-  // have data in the selected year (by export_date), Jan -> Dec.
-  const periods: Period[] = useMemo(() => {
-    if (granularity === 'week') {
-      return quarterWeeks.map((w) => ({
-        key: `W${w.week}`,
-        label: `W${w.week}`,
-        match: (s: OutreachSnapshot) => s.week_number === w.week,
-      }));
+    if (allRegionsOn && allSeqs) return new Set<number>(); // empty = all
+    const keep = new Set<number>();
+    for (const { id, name } of sequenceOptions) {
+      if (!allRegionsOn && !regions.has(inferRegionFromSequenceName(name))) continue;
+      if (!allSeqs && !selectedSequences.has(id)) continue;
+      keep.add(id);
     }
-    const present = new Set<number>();
-    for (const s of snapshots) {
-      const m = monthOfExportDate(s.export_date);
-      if (m && m.year === year) present.add(m.month);
-    }
-    return [...present]
-      .sort((a, b) => a - b)
-      .map((mo) => ({
-        key: `${year}-${String(mo).padStart(2, '0')}`,
-        label: MONTH_LABELS[mo - 1],
-        match: (s: OutreachSnapshot) => {
-          const m = monthOfExportDate(s.export_date);
-          return m !== null && m.year === year && m.month === mo;
-        },
-      }));
-  }, [granularity, quarterWeeks, snapshots, year]);
+    // A non-empty filter that matches nothing must NOT fall back to "all":
+    // use an impossible id so calculations correctly return missing.
+    if (keep.size === 0) keep.add(-1);
+    return keep;
+  }, [regions, selectedSequences, sequenceOptions]);
 
-  // The selected period and the one immediately before it (for the delta).
-  const { currentPeriod, prevPeriod } = useMemo(() => {
-    const idx =
-      granularity === 'week'
-        ? periods.findIndex((p) => p.key === `W${week}`)
-        : periods.findIndex((p) => p.key.endsWith(`-${String(month).padStart(2, '0')}`));
-    const safeIdx = idx >= 0 ? idx : periods.length - 1;
-    return {
-      currentPeriod: periods[safeIdx] ?? null,
-      prevPeriod: safeIdx > 0 ? periods[safeIdx - 1] : null,
-    };
-  }, [periods, granularity, week, month]);
-
-  const currentRows = useMemo(
-    () => (currentPeriod ? scopedSnapshots.filter(currentPeriod.match) : []),
-    [scopedSnapshots, currentPeriod],
+  // Filtered feed for activity math; feed-wide feedStart is preserved so
+  // filtering cannot fabricate pre-feed boundary exemptions.
+  const deduped = useMemo(
+    () => filterDedupedSeries(fullDeduped, keepSequenceIds),
+    [fullDeduped, keepSequenceIds],
   );
 
-  const prevRows = useMemo(
-    () => (prevPeriod ? scopedSnapshots.filter(prevPeriod.match) : []),
-    [scopedSnapshots, prevPeriod],
+  // Cadence completeness uses the FULL feed's run dates: a Thursday run
+  // happened (or not) regardless of which sequences are selected.
+  const completeness: OutreachCompleteness = useMemo(
+    () =>
+      period
+        ? assessOutreachCompleteness(reportingRows, period)
+        : {
+            completeness: 'missing',
+            missingThursdays: [],
+            requiredBaselineThursday: null,
+            missingBaselineThursday: false,
+            finalExpectedThursday: null,
+            dataThrough: latestDate(reportingRows),
+            suppressDelta: true,
+          },
+    [reportingRows, period],
+  );
+  const cmpPeriodForCadence = period ? previousOrSame(period, dashboardComparison) : null;
+  const cmpCompleteness = useMemo(
+    () =>
+      cmpPeriodForCadence
+        ? assessOutreachCompleteness(reportingRows, cmpPeriodForCadence)
+        : null,
+    [reportingRows, cmpPeriodForCadence],
   );
 
-  const allRegionsOn = regions.size === OUTREACH_REGIONS.length;
-  const toggleRegion = (r: OutreachRegionKey) => {
-    const next = new Set(regions);
-    if (next.has(r)) next.delete(r);
-    else next.add(r);
-    onRegionsChange(next);
-  };
+  // Cadence-level suppression: current partial/missing, or (when comparing)
+  // comparison partial/missing. Combined with the metric-level flag per KPI.
+  const cadenceSuppress =
+    completeness.suppressDelta || (cmpCompleteness ? cmpCompleteness.suppressDelta : dashboardComparison !== 'off');
+
+  const cmpLabel = period ? comparisonLabel(period, dashboardComparison) : '';
+  const showComparison = dashboardComparison !== 'off';
+
+  const regionChips: FilterChip<OutreachRegionKey>[] = OUTREACH_REGIONS.map((r) => ({
+    value: r,
+    label: r,
+  }));
 
   return (
     <div className="p-8 space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-charcoal">
-            Outreach — Dashboard
-          </h1>
-          <p className="mt-1 text-sm text-slate-muted">
-            {granularity === 'week'
-              ? 'Aggregate metrics for the selected ISO week. Cards and charts recompute from outreach_snapshots; deltas compare to the prior week.'
-              : 'Aggregate metrics for the selected calendar month (its weeks summed). Cards and charts recompute from outreach_snapshots; deltas compare to the prior month.'}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-slate-muted">
-            Year
-            <select
-              value={year}
-              onChange={(e) => onYearChange(parseInt(e.target.value, 10))}
-              className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-            >
-              {yearOptions.map((y) => (
-                <option key={y} value={y}>
-                  {y}
-                </option>
-              ))}
-            </select>
-          </label>
-          {/* Week | Month granularity toggle. */}
-          <div className="flex items-center gap-1">
-            {(['week', 'month'] as const).map((g) => {
-              const active = g === granularity;
-              return (
-                <button
-                  key={g}
-                  type="button"
-                  onClick={() => onGranularityChange(g)}
-                  className={
-                    'text-xs px-2 py-1 rounded border transition-colors capitalize ' +
-                    (active
-                      ? 'bg-indigo text-white border-indigo'
-                      : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                  }
-                >
-                  {g}
-                </button>
-              );
-            })}
-          </div>
-          {/* Quarter buttons scope the week pills; irrelevant in month mode. */}
-          {granularity === 'week' && (
-            <div className="flex items-center gap-1">
-              {QUARTER_VALUES.map((q) => {
-                const active = q === quarter;
-                return (
-                  <button
-                    key={q}
-                    type="button"
-                    onClick={() => onQuarterChange(q)}
-                    className={
-                      'text-xs px-2 py-1 rounded border transition-colors ' +
-                      (active
-                        ? 'bg-indigo text-white border-indigo'
-                        : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                    }
-                  >
-                    Q{q}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </header>
-
-      <section className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-xs text-slate-muted mr-1">
-            {granularity === 'week' ? 'Week' : 'Month'}
-          </span>
-          {granularity === 'week'
-            ? quarterWeeks.map((w) => {
-                const active = currentPeriod?.key === `W${w.week}`;
-                return (
-                  <button
-                    key={`${w.year}-${w.week}`}
-                    type="button"
-                    title={weekRangeLabel(w)}
-                    onClick={() => onWeekChange(w.week)}
-                    className={
-                      'text-xs px-2 py-1 rounded border transition-colors ' +
-                      (active
-                        ? 'bg-indigo text-white border-indigo'
-                        : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                    }
-                  >
-                    W{w.week}
-                  </button>
-                );
-              })
-            : periods.map((p) => {
-                const mo = parseInt(p.key.slice(-2), 10);
-                const active = currentPeriod?.key === p.key;
-                return (
-                  <button
-                    key={p.key}
-                    type="button"
-                    onClick={() => onMonthChange(mo)}
-                    className={
-                      'text-xs px-2 py-1 rounded border transition-colors ' +
-                      (active
-                        ? 'bg-indigo text-white border-indigo'
-                        : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                    }
-                  >
-                    {p.label}
-                  </button>
-                );
-              })}
-          {prevPeriod && (
-            <span className="text-xs text-slate-muted ml-2">
-              vs {prevPeriod.label}
+      <header className="space-y-2">
+        <h1 className="text-2xl font-semibold text-charcoal">
+          Outreach Dashboard
+        </h1>
+        <ReportingBasisDisclosure
+          basis="derived_activity"
+          explanation="Weekly lifetime counters converted to period activity using exact Thursday baselines."
+        />
+        <p className="text-xs text-slate-muted" data-testid="outreach-data-through">
+          {completeness.dataThrough
+            ? `Data through ${formatIsoDate(completeness.dataThrough)}`
+            : 'No imported snapshots yet'}
+          {period && completeness.completeness === 'partial' && (
+            <span className="ml-2 rounded-md border border-border bg-muted px-2 py-0.5 font-medium text-charcoal">
+              Partial period
             </span>
           )}
-        </div>
-        <div className="flex items-center gap-2 ml-auto">
-          <SequenceMultiSelect
-            sequences={sequenceOptions}
-            selectedIds={selectedSequences}
-            onChange={onSelectedSequencesChange}
-          />
-          <span className="text-xs text-slate-muted mr-1">Region</span>
-          <button
-            type="button"
-            onClick={() =>
-              onRegionsChange(allRegionsOn ? new Set() : new Set(OUTREACH_REGIONS))
-            }
-            className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
-          >
-            {allRegionsOn ? 'Clear' : 'All'}
-          </button>
-          {OUTREACH_REGIONS.map((r) => {
-            const on = regions.has(r);
-            return (
-              <button
-                key={r}
-                type="button"
-                onClick={() => toggleRegion(r)}
-                title={OUTREACH_REGION_LABELS[r]}
-                className={
-                  'text-xs px-2 py-1 rounded-full border transition-colors ' +
-                  (on
-                    ? 'bg-indigo text-white border-indigo'
-                    : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                }
-              >
-                {r}
-              </button>
-            );
-          })}
-        </div>
-      </section>
+        </p>
+      </header>
 
-      {loading && currentRows.length === 0 ? (
+      {/* Control order: timeframe -> period -> year -> comparison -> sequence -> region */}
+      {period && (
+        <div className="flex flex-wrap items-end gap-3">
+          <ReportingFilterBar
+            period={period}
+            comparison={dashboardComparison}
+            years={yearsFrom(reportingRows, period.year)}
+            onPeriodChange={onDashboardPeriodChange}
+            onComparisonChange={onDashboardComparisonChange}
+          >
+            <div className="inline-flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-muted">Sequences</span>
+              <SequenceMultiSelect
+                sequences={sequenceOptions}
+                selectedIds={selectedSequences}
+                onChange={onSelectedSequencesChange}
+              />
+            </div>
+            <FilterChipGroup
+              label="Region"
+              chips={regionChips}
+              selected={[...regions]}
+              onToggle={(r) => {
+                const next = new Set(regions);
+                if (next.has(r)) next.delete(r);
+                else next.add(r);
+                onRegionsChange(next);
+              }}
+              onClear={() => onRegionsChange(new Set())}
+              onSelectAll={() => onRegionsChange(new Set(OUTREACH_REGIONS))}
+            />
+          </ReportingFilterBar>
+        </div>
+      )}
+
+      {loading && snapshots.length === 0 ? (
+        <p className="text-sm text-slate-muted italic">Loading…</p>
+      ) : snapshots.length === 0 ? (
+        <div className="border border-border rounded p-6 text-sm text-slate-muted">
+          No Outreach data yet. The n8n workflow populates outreach_snapshots
+          weekly.
+        </div>
+      ) : !period ? (
         <p className="text-sm text-slate-muted italic">Loading…</p>
       ) : (
         <>
-          <SummaryCards
-            current={currentRows}
-            previous={prevRows}
-            prevLabel={prevPeriod?.label ?? null}
+          <p className="text-xs text-slate-muted">
+            {periodLabel(period)}
+            {!cadenceSuppress && showComparison && cmpLabel ? ` · ${cmpLabel}` : ''}
+          </p>
+          {completeness.completeness === 'missing' && (
+            <div
+              className="border border-border rounded p-4 text-sm text-slate-muted"
+              data-testid="outreach-no-period-data"
+            >
+              No data for selected period.
+            </div>
+          )}
+
+          <KpiCards
+            deduped={deduped}
+            period={period}
+            comparison={dashboardComparison}
+            cadenceSuppress={cadenceSuppress}
           />
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <RegionPerformanceCard
-              currentRows={currentRows}
-              previousRows={prevRows}
-              curLabel={currentPeriod?.label ?? null}
-              prevLabel={prevPeriod?.label ?? null}
+              fullDeduped={fullDeduped}
+              sequenceOptions={sequenceOptions}
+              selectedSequences={selectedSequences}
+              regions={regions}
+              period={period}
+              comparison={dashboardComparison}
+              cadenceSuppress={cadenceSuppress}
+              cmpLabel={cmpLabel}
             />
-            <EngagementFunnelCard rows={currentRows} />
-            <SequenceRankingsCard rows={currentRows} />
-            <ActivityHeatmapCard
-              snapshots={scopedSnapshots}
-              periods={periods}
-              currentKey={currentPeriod?.key ?? null}
-            />
+            <EngagementFunnelCard deduped={deduped} period={period} />
+            <SequenceRankingsCard deduped={deduped} period={period} />
+            <ActivityHeatmapCard deduped={deduped} period={period} feedRows={reportingRows} />
           </div>
         </>
       )}
@@ -412,102 +309,98 @@ export default function OutreachDashboardPage({
   );
 }
 
-// ---------- Aggregations ----------
-
-interface RegionStats {
-  sent: number;
-  delivered: number;
-  opened: number;
-  replied: number;
-  calls: number;
-  linkedin: number;
-}
-
-function aggregate(snaps: OutreachSnapshot[]): RegionStats {
-  const init: RegionStats = {
-    sent: 0,
-    delivered: 0,
-    opened: 0,
-    replied: 0,
-    calls: 0,
-    linkedin: 0,
-  };
-  for (const s of snaps) {
-    init.sent += s.total_sent;
-    init.delivered += s.delivered;
-    init.opened += s.opened;
-    init.replied += s.replied;
-    init.calls += s.outbound_calls;
-    init.linkedin += s.linkedin_tasks_completed;
+function latestDate(rows: readonly OutreachReportingRow[]): string | null {
+  let latest: string | null = null;
+  for (const r of rows) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(r.export_date)) continue;
+    if (latest === null || r.export_date > latest) latest = r.export_date;
   }
-  return init;
+  return latest;
 }
 
-// ---------- Summary cards ----------
+function yearsFrom(rows: readonly OutreachReportingRow[], anchor: number): number[] {
+  const ys = new Set<number>([anchor]);
+  for (const r of rows) {
+    const m = /^(\d{4})-/.exec(r.export_date);
+    if (m) ys.add(parseInt(m[1], 10));
+  }
+  return [...ys].sort((a, b) => b - a);
+}
 
-function SummaryCards({
-  current,
-  previous,
-  prevLabel,
+// The calendar period the comparison mode points at (for cadence assessment).
+function previousOrSame(
+  period: ReportingPeriod,
+  mode: ComparisonMode,
+): ReportingPeriod | null {
+  if (mode === 'off') return null;
+  if (mode === 'previous_year') {
+    if (period.year <= 1) return null;
+    if (period.grain === 'month') return { grain: 'month', year: period.year - 1, month: period.month };
+    if (period.grain === 'quarter') return { grain: 'quarter', year: period.year - 1, quarter: period.quarter };
+    return { grain: 'year', year: period.year - 1 };
+  }
+  return previousPeriod(period);
+}
+
+// ---------- KPI cards ----------
+
+function KpiCards({
+  deduped,
+  period,
+  comparison,
+  cadenceSuppress,
 }: {
-  current: OutreachSnapshot[];
-  previous: OutreachSnapshot[];
-  prevLabel: string | null;
+  deduped: DedupedSeries;
+  period: ReportingPeriod;
+  comparison: ComparisonMode;
+  cadenceSuppress: boolean;
 }) {
-  const cur = aggregate(current);
-  const prev = aggregate(previous);
-  const cards: { label: string; key: keyof RegionStats }[] = [
-    { label: 'Emails Sent', key: 'sent' },
-    { label: 'Delivered', key: 'delivered' },
-    { label: 'Opened', key: 'opened' },
-    { label: 'Replied', key: 'replied' },
-    { label: 'Outbound Calls', key: 'calls' },
-    { label: 'LinkedIn Tasks', key: 'linkedin' },
-  ];
+  const cards = useMemo(
+    () =>
+      KPI_METRICS.map((m) => {
+        const c = compareOutreachActivity(deduped, m.key, period, comparison);
+        return { ...m, cmp: c };
+      }),
+    [deduped, period, comparison],
+  );
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-      {cards.map(({ label, key }) => {
-        const c = cur[key];
-        const p = prev[key];
-        const delta = c - p;
-        const pct = p === 0 ? null : Math.round((delta / p) * 1000) / 10;
-        let arrow: string;
-        let cls: string;
-        if (delta > 0) {
-          arrow = `▲${delta.toLocaleString()}`;
-          cls = 'text-green-600';
-        } else if (delta < 0) {
-          arrow = `▼${Math.abs(delta).toLocaleString()}`;
-          cls = 'text-red-500';
-        } else {
-          arrow = '–';
-          cls = 'text-slate-muted';
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3" data-testid="outreach-kpis">
+      {cards.map(({ key, label, direction, cmp }) => {
+        const cur = cmp.current;
+        // A delta shows only when EVERY layer allows it: the metric-level
+        // shared flag AND both calendar periods' cadence completeness.
+        const suppress = cmp.suppressDelta || cadenceSuppress;
+        const incomplete = cur.state === 'present' && cur.incomplete;
+        let delta: DeltaResult | null = null;
+        if (!suppress && cur.state === 'present' && cmp.comparison?.state === 'present') {
+          delta = computeDelta(
+            { state: 'present', value: cur.value },
+            { state: 'present', value: cmp.comparison.value },
+            direction,
+          );
         }
         return (
           <div
             key={key}
             className="bg-white border border-border rounded-lg p-3 shadow-sm"
-            title={
-              prevLabel
-                ? `${prevLabel}: ${p.toLocaleString()}, current: ${c.toLocaleString()}`
-                : `current: ${c.toLocaleString()}`
-            }
+            data-testid={`kpi-${key}`}
           >
             <div className="text-[10px] uppercase tracking-wider text-slate-muted">
               {label}
             </div>
             <div className="mt-1 text-2xl font-semibold text-charcoal tabular-nums">
-              {c.toLocaleString()}
+              {totalText(cur)}
             </div>
-            <div className={`text-xs mt-0.5 ${cls}`}>
-              {arrow}
-              {pct !== null && delta !== 0 && (
-                <span className="ml-1 text-slate-muted">
-                  ({pct > 0 ? '+' : ''}
-                  {pct}%)
-                </span>
-              )}
-            </div>
+            {incomplete && (
+              <div className="text-[10px] text-slate-muted" data-testid={`kpi-${key}-incomplete`}>
+                Incomplete data
+              </div>
+            )}
+            {delta && (
+              <div className="mt-0.5">
+                <DeltaDisplay result={delta} format={{ kind: 'number' }} />
+              </div>
+            )}
           </div>
         );
       })}
@@ -517,180 +410,210 @@ function SummaryCards({
 
 // ---------- Region Performance ----------
 
-function DeltaBadge({
-  current,
-  previous,
-}: {
-  current: number;
-  previous: number;
-}) {
-  if (current === 0 && previous === 0) {
-    return <span className="text-[9px] text-slate-300">–</span>;
-  }
-  const diff = current - previous;
-  if (diff === 0) return <span className="text-[9px] text-slate-300">–</span>;
-  const color = diff > 0 ? 'text-green-600' : 'text-red-500';
-  const arrow = diff > 0 ? '▲' : '▼';
-  return (
-    <span className={`text-[9px] ${color}`}>
-      {arrow}
-      {Math.abs(diff).toLocaleString()}
-    </span>
-  );
-}
-
-const REGION_METRICS: { key: keyof RegionStats; label: string }[] = [
-  { key: 'sent', label: 'Emails Sent' },
-  { key: 'delivered', label: 'Delivered' },
-  { key: 'opened', label: 'Opened' },
-  { key: 'replied', label: 'Replied' },
-  { key: 'calls', label: 'Outbound Calls' },
-  { key: 'linkedin', label: 'LinkedIn Tasks' },
-];
-
 function RegionPerformanceCard({
-  currentRows,
-  previousRows,
-  curLabel,
-  prevLabel,
+  fullDeduped,
+  sequenceOptions,
+  selectedSequences,
+  regions,
+  period,
+  comparison,
+  cadenceSuppress,
+  cmpLabel,
 }: {
-  currentRows: OutreachSnapshot[];
-  previousRows: OutreachSnapshot[];
-  curLabel: string | null;
-  prevLabel: string | null;
+  fullDeduped: DedupedSeries;
+  sequenceOptions: { id: number; name: string }[];
+  selectedSequences: Set<number>;
+  regions: Set<OutreachRegionKey>;
+  period: ReportingPeriod;
+  comparison: ComparisonMode;
+  cadenceSuppress: boolean;
+  cmpLabel: string;
 }) {
+  // One column per SELECTED region that has any sequences (never hardcoded to
+  // NA/EMEA). The same sequence filter applies inside each region; region and
+  // period filters are identical for current and comparison.
   const data = useMemo(() => {
-    const targetRegions: OutreachRegionKey[] = ['NA', 'EMEA'];
-    return targetRegions.map((region) => ({
-      region,
-      current: aggregate(
-        currentRows.filter(
-          (s) => inferRegionFromSequenceName(s.sequence_name) === region,
-        ),
-      ),
-      previous: aggregate(
-        previousRows.filter(
-          (s) => inferRegionFromSequenceName(s.sequence_name) === region,
-        ),
-      ),
-    }));
-  }, [currentRows, previousRows]);
+    const allSeqs =
+      selectedSequences.size === 0 ||
+      selectedSequences.size === sequenceOptions.length;
+    const activeRegions = OUTREACH_REGIONS.filter((r) => regions.has(r));
+    return activeRegions
+      .map((region) => {
+        const keep = new Set<number>();
+        for (const { id, name } of sequenceOptions) {
+          if (inferRegionFromSequenceName(name) !== region) continue;
+          if (!allSeqs && !selectedSequences.has(id)) continue;
+          keep.add(id);
+        }
+        if (keep.size === 0) return null; // no sequences in this region
+        const scoped = filterDedupedSeries(fullDeduped, keep);
+        const metrics = KPI_METRICS.map((m) => ({
+          ...m,
+          cmp: compareOutreachActivity(scoped, m.key, period, comparison),
+        }));
+        return { region, metrics };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+  }, [fullDeduped, sequenceOptions, selectedSequences, regions, period, comparison]);
 
   return (
-    <div className="bg-white rounded-lg border border-border shadow-sm p-4">
+    <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-region-performance">
       <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-semibold text-charcoal">
-          Region Performance
-        </h3>
-        {curLabel && prevLabel && (
-          <span className="text-[10px] text-slate-muted">
-            {curLabel} vs {prevLabel}
-          </span>
+        <h3 className="text-sm font-semibold text-charcoal">Region Performance</h3>
+        {!cadenceSuppress && cmpLabel && (
+          <span className="text-[10px] text-slate-muted">{cmpLabel}</span>
         )}
       </div>
-      <div className="grid grid-cols-2 gap-0">
-        {data.map(({ region, current, previous }, ri) => (
-          <div
-            key={region}
-            className={ri === 0 ? 'pr-4 border-r border-border' : 'pl-4'}
-          >
-            <h4 className="text-sm font-bold text-charcoal mb-3 text-center">
-              {region}
-            </h4>
-            <div className="divide-y divide-border">
-              {REGION_METRICS.map((m) => (
-                <div
-                  key={m.key}
-                  className="flex items-center justify-between py-2"
-                >
-                  <span className="text-xs text-slate-muted">{m.label}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-charcoal tabular-nums">
-                      {current[m.key].toLocaleString()}
-                    </span>
-                    <DeltaBadge
-                      current={current[m.key]}
-                      previous={previous[m.key]}
-                    />
-                  </div>
-                </div>
-              ))}
+      {data.length === 0 ? (
+        <p className="py-6 text-center text-slate-muted text-sm italic">
+          No sequences in the selected regions
+        </p>
+      ) : (
+        <div
+          className="grid gap-4"
+          style={{ gridTemplateColumns: `repeat(${Math.min(data.length, 3)}, minmax(0, 1fr))` }}
+        >
+          {data.map(({ region, metrics }) => (
+            <div key={region}>
+              <h4 className="text-sm font-bold text-charcoal mb-3 text-center" title={OUTREACH_REGION_LABELS[region]}>
+                {region}
+              </h4>
+              <div className="divide-y divide-border">
+                {metrics.map(({ key, label, direction, cmp }) => {
+                  const suppress = cmp.suppressDelta || cadenceSuppress;
+                  const cur = cmp.current;
+                  // Present-but-incomplete keeps the safe-known value with a
+                  // visible/accessible marker; its delta stays suppressed
+                  // (cmp.suppressDelta is already true for incomplete totals).
+                  const incomplete = cur.state === 'present' && cur.incomplete;
+                  const delta =
+                    !suppress && cur.state === 'present' && cmp.comparison?.state === 'present'
+                      ? computeDelta(
+                          { state: 'present', value: cur.value },
+                          { state: 'present', value: cmp.comparison.value },
+                          direction,
+                        )
+                      : null;
+                  return (
+                    <div key={key} className="flex items-center justify-between py-2 gap-2">
+                      <span className="text-xs text-slate-muted">{label}</span>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="text-sm font-semibold text-charcoal tabular-nums"
+                          data-incomplete={incomplete ? 'true' : undefined}
+                        >
+                          {totalText(cur)}
+                          {incomplete && (
+                            <span aria-label="incomplete data" title="Incomplete data: safe-known value">
+                              *
+                            </span>
+                          )}
+                        </span>
+                        {delta && <DeltaDisplay result={delta} format={{ kind: 'number' }} />}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
+      {data.some((d) => d.metrics.some((m) => m.cmp.current.state === 'present' && m.cmp.current.incomplete)) && (
+        <p className="mt-2 text-[10px] text-slate-muted" data-testid="region-incomplete-legend">
+          * incomplete data
+        </p>
+      )}
     </div>
   );
 }
 
 // ---------- Engagement Funnel ----------
 
-const FUNNEL_STAGES = [
+const FUNNEL_STAGES: { key: ActivityCounter; label: string; color: string }[] = [
   { key: 'total_sent', label: 'Sent', color: '#3b82f6' },
   { key: 'delivered', label: 'Delivered', color: '#6366f1' },
   { key: 'opened', label: 'Opened', color: '#8b5cf6' },
   { key: 'clicked', label: 'Clicked', color: '#a855f7' },
   { key: 'replied', label: 'Replied', color: '#c084fc' },
-] as const;
+];
 
-function EngagementFunnelCard({ rows }: { rows: OutreachSnapshot[] }) {
+function EngagementFunnelCard({
+  deduped,
+  period,
+}: {
+  deduped: DedupedSeries;
+  period: ReportingPeriod;
+}) {
   const stages = useMemo(() => {
-    const totals: Record<string, number> = {};
-    for (const stage of FUNNEL_STAGES) {
-      totals[stage.key] = rows.reduce(
-        (sum, s) => sum + ((s[stage.key] as number) || 0),
-        0,
-      );
-    }
-    const maxVal = Math.max(...Object.values(totals), 1);
-    return FUNNEL_STAGES.map((stage, i) => {
-      const value = totals[stage.key];
-      const prev = i > 0 ? totals[FUNNEL_STAGES[i - 1].key] : null;
-      const conversionRate = prev && prev > 0 ? value / prev : null;
-      const widthPct = Math.max((value / maxVal) * 100, 8);
-      return { ...stage, value, conversionRate, widthPct };
+    const totals = FUNNEL_STAGES.map((stage) => ({
+      ...stage,
+      total: aggregateActivity(deduped, stage.key, period),
+    }));
+    const values = totals.map((t) => (t.total.state === 'present' ? t.total.value : 0));
+    const maxVal = Math.max(...values, 1);
+    return totals.map((stage, i) => {
+      const prev = i > 0 ? totals[i - 1].total : null;
+      // Conversion rate only when BOTH stages are present and complete;
+      // otherwise the rate is unavailable rather than a trustworthy-looking %.
+      const rate =
+        prev !== null ? rateFromTotals(stage.total, prev) : { state: 'missing' as const };
+      const value = stage.total.state === 'present' ? stage.total.value : null;
+      const incomplete = stage.total.state === 'present' && stage.total.incomplete;
+      return {
+        ...stage,
+        value,
+        incomplete,
+        rateText:
+          i === 0
+            ? ''
+            : rate.state === 'present'
+              ? `${rate.percent.toFixed(1)}%${rate.incomplete ? '*' : ''}`
+              : 'n/a',
+        widthPct: value !== null ? Math.max((value / maxVal) * 100, 8) : 8,
+      };
     });
-  }, [rows]);
+  }, [deduped, period]);
 
-  const hasData = stages.some((s) => s.value > 0);
+  // Measured data exists when ANY stage total is present, even at a measured
+  // zero. "No data" is reserved for every stage being genuinely missing.
+  const hasData = stages.some((s) => s.value !== null);
 
   return (
-    <div className="bg-white rounded-lg border border-border shadow-sm p-4">
-      <h3 className="text-sm font-semibold text-charcoal mb-4">
-        Engagement Funnel
-      </h3>
+    <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-funnel">
+      <h3 className="text-sm font-semibold text-charcoal mb-4">Engagement Funnel</h3>
       {!hasData ? (
-        <p className="py-6 text-center text-slate-muted text-sm italic">
-          No data
-        </p>
+        <p className="py-6 text-center text-slate-muted text-sm italic">No data</p>
       ) : (
         <div className="space-y-2">
-          {stages.map((stage, i) => (
+          {stages.map((stage) => (
             <div key={stage.key} className="flex items-center gap-3">
               <div className="w-20 text-right text-xs font-medium text-slate-muted shrink-0">
                 {stage.label}
               </div>
               <div className="flex-1 relative">
                 <div
-                  className="h-9 rounded-md flex items-center justify-end px-3 transition-all duration-300"
+                  className="h-9 rounded-md flex items-center justify-end px-3"
                   style={{
                     width: `${Math.min(Math.max(stage.widthPct, 5), 100)}%`,
-                    backgroundColor: stage.color,
+                    backgroundColor: stage.value !== null ? stage.color : '#E2E8F0',
                     minWidth: '60px',
                   }}
                 >
                   <span className="text-white text-xs font-bold tabular-nums">
-                    {stage.value.toLocaleString()}
+                    {stage.value !== null ? stage.value.toLocaleString() : '—'}
+                    {stage.incomplete ? '*' : ''}
                   </span>
                 </div>
               </div>
               <div className="w-14 text-right text-xs text-slate-muted shrink-0">
-                {i > 0 && stage.conversionRate !== null
-                  ? `${(stage.conversionRate * 100).toFixed(1)}%`
-                  : ''}
+                {stage.rateText}
               </div>
             </div>
           ))}
+          {stages.some((s) => s.incomplete) && (
+            <p className="text-[10px] text-slate-muted">* incomplete data</p>
+          )}
         </div>
       )}
     </div>
@@ -699,111 +622,136 @@ function EngagementFunnelCard({ rows }: { rows: OutreachSnapshot[] }) {
 
 // ---------- Sequence Rankings ----------
 
-const RATE_METRICS = [
-  {
-    key: 'open_rate',
-    label: 'Open Rate',
-    compute: (s: OutreachSnapshot) =>
-      s.delivered > 0 ? s.opened / s.delivered : 0,
-    format: (v: number) => `${(v * 100).toFixed(1)}%`,
-  },
-  {
-    key: 'reply_rate',
-    label: 'Reply Rate',
-    compute: (s: OutreachSnapshot) =>
-      s.delivered > 0 ? s.replied / s.delivered : 0,
-    format: (v: number) => `${(v * 100).toFixed(1)}%`,
-  },
-  {
-    key: 'click_rate',
-    label: 'Click Rate',
-    compute: (s: OutreachSnapshot) =>
-      s.delivered > 0 ? s.clicked / s.delivered : 0,
-    format: (v: number) => `${(v * 100).toFixed(1)}%`,
-  },
-  {
-    key: 'outbound_calls',
-    label: 'Outbound Calls',
-    compute: (s: OutreachSnapshot) => s.outbound_calls,
-    format: (v: number) => v.toLocaleString(),
-  },
-  {
-    key: 'linkedin_tasks',
-    label: 'LinkedIn Tasks',
-    compute: (s: OutreachSnapshot) => s.linkedin_tasks_completed,
-    format: (v: number) => v.toLocaleString(),
-  },
-] as const;
+type RankMetric =
+  | { kind: 'rate'; key: 'open_rate' | 'reply_rate' | 'click_rate'; label: string; num: ActivityCounter; den: ActivityCounter }
+  | { kind: 'count'; key: 'outbound_calls' | 'linkedin_tasks'; label: string; counter: ActivityCounter };
 
-function SequenceRankingsCard({ rows }: { rows: OutreachSnapshot[] }) {
+const RANK_METRICS: RankMetric[] = [
+  { kind: 'rate', key: 'open_rate', label: 'Open Rate', num: 'opened', den: 'delivered' },
+  { kind: 'rate', key: 'reply_rate', label: 'Reply Rate', num: 'replied', den: 'delivered' },
+  { kind: 'rate', key: 'click_rate', label: 'Click Rate', num: 'clicked', den: 'delivered' },
+  { kind: 'count', key: 'outbound_calls', label: 'Outbound Calls', counter: 'outbound_calls' },
+  { kind: 'count', key: 'linkedin_tasks', label: 'LinkedIn Tasks', counter: 'linkedin_tasks_completed' },
+];
+
+interface RankedSequence {
+  sequence_id: number;
+  name: string;
+  value: number; // rate as fraction or count
+  display: string;
+}
+
+// The sequence's name and enabled status AS OF the selected period end: taken
+// from the latest snapshot on or before the period's end. Never reads a future
+// snapshot; a rename never splits history (identity stays sequence_id).
+function statusAsOfPeriodEnd(
+  series: readonly OutreachReportingRow[],
+  period: ReportingPeriod,
+): { name: string; enabled: boolean } {
+  const bounds = periodBounds(period);
+  let name = series.length ? series[0].sequence_name : '';
+  let enabled = false;
+  for (const row of series) {
+    if (bounds && row.export_date > bounds.end) break; // no future leakage
+    name = row.sequence_name;
+    enabled = row.enabled ?? false;
+  }
+  return { name, enabled };
+}
+
+// A ranking-grade activity value: only a fully trustworthy 'present' result
+// qualifies. present-with-baselineIncomplete (unknown pre-debut activity) and
+// present-with-missingMeasurements (metric coverage gaps) are still incomplete
+// and are excluded as data-quality issues, alongside reset and
+// missing_baseline. A plain 'missing' (no rows) is simply inactive-for-period.
+type RankEligibility =
+  | { kind: 'ranked'; value: number }
+  | { kind: 'excluded' } // data-quality exclusion (counted visibly)
+  | { kind: 'inactive' }; // nothing to rank; not a quality issue
+
+function rankEligibility(a: SequenceActivity): RankEligibility {
+  switch (a.state) {
+    case 'present':
+      if (a.baselineIncomplete || a.missingMeasurements) return { kind: 'excluded' };
+      return { kind: 'ranked', value: a.value };
+    case 'missing':
+      return { kind: 'inactive' };
+    case 'reset':
+    case 'missing_baseline':
+    case 'ambiguous_duplicate':
+      return { kind: 'excluded' };
+  }
+}
+
+function SequenceRankingsCard({
+  deduped,
+  period,
+}: {
+  deduped: DedupedSeries;
+  period: ReportingPeriod;
+}) {
   const [metricIdx, setMetricIdx] = useState(0);
-  const metric = RATE_METRICS[metricIdx];
+  const metric = RANK_METRICS[metricIdx];
 
-  const ranked = useMemo(() => {
-    // Group rows by sequence and sum the additive counts, so a month (many
-    // weekly rows per sequence) ranks on its monthly totals, not per-week. In
-    // week mode each sequence has one row, so this is a pass-through. Rates are
-    // recomputed from the summed counts (never averaged) via metric.compute.
-    const bySeq = new Map<
-      number,
-      {
-        sequence_id: number;
-        sequence_name: string;
-        enabled: boolean;
-        delivered: number;
-        opened: number;
-        clicked: number;
-        replied: number;
-        outbound_calls: number;
-        linkedin_tasks_completed: number;
+  const { ranked, excluded } = useMemo(() => {
+    const out: RankedSequence[] = [];
+    let excludedCount = 0;
+    for (const [id, series] of deduped.bySequence) {
+      const status = statusAsOfPeriodEnd(series, period);
+      // Disabled sequences are inactive, omitted without inflating the
+      // data-quality exclusion count.
+      if (!status.enabled) continue;
+      if (metric.kind === 'count') {
+        const e = rankEligibility(
+          sequencePeriodActivity(series, metric.counter, period, deduped.feedStart ?? undefined),
+        );
+        if (e.kind === 'excluded') {
+          excludedCount += 1;
+          continue;
+        }
+        if (e.kind === 'inactive') continue;
+        out.push({ sequence_id: id, name: status.name, value: e.value, display: e.value.toLocaleString() });
+      } else {
+        const num = rankEligibility(
+          sequencePeriodActivity(series, metric.num, period, deduped.feedStart ?? undefined),
+        );
+        const den = rankEligibility(
+          sequencePeriodActivity(series, metric.den, period, deduped.feedStart ?? undefined),
+        );
+        if (num.kind === 'excluded' || den.kind === 'excluded') {
+          excludedCount += 1;
+          continue;
+        }
+        if (num.kind === 'inactive' || den.kind === 'inactive') continue;
+        // Meaningful rates need real delivery volume in the period.
+        if (den.value <= 10) continue;
+        out.push({
+          sequence_id: id,
+          name: status.name,
+          value: num.value / den.value,
+          display: `${((num.value / den.value) * 100).toFixed(1)}%`,
+        });
       }
-    >();
-    for (const s of rows) {
-      const agg = bySeq.get(s.sequence_id) ?? {
-        sequence_id: s.sequence_id,
-        sequence_name: s.sequence_name,
-        enabled: false,
-        delivered: 0,
-        opened: 0,
-        clicked: 0,
-        replied: 0,
-        outbound_calls: 0,
-        linkedin_tasks_completed: 0,
-      };
-      agg.enabled = agg.enabled || s.enabled;
-      agg.delivered += s.delivered;
-      agg.opened += s.opened;
-      agg.clicked += s.clicked;
-      agg.replied += s.replied;
-      agg.outbound_calls += s.outbound_calls;
-      agg.linkedin_tasks_completed += s.linkedin_tasks_completed;
-      bySeq.set(s.sequence_id, agg);
     }
-    return [...bySeq.values()]
-      .filter((s) => s.enabled && s.delivered > 10)
-      .map((s) => ({
-        ...s,
-        rate: metric.compute(s as unknown as OutreachSnapshot),
-      }))
-      .sort((a, b) => b.rate - a.rate);
-  }, [rows, metric]);
+    out.sort((a, b) => b.value - a.value);
+    return { ranked: out, excluded: excludedCount };
+  }, [deduped, period, metric]);
 
   const top5 = ranked.slice(0, 5);
   const bottom5 = ranked.length > 5 ? ranked.slice(-5).reverse() : [];
-  const maxRate = ranked.length > 0 ? ranked[0].rate : 1;
+  const maxVal = ranked.length > 0 ? ranked[0].value : 1;
 
   return (
-    <div className="bg-white rounded-lg border border-border shadow-sm p-4">
+    <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-rankings">
       <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-semibold text-charcoal">
-          Sequence Rankings
-        </h3>
+        <h3 className="text-sm font-semibold text-charcoal">Sequence Rankings</h3>
         <select
           value={metricIdx}
           onChange={(e) => setMetricIdx(Number(e.target.value))}
+          aria-label="Ranking metric"
           className="text-xs border border-border rounded px-2 py-1 bg-bg text-charcoal focus:outline-none focus:ring-2 focus:ring-indigo/30"
         >
-          {RATE_METRICS.map((m, i) => (
+          {RANK_METRICS.map((m, i) => (
             <option key={m.key} value={i}>
               {m.label}
             </option>
@@ -817,85 +765,82 @@ function SequenceRankingsCard({ rows }: { rows: OutreachSnapshot[] }) {
         </p>
       ) : (
         <div className="space-y-4">
-          <div>
-            <p className="text-[10px] text-green-600 font-semibold uppercase tracking-wider mb-1.5">
-              Top Performers
-            </p>
-            <div className="space-y-1">
-              {top5.map((s, i) => (
-                <div key={s.sequence_id} className="flex items-center gap-2">
-                  <span className="text-[10px] text-slate-muted w-4 shrink-0">
-                    {i + 1}.
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="h-5 rounded-full bg-green-100 relative overflow-hidden">
-                      <div
-                        className="h-full rounded-full bg-green-400"
-                        style={{
-                          width: `${maxRate > 0 ? (s.rate / maxRate) * 100 : 0}%`,
-                        }}
-                      />
-                      <span className="absolute inset-0 flex items-center px-2 text-[10px] text-charcoal font-medium truncate">
-                        {s.sequence_name}
-                      </span>
-                    </div>
-                  </div>
-                  <span className="text-xs font-semibold text-green-700 shrink-0 w-16 text-right tabular-nums">
-                    {metric.format(s.rate)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
+          <RankList title="Top Performers" tone="green" items={top5} maxVal={maxVal} startRank={1} />
           {bottom5.length > 0 && (
-            <div>
-              <p className="text-[10px] text-red-500 font-semibold uppercase tracking-wider mb-1.5">
-                Needs Attention
-              </p>
-              <div className="space-y-1">
-                {bottom5.map((s, i) => (
-                  <div key={s.sequence_id} className="flex items-center gap-2">
-                    <span className="text-[10px] text-slate-muted w-4 shrink-0">
-                      {ranked.length - bottom5.length + i + 1}.
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="h-5 rounded-full bg-red-50 relative overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-red-300"
-                          style={{
-                            width: `${maxRate > 0 ? (s.rate / maxRate) * 100 : 0}%`,
-                          }}
-                        />
-                        <span className="absolute inset-0 flex items-center px-2 text-[10px] text-charcoal font-medium truncate">
-                          {s.sequence_name}
-                        </span>
-                      </div>
-                    </div>
-                    <span className="text-xs font-semibold text-red-600 shrink-0 w-16 text-right tabular-nums">
-                      {metric.format(s.rate)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <RankList
+              title="Needs Attention"
+              tone="red"
+              items={bottom5}
+              maxVal={maxVal}
+              startRank={ranked.length - bottom5.length + 1}
+            />
           )}
         </div>
       )}
+      {excluded > 0 && (
+        <p className="mt-3 text-[10px] text-slate-muted" data-testid="outreach-rankings-excluded">
+          {excluded} sequence{excluded === 1 ? '' : 's'} excluded (incomplete data)
+        </p>
+      )}
+    </div>
+  );
+}
+
+function RankList({
+  title,
+  tone,
+  items,
+  maxVal,
+  startRank,
+}: {
+  title: string;
+  tone: 'green' | 'red';
+  items: RankedSequence[];
+  maxVal: number;
+  startRank: number;
+}) {
+  const toneCls =
+    tone === 'green'
+      ? { label: 'text-green-600', track: 'bg-green-100', bar: 'bg-green-400', value: 'text-green-700' }
+      : { label: 'text-red-500', track: 'bg-red-50', bar: 'bg-red-300', value: 'text-red-600' };
+  return (
+    <div>
+      <p className={`text-[10px] ${toneCls.label} font-semibold uppercase tracking-wider mb-1.5`}>
+        {title}
+      </p>
+      <div className="space-y-1">
+        {items.map((s, i) => (
+          <div key={s.sequence_id} className="flex items-center gap-2">
+            <span className="text-[10px] text-slate-muted w-4 shrink-0">{startRank + i}.</span>
+            <div className="flex-1 min-w-0">
+              <div className={`h-5 rounded-full ${toneCls.track} relative overflow-hidden`}>
+                <div
+                  className={`h-full rounded-full ${toneCls.bar}`}
+                  style={{ width: `${maxVal > 0 ? (s.value / maxVal) * 100 : 0}%` }}
+                />
+                <span className="absolute inset-0 flex items-center px-2 text-[10px] text-charcoal font-medium truncate">
+                  {s.name}
+                </span>
+              </div>
+            </div>
+            <span className={`text-xs font-semibold ${toneCls.value} shrink-0 w-16 text-right tabular-nums`}>
+              {s.display}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 // ---------- Activity Heatmap ----------
 
-const HEATMAP_METRICS = [
+const HEATMAP_METRICS: { key: ActivityCounter; label: string }[] = [
   { key: 'total_sent', label: 'Emails Sent' },
   { key: 'replied', label: 'Replied' },
   { key: 'outbound_calls', label: 'Outbound Calls' },
   { key: 'linkedin_tasks_completed', label: 'LinkedIn Tasks' },
-] as const;
-
-type HeatmapMetricKey = (typeof HEATMAP_METRICS)[number]['key'];
+];
 
 function heatColor(t: number): string {
   if (t <= 0) return '#FFFFFF';
@@ -910,69 +855,83 @@ function heatColor(t: number): string {
   return `rgb(${fr}, ${fg}, ${fb})`;
 }
 
+// The rolling window: five periods of the selected grain ending at `period`.
+// Periods that would underflow year 1 are dropped from the left edge.
+function rollingPeriods(period: ReportingPeriod, count: number): ReportingPeriod[] {
+  const out: ReportingPeriod[] = [period];
+  let cur: ReportingPeriod | null = period;
+  for (let i = 1; i < count; i++) {
+    cur = previousPeriod(cur);
+    if (!cur) break;
+    out.unshift(cur);
+  }
+  return out;
+}
+
 function ActivityHeatmapCard({
-  snapshots,
-  periods,
-  currentKey,
+  deduped,
+  period,
+  feedRows,
 }: {
-  snapshots: OutreachSnapshot[];
-  periods: Period[];
-  currentKey: string | null;
+  deduped: DedupedSeries;
+  period: ReportingPeriod;
+  // The FULL normalized feed, for cadence assessment: a globally missed
+  // Thursday makes a column partial regardless of which sequences are shown.
+  feedRows: readonly OutreachReportingRow[];
 }) {
-  const [metric, setMetric] = useState<HeatmapMetricKey>('total_sent');
+  const [metric, setMetric] = useState<ActivityCounter>('total_sent');
+  const windowPeriods = useMemo(() => rollingPeriods(period, 5), [period]);
 
-  // Rolling window: the 5 periods ending at the selected one. In week mode
-  // these are weeks; in month mode, calendar months. Earlier periods fall off
-  // the left edge.
-  const windowPeriods = useMemo(() => {
-    if (periods.length === 0) return [];
-    const idx = periods.findIndex((p) => p.key === currentKey);
-    const end = idx >= 0 ? idx : periods.length - 1;
-    const start = Math.max(0, end - 4);
-    return periods.slice(start, end + 1);
-  }, [periods, currentKey]);
+  // Per-column Thursday-cadence completeness on the full feed.
+  const columnCadence = useMemo(
+    () =>
+      windowPeriods.map((p) => ({
+        period: p,
+        label: periodLabel(p),
+        completeness: assessOutreachCompleteness(feedRows, p).completeness,
+      })),
+    [windowPeriods, feedRows],
+  );
 
-  const { sequences, maxVal } = useMemo(() => {
-    const seqMap = new Map<
-      number,
-      { id: number; name: string; data: Map<string, number> }
-    >();
-    for (const s of snapshots) {
-      // Which window period (if any) does this snapshot fall in?
-      const period = windowPeriods.find((p) => p.match(s));
-      if (!period) continue;
-      if (!seqMap.has(s.sequence_id)) {
-        seqMap.set(s.sequence_id, {
-          id: s.sequence_id,
-          name: s.sequence_name,
-          data: new Map(),
-        });
-      }
-      // Sum across the period's snapshots: in month mode this rolls up the
-      // month's weeks; in week mode each period has one row, so it's a no-op.
-      const val = (s[metric] as number) || 0;
-      const data = seqMap.get(s.sequence_id)!.data;
-      data.set(period.key, (data.get(period.key) || 0) + val);
+  const { rows, maxVal } = useMemo(() => {
+    const out: {
+      id: number;
+      name: string;
+      cells: { key: string; label: string; activity: SequenceActivity }[];
+    }[] = [];
+    for (const [id, series] of deduped.bySequence) {
+      const name = statusAsOfPeriodEnd(series, period).name;
+      const cells = windowPeriods.map((p) => ({
+        key: periodLabel(p),
+        label: periodLabel(p),
+        activity: sequencePeriodActivity(series, metric, p, deduped.feedStart ?? undefined),
+      }));
+      // Skip sequences with nothing at all in the window.
+      if (cells.every((c) => c.activity.state === 'missing')) continue;
+      out.push({ id, name, cells });
     }
-    const seqs = [...seqMap.values()].sort((a, b) =>
-      a.name.localeCompare(b.name),
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    // Max over all measured cell values, derived after collection (no closure
+    // mutation during map).
+    const max = out.reduce(
+      (m, seq) =>
+        seq.cells.reduce(
+          (mm, c) => (c.activity.state === 'present' && c.activity.value > mm ? c.activity.value : mm),
+          m,
+        ),
+      0,
     );
-    let max = 0;
-    for (const seq of seqs) {
-      for (const v of seq.data.values()) if (v > max) max = v;
-    }
-    return { sequences: seqs, maxVal: max || 1 };
-  }, [snapshots, windowPeriods, metric]);
+    return { rows: out, maxVal: max || 1 };
+  }, [deduped, windowPeriods, metric, period]);
 
   return (
-    <div className="bg-white rounded-lg border border-border shadow-sm p-4">
+    <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-heatmap">
       <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-semibold text-charcoal">
-          Activity Heatmap
-        </h3>
+        <h3 className="text-sm font-semibold text-charcoal">Activity Heatmap</h3>
         <select
           value={metric}
-          onChange={(e) => setMetric(e.target.value as HeatmapMetricKey)}
+          onChange={(e) => setMetric(e.target.value as ActivityCounter)}
+          aria-label="Heatmap metric"
           className="text-xs border border-border rounded px-2 py-1 bg-bg text-charcoal focus:outline-none focus:ring-2 focus:ring-indigo/30"
         >
           {HEATMAP_METRICS.map((m) => (
@@ -983,7 +942,7 @@ function ActivityHeatmapCard({
         </select>
       </div>
 
-      {sequences.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="py-6 text-center text-slate-muted text-sm italic">
           No sequence activity in this window
         </p>
@@ -996,62 +955,121 @@ function ActivityHeatmapCard({
                   <th className="text-left px-2 py-1 text-slate-muted font-medium min-w-[180px]">
                     Sequence
                   </th>
-                  {windowPeriods.map((p) => (
+                  {columnCadence.map((col) => (
                     <th
-                      key={p.key}
-                      className="text-center px-1 py-1 text-slate-muted font-medium w-12"
+                      key={col.label}
+                      className="text-center px-1 py-1 text-slate-muted font-medium w-14"
+                      title={
+                        col.completeness === 'complete'
+                          ? `${col.label}: complete Thursday coverage`
+                          : col.completeness === 'partial'
+                            ? `${col.label}: partial period (a scheduled Thursday run is missing); values are safe-known, not complete totals`
+                            : `${col.label}: no snapshots in this period`
+                      }
+                      data-cadence={col.completeness}
                     >
-                      {p.label}
+                      {col.label}
+                      {col.completeness !== 'complete' ? '†' : ''}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {sequences.map((seq) => (
+                {rows.map((seq) => (
                   <tr key={seq.id}>
-                    <td
-                      className="px-2 py-1 text-charcoal font-medium truncate max-w-[220px]"
-                      title={seq.name}
-                    >
+                    <td className="px-2 py-1 text-charcoal font-medium truncate max-w-[220px]" title={seq.name}>
                       {seq.name}
                     </td>
-                    {windowPeriods.map((p) => {
-                      const val = seq.data.get(p.key) || 0;
-                      const intensity = val / maxVal;
-                      const bg = heatColor(intensity);
-                      const text = intensity > 0.55 ? '#FFFFFF' : '#0F172A';
-                      return (
-                        <td key={p.key} className="px-1 py-1 text-center">
-                          <div
-                            className="rounded px-1 py-0.5 text-[9px] font-medium tabular-nums"
-                            style={{ backgroundColor: bg, color: text }}
-                            title={`${seq.name} — ${p.label}: ${val.toLocaleString()}`}
-                          >
-                            {val > 0 ? val.toLocaleString() : ''}
-                          </div>
-                        </td>
-                      );
-                    })}
+                    {seq.cells.map((cell, ci) => (
+                      <HeatCell
+                        key={cell.key}
+                        cell={cell}
+                        seqName={seq.name}
+                        maxVal={maxVal}
+                        columnPartial={columnCadence[ci]?.completeness !== 'complete'}
+                      />
+                    ))}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <div className="flex items-center gap-2 mt-3 justify-end">
-            <span className="text-[9px] text-slate-muted">Low</span>
+          <div className="flex items-center gap-3 mt-3 justify-end text-[9px] text-slate-muted">
+            <span>† = partial period cadence, * = incomplete value, · = reset/no baseline, blank = missing</span>
+            <span>Low</span>
             <div className="flex gap-0.5">
               {[0.1, 0.3, 0.5, 0.7, 0.9].map((t) => (
-                <div
-                  key={t}
-                  className="w-4 h-3 rounded"
-                  style={{ backgroundColor: heatColor(t) }}
-                />
+                <div key={t} className="w-4 h-3 rounded" style={{ backgroundColor: heatColor(t) }} />
               ))}
             </div>
-            <span className="text-[9px] text-slate-muted">High</span>
+            <span>High</span>
           </div>
         </>
       )}
     </div>
+  );
+}
+
+// One heatmap cell. A measured value (even zero) gets a heat tint and number;
+// reset/missing-baseline cells show a distinct dot marker; missing cells are
+// blank. Missing is never rendered as a zero. A cell in a column whose global
+// Thursday cadence is partial keeps its safe-known value but is labeled
+// partial (never presented as a complete total).
+function HeatCell({
+  cell,
+  seqName,
+  maxVal,
+  columnPartial,
+}: {
+  cell: { key: string; label: string; activity: SequenceActivity };
+  seqName: string;
+  maxVal: number;
+  columnPartial: boolean;
+}) {
+  const a = cell.activity;
+  if (a.state === 'missing') {
+    return (
+      <td className="px-1 py-1 text-center" data-state="missing">
+        <div className="rounded px-1 py-0.5 text-[9px]" title={`${seqName} — ${cell.label}: no data`} />
+      </td>
+    );
+  }
+  if (a.state !== 'present') {
+    // reset / missing_baseline / ambiguous: visually distinct from zero.
+    const label =
+      a.state === 'reset' ? 'reset/correction' : a.state === 'missing_baseline' ? 'no baseline' : 'ambiguous data';
+    return (
+      <td className="px-1 py-1 text-center" data-state={a.state}>
+        <div
+          className="rounded px-1 py-0.5 text-[9px] font-medium border border-dashed border-border text-slate-muted"
+          title={`${seqName} — ${cell.label}: ${label}`}
+        >
+          ·
+        </div>
+      </td>
+    );
+  }
+  const intensity = a.value / maxVal;
+  const bg = heatColor(intensity);
+  const text = intensity > 0.55 ? '#FFFFFF' : '#0F172A';
+  const valueIncomplete = a.baselineIncomplete || a.missingMeasurements;
+  const partial = columnPartial || valueIncomplete;
+  const suffix = valueIncomplete ? '*' : columnPartial ? '†' : '';
+  const titleNote = valueIncomplete
+    ? ' (incomplete)'
+    : columnPartial
+      ? ' (partial period: safe-known value, not a complete total)'
+      : '';
+  return (
+    <td className="px-1 py-1 text-center" data-state="present" data-partial={partial ? 'true' : 'false'}>
+      <div
+        className="rounded px-1 py-0.5 text-[9px] font-medium tabular-nums"
+        style={{ backgroundColor: bg, color: text }}
+        title={`${seqName} — ${cell.label}: ${a.value.toLocaleString()}${titleNote}`}
+      >
+        {a.value.toLocaleString()}
+        {suffix}
+      </div>
+    </td>
   );
 }
