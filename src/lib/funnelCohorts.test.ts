@@ -6,12 +6,18 @@ import { describe, it, expect } from 'vitest';
 import {
   assessLeadLifecycle,
   eventsFromObservation,
+  eventsFromObservations,
   acquisitionCohortReport,
   compareAcquisitionCohorts,
   summarizeDealStages,
   dealCohortReport,
 } from './funnelCohorts';
-import type { LifecycleEvent, LeadLifecycleInput, DealStageRow } from './funnelCohorts';
+import type {
+  LifecycleEvent,
+  LifecycleObservation,
+  LeadLifecycleInput,
+  DealStageRow,
+} from './funnelCohorts';
 
 const Q2_2026 = { grain: 'quarter', year: 2026, quarter: 2 } as const;
 const Q3_2026 = { grain: 'quarter', year: 2026, quarter: 3 } as const;
@@ -206,6 +212,139 @@ describe('date provenance: confirmed, observed, unknown', () => {
     // Raw values preserved on the flagged event.
     const mql = obs.events.find((e) => e.toStage === 'mql');
     expect(mql?.effectiveDate).toBe('2026-03-01');
+  });
+});
+
+describe('observation sequences (hardening)', () => {
+  function obs(over: Partial<LifecycleObservation>): LifecycleObservation {
+    return {
+      leadId: 'l1',
+      currentStage: 'lead',
+      confirmedLeadDate: '2026-01-10',
+      confirmedMqlDate: null,
+      observedAt: '2026-01-11T03:00:00Z',
+      ...over,
+    };
+  }
+
+  // The full round trip as nightly observations would deliver it. Salesforce
+  // keeps the historical dates on later records, as it does in production.
+  const roundTrip: LifecycleObservation[] = [
+    obs({ currentStage: 'lead', observedAt: '2026-01-11T03:00:00Z' }),
+    obs({ currentStage: 'mql', confirmedMqlDate: '2026-02-01', observedAt: '2026-02-02T03:00:00Z' }),
+    obs({ currentStage: 'mql', confirmedMqlDate: '2026-02-01', observedAt: '2026-02-09T03:00:00Z' }),
+    obs({ currentStage: 'lead', confirmedMqlDate: '2026-02-01', observedAt: '2026-03-01T03:00:00Z' }),
+    obs({ currentStage: 'lead', confirmedMqlDate: '2026-02-01', observedAt: '2026-03-08T03:00:00Z' }),
+    obs({ currentStage: 'mql', confirmedMqlDate: '2026-04-19', observedAt: '2026-04-20T03:00:00Z' }),
+  ];
+
+  it('end to end: lead, MQL, unchanged, return, unchanged, second MQL', () => {
+    const r = eventsFromObservations(roundTrip);
+    // Exactly four events: acquisition, first MQL, return, requalification.
+    // The two unchanged observations emit nothing.
+    expect(r.events).toHaveLength(4);
+    expect(r.events.map((e) => `${e.fromStage ?? 'none'}>${e.toStage}`)).toEqual([
+      'none>lead',
+      'lead>mql',
+      'mql>lead',
+      'lead>mql',
+    ]);
+    expect(r.issues).toEqual([]);
+    expect(r.reviewRequired).toBe(false);
+
+    const a = assessLeadLifecycle('l1', r.events, '2026-12-31');
+    expect(a.state).toBe('complete');
+    // One original acquisition in one cohort, dated by the confirmed date.
+    expect(a.leadDate).toEqual({ date: '2026-01-10', source: 'salesforce_confirmed' });
+    // The original MQL transition, not the requalification.
+    expect(a.firstMql).toEqual({ date: '2026-02-01', source: 'salesforce_confirmed' });
+    expect(a.returnsToLead).toBe(1);
+    expect(a.requalifications).toBe(1);
+    expect(a.currentStage).toBe('mql');
+
+    // The person belongs only to the January acquisition cohort, once.
+    const cohort = acquisitionCohortReport(
+      [{ leadId: 'l1', events: r.events }],
+      { grain: 'quarter', year: 2026, quarter: 1 },
+      '2026-12-31',
+    );
+    expect(cohort.uniqueLeads).toBe(1);
+    expect(cohort.mqls).toBe(1);
+    expect(cohort.requalifications).toBe(1);
+  });
+
+  it('unchanged Lead > Lead and MQL > MQL observations emit no transition and are idempotent', () => {
+    const unchangedLead = eventsFromObservation(
+      obs({ currentStage: 'lead', priorKnownStage: 'lead' }),
+    );
+    expect(unchangedLead.events).toEqual([]);
+    expect(unchangedLead.issues).toEqual([]);
+
+    const unchangedMql = eventsFromObservation(
+      obs({ currentStage: 'mql', confirmedMqlDate: '2026-02-01', priorKnownStage: 'mql' }),
+    );
+    expect(unchangedMql.events).toEqual([]);
+    expect(unchangedMql.issues).toEqual([]);
+
+    // Reprocessing: appending a duplicate of the last observation to the
+    // sequence changes nothing.
+    const withDuplicate = eventsFromObservations([...roundTrip, { ...roundTrip[5] }]);
+    const without = eventsFromObservations(roundTrip);
+    expect(withDuplicate.events).toEqual(without.events);
+    expect(withDuplicate.issues).toEqual(without.issues);
+  });
+
+  it('a return to Lead is dated by the observation day, never the Became a Lead Date', () => {
+    const r = eventsFromObservation(
+      obs({
+        currentStage: 'lead',
+        priorKnownStage: 'mql',
+        mqlSeenBefore: true,
+        confirmedLeadDate: '2026-01-10',
+        confirmedMqlDate: '2026-02-01',
+        observedAt: '2026-03-01T03:00:00Z',
+      }),
+    );
+    expect(r.events).toHaveLength(1);
+    const ret = r.events[0];
+    expect(ret.fromStage).toBe('mql');
+    expect(ret.toStage).toBe('lead');
+    expect(ret.effectiveDate).toBe('2026-03-01');
+    expect(ret.dateSource).toBe('n8n_observed');
+    // The original acquisition date is not reused for the regression.
+    expect(ret.effectiveDate).not.toBe('2026-01-10');
+    expect(r.issues).toEqual([]);
+  });
+
+  it('a residual MQL date after a seen MQL is expected; one never seen is a contradiction', () => {
+    // After the round trip, Salesforce still carries the MQL date on a
+    // lead-stage record: expected, not flagged.
+    const afterReturn = eventsFromObservation(
+      obs({ currentStage: 'lead', priorKnownStage: 'lead', mqlSeenBefore: true, confirmedMqlDate: '2026-02-01' }),
+    );
+    expect(afterReturn.issues).toEqual([]);
+    expect(afterReturn.reviewRequired).toBe(false);
+    // A confirmed MQL date appearing while the stage claims Lead and MQL was
+    // never seen is routed to review.
+    const neverSeen = eventsFromObservation(
+      obs({ currentStage: 'lead', priorKnownStage: 'lead', confirmedMqlDate: '2026-02-01' }),
+    );
+    expect(neverSeen.issues.some((i) => i.kind === 'stage_date_contradiction')).toBe(true);
+    expect(neverSeen.reviewRequired).toBe(true);
+  });
+
+  it('observation order is stable: shuffled input produces the same history', () => {
+    const shuffled = [roundTrip[4], roundTrip[1], roundTrip[5], roundTrip[0], roundTrip[3], roundTrip[2]];
+    expect(eventsFromObservations(shuffled).events).toEqual(eventsFromObservations(roundTrip).events);
+  });
+
+  it('a first observation already at MQL emits the acquisition baseline and the transition once', () => {
+    const r = eventsFromObservations([
+      obs({ currentStage: 'mql', confirmedMqlDate: '2026-02-01', observedAt: '2026-02-02T03:00:00Z' }),
+      obs({ currentStage: 'mql', confirmedMqlDate: '2026-02-01', observedAt: '2026-02-09T03:00:00Z' }),
+    ]);
+    expect(r.events.filter((e) => e.toStage === 'lead' && e.fromStage === null)).toHaveLength(1);
+    expect(r.events.filter((e) => e.toStage === 'mql')).toHaveLength(1);
   });
 });
 

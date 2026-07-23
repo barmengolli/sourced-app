@@ -279,9 +279,16 @@ export interface LifecycleObservation {
   confirmedLeadDate: string | null;
   confirmedMqlDate: string | null;
   observedAt: string;
-  // The stage this system last knew for the lead, when the caller knows it.
-  // 'lead' followed by an MQL observation is an observed transition.
+  // The stage this system last knew for the lead. null/undefined means this
+  // is the first known observation, which establishes the acquisition
+  // baseline exactly once. 'lead' followed by an MQL observation is an
+  // observed transition; 'mql' followed by a Lead observation is a return.
   priorKnownStage?: StageKey | null;
+  // True when an MQL stage was already seen for this lead in an earlier
+  // observation. Distinguishes the residual historical MQL date Salesforce
+  // keeps after a return (expected, not flagged) from a genuine stage/date
+  // contradiction. eventsFromObservations threads this automatically.
+  mqlSeenBefore?: boolean;
   raw?: Record<string, unknown>;
 }
 
@@ -293,63 +300,40 @@ export interface ObservationResult {
   reviewRequired: boolean;
 }
 
-// Convert one observation into lifecycle events without inventing anything:
-// unknown stays unknown, observed stays observed, contradictions are flagged.
-export function eventsFromObservation(obs: LifecycleObservation): ObservationResult {
-  const issues: CohortIssue[] = [];
-  const events: LifecycleEvent[] = [];
-  let reviewRequired = false;
-
-  const leadEvent: LifecycleEvent = {
-    leadId: obs.leadId,
-    fromStage: null,
-    toStage: 'lead',
-    effectiveDate: obs.confirmedLeadDate,
-    observedAt: obs.observedAt,
-    dateSource: obs.confirmedLeadDate ? 'salesforce_confirmed' : 'unknown',
-    raw: obs.raw,
-  };
-  if (!obs.confirmedLeadDate) pushIssue(issues, 'missing_lead_date');
-  events.push(leadEvent);
-
-  if (obs.currentStage === 'lead') {
-    // A confirmed MQL date on a record that claims to still be a Lead is a
-    // contradiction: flag it for review, do not fabricate an MQL event.
-    if (obs.confirmedMqlDate) {
-      pushIssue(issues, 'stage_date_contradiction');
-      reviewRequired = true;
-    }
-    return { events, issues, reviewRequired };
-  }
-
-  // currentStage === 'mql'
+// Build one Lead-to-MQL transition event: the confirmed MQL date when valid,
+// otherwise the observation day marked as observed. Reverse dates are flagged,
+// never swapped.
+function mqlTransitionEvent(
+  obs: LifecycleObservation,
+  issues: CohortIssue[],
+): { event: LifecycleEvent; reviewRequired: boolean } {
   if (obs.confirmedMqlDate) {
     const flags: CohortIssueKind[] = [];
+    let reviewRequired = false;
     if (obs.confirmedLeadDate && obs.confirmedMqlDate < obs.confirmedLeadDate) {
-      // Reverse dates are invalid; record them flagged, never swapped.
       flags.push('mql_before_lead');
       pushIssue(issues, 'mql_before_lead');
       reviewRequired = true;
     }
-    events.push({
-      leadId: obs.leadId,
-      fromStage: 'lead',
-      toStage: 'mql',
-      effectiveDate: obs.confirmedMqlDate,
-      observedAt: obs.observedAt,
-      dateSource: 'salesforce_confirmed',
-      raw: obs.raw,
-      qualityFlags: flags.length ? flags : undefined,
-    });
-    return { events, issues, reviewRequired };
+    return {
+      event: {
+        leadId: obs.leadId,
+        fromStage: 'lead',
+        toStage: 'mql',
+        effectiveDate: obs.confirmedMqlDate,
+        observedAt: obs.observedAt,
+        dateSource: 'salesforce_confirmed',
+        raw: obs.raw,
+        qualityFlags: flags.length ? flags : undefined,
+      },
+      reviewRequired,
+    };
   }
-
-  if (obs.priorKnownStage === 'lead') {
-    // We saw the lead as Lead before and see MQL now: the transition happened,
-    // but the only date we can honestly assert is the observation day, marked
-    // as observed rather than confirmed.
-    const day = obs.observedAt.slice(0, 10);
-    events.push({
+  // No confirmed date: the only honest date is the observation day, marked
+  // observed rather than confirmed.
+  const day = obs.observedAt.slice(0, 10);
+  return {
+    event: {
       leadId: obs.leadId,
       fromStage: 'lead',
       toStage: 'mql',
@@ -357,22 +341,152 @@ export function eventsFromObservation(obs: LifecycleObservation): ObservationRes
       observedAt: obs.observedAt,
       dateSource: 'n8n_observed',
       raw: obs.raw,
+    },
+    reviewRequired: false,
+  };
+}
+
+// Convert one observation into lifecycle events without inventing anything:
+// unknown stays unknown, observed stays observed, contradictions are flagged.
+//
+// The acquisition baseline is emitted only on the FIRST known observation
+// (priorKnownStage null/undefined); later observations emit only the
+// transition they evidence, so an unchanged stage emits nothing and
+// reprocessing the same observation is idempotent.
+export function eventsFromObservation(obs: LifecycleObservation): ObservationResult {
+  const issues: CohortIssue[] = [];
+  const events: LifecycleEvent[] = [];
+  let reviewRequired = false;
+  const prior = obs.priorKnownStage ?? null;
+
+  if (prior === null) {
+    // First known observation: establish the original acquisition exactly
+    // once. Later observations never re-emit or alter it.
+    events.push({
+      leadId: obs.leadId,
+      fromStage: null,
+      toStage: 'lead',
+      effectiveDate: obs.confirmedLeadDate,
+      observedAt: obs.observedAt,
+      dateSource: obs.confirmedLeadDate ? 'salesforce_confirmed' : 'unknown',
+      raw: obs.raw,
+    });
+    if (!obs.confirmedLeadDate) pushIssue(issues, 'missing_lead_date');
+
+    if (obs.currentStage === 'lead') {
+      // A confirmed MQL date on a first record that claims to still be a Lead
+      // is a contradiction: flag it for review, do not fabricate an MQL event.
+      if (obs.confirmedMqlDate) {
+        pushIssue(issues, 'stage_date_contradiction');
+        reviewRequired = true;
+      }
+      return { events, issues, reviewRequired };
+    }
+    // Already MQL at first sight.
+    if (obs.confirmedMqlDate) {
+      const t = mqlTransitionEvent(obs, issues);
+      events.push(t.event);
+      return { events, issues, reviewRequired: t.reviewRequired };
+    }
+    // Stage is known but the historical transition date is not. Do not
+    // invent one.
+    pushIssue(issues, 'unknown_mql_transition_date');
+    events.push({
+      leadId: obs.leadId,
+      fromStage: null,
+      toStage: 'mql',
+      effectiveDate: null,
+      observedAt: obs.observedAt,
+      dateSource: 'unknown',
+      raw: obs.raw,
     });
     return { events, issues, reviewRequired };
   }
 
-  // First record is already MQL with no confirmed date: the stage is known,
-  // the transition date is not. Do not invent one.
-  pushIssue(issues, 'unknown_mql_transition_date');
+  if (prior === obs.currentStage) {
+    // Unchanged stage: a re-observation of the same state is not a lifecycle
+    // transition. No events; reprocessing is idempotent. The one thing worth
+    // flagging: a confirmed MQL date appearing while the stage claims Lead
+    // and MQL was never seen (either dirty data or a round trip that
+    // happened entirely between observations). After a seen MQL, the
+    // residual historical date Salesforce keeps is expected.
+    if (
+      obs.currentStage === 'lead' &&
+      obs.confirmedMqlDate &&
+      obs.mqlSeenBefore !== true
+    ) {
+      pushIssue(issues, 'stage_date_contradiction');
+      reviewRequired = true;
+    }
+    return { events, issues, reviewRequired };
+  }
+
+  if (prior === 'lead' && obs.currentStage === 'mql') {
+    // Observed Lead-to-MQL transition (first conversion or, after a return,
+    // a requalification; assessLeadLifecycle tells them apart). The original
+    // Lead cohort date is never touched here.
+    const t = mqlTransitionEvent(obs, issues);
+    events.push(t.event);
+    return { events, issues, reviewRequired: t.reviewRequired };
+  }
+
+  // prior === 'mql' && currentStage === 'lead': a return to Lead. The
+  // Became a Lead Date is the original acquisition, never the regression
+  // day, so the only honest date for the return is the observation day.
+  const day = obs.observedAt.slice(0, 10);
   events.push({
     leadId: obs.leadId,
-    fromStage: null,
-    toStage: 'mql',
-    effectiveDate: null,
+    fromStage: 'mql',
+    toStage: 'lead',
+    effectiveDate: isValidIsoDate(day) ? day : null,
     observedAt: obs.observedAt,
-    dateSource: 'unknown',
+    dateSource: 'n8n_observed',
     raw: obs.raw,
   });
+  return { events, issues, reviewRequired };
+}
+
+// Fold an observation series for ONE lead into its lifecycle event history.
+// Observations are put into stable observation order first (sorted by
+// observedAt, ties keeping input order), then prior stage and MQL-seen state
+// are threaded automatically, so callers cannot produce duplicate baselines
+// or missed returns by mis-threading priorKnownStage themselves.
+// assessLeadLifecycle expects events in exactly this observation order.
+export function eventsFromObservations(
+  observations: LifecycleObservation[],
+): ObservationResult {
+  const ordered = observations
+    .map((obs, index) => ({ obs, index }))
+    .sort((a, b) => {
+      if (a.obs.observedAt < b.obs.observedAt) return -1;
+      if (a.obs.observedAt > b.obs.observedAt) return 1;
+      return a.index - b.index;
+    })
+    .map((x) => x.obs);
+
+  const events: LifecycleEvent[] = [];
+  const issues: CohortIssue[] = [];
+  let reviewRequired = false;
+  let prior: StageKey | null = null;
+  let mqlSeen = false;
+  let first = true;
+
+  for (const obs of ordered) {
+    const r = eventsFromObservation({
+      ...obs,
+      // The caller may seed prior knowledge for the first observation only;
+      // afterwards the threaded state is authoritative.
+      priorKnownStage: first ? (obs.priorKnownStage ?? null) : prior,
+      mqlSeenBefore: first ? (obs.mqlSeenBefore ?? false) : mqlSeen,
+    });
+    events.push(...r.events);
+    for (const issue of r.issues) pushIssue(issues, issue.kind, issue.count);
+    reviewRequired = reviewRequired || r.reviewRequired;
+    prior = obs.currentStage;
+    if (obs.currentStage === 'mql') mqlSeen = true;
+    first = false;
+  }
+
   return { events, issues, reviewRequired };
 }
 

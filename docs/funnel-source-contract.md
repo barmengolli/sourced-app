@@ -278,8 +278,43 @@ When the feed is upgraded, ingestion must:
 - make upserts idempotent under a documented natural key;
 - preserve the lead edit-lock contract.
 
-`eventsFromObservation` in `src/lib/funnelCohorts.ts` is the pure seam that
-encodes these rules for lifecycle observations and is fully covered by tests.
+### The observation-to-event seam
+
+`eventsFromObservation` (one observation) and `eventsFromObservations` (a
+series for one lead) in `src/lib/funnelCohorts.ts` are the pure seam that
+encodes these rules. Implemented behavior, exactly:
+
+- First known observation (no prior stage): establishes the original Lead
+  acquisition event exactly once, using the confirmed became-a-lead date when
+  available (source `unknown` plus an issue when it is missing). If the
+  record is already MQL, the MQL transition is also recorded: with its
+  confirmed date when supplied, otherwise with a null date and source
+  `unknown` (the stage is known, the historical transition date is not
+  invented).
+- Unchanged stage (Lead then Lead, or MQL then MQL): no lifecycle transition
+  is emitted, so reprocessing the same observation is idempotent. One flag
+  still applies: a confirmed MQL date appearing while the stage claims Lead
+  and MQL has never been seen is routed to review as a stage/date
+  contradiction. After a seen MQL, the residual historical MQL date that
+  Salesforce keeps on later records is expected and not flagged.
+- Lead to MQL: the transition uses the confirmed MQL date when valid,
+  otherwise the observation day with `n8n_observed` provenance. The original
+  Lead cohort date is never altered.
+- MQL to Lead: a return event is recorded with `fromStage: mql` and
+  `toStage: lead`, dated by the observation day with `n8n_observed`
+  provenance. The became-a-lead date is never reused for the return, because
+  it represents the original acquisition, not the later regression.
+- Requalification: after a return, a later Lead-to-MQL observation produces
+  another transition event; `assessLeadLifecycle` counts it as a
+  requalification, never as the original MQL, and the person still belongs
+  to exactly one original acquisition cohort.
+
+Ordering: `assessLeadLifecycle` processes events in the order given and
+requires observation order. `eventsFromObservations` enforces this by stably
+sorting observations by `observedAt` (ties keep input order) and threading
+prior-stage and MQL-seen state automatically, so shuffled input produces the
+same history. Late-arriving confirmed dates on unchanged observations are not
+retroactively applied to earlier events; a correction path is future work.
 
 ## 9. Open decisions and questions
 
