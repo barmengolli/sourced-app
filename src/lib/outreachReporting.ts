@@ -74,10 +74,20 @@ export interface OutreachReportingRow {
 
 // Per-sequence, per-metric period activity.
 export type SequenceActivity =
-  | { state: 'present'; value: number; baselineIncomplete: boolean }
+  | {
+      state: 'present';
+      value: number;
+      baselineIncomplete: boolean;
+      // True when any in-period snapshot row exists whose measurement for this
+      // metric is null (a metric-specific coverage gap). The known value is
+      // retained but is explicitly partial: a trailing missing measurement
+      // means later activity is unknown, and an interior one hides potential
+      // resets. A measured zero is NOT a missing measurement.
+      missingMeasurements: boolean;
+    }
   | { state: 'missing' } // no usable end snapshot / value in the period
   | { state: 'missing_baseline' } // sequence first appears; no prior snapshot at all and no in-period pair
-  | { state: 'reset' } // counter decreased: reset/correction, not clamped
+  | { state: 'reset' } // counter decreased between ANY consecutive valid observations (even if it later recovers)
   | { state: 'ambiguous_duplicate' }; // duplicate natural key with unreliable recency
 
 // Aggregated metric total across sequences.
@@ -85,10 +95,17 @@ export type MetricTotal =
   | {
       state: 'present';
       value: number;
-      // True when any contributing sequence lacked a pre-period baseline (its
-      // pre-tracking activity is unknown) or a metric had gaps.
+      // True when any contributing sequence lacked a pre-period baseline, had
+      // metric-specific missing measurements, hit a reset, or a relevant
+      // duplicate was ambiguous. Comparison deltas must be suppressed when
+      // either side is incomplete.
       incomplete: boolean;
-      issues: { resets: number; ambiguousDuplicates: number; missingBaselines: number };
+      issues: {
+        resets: number;
+        ambiguousDuplicates: number;
+        missingBaselines: number;
+        missingMeasurements: number;
+      };
     }
   | { state: 'missing' };
 
@@ -177,6 +194,18 @@ function counterValue(row: OutreachReportingRow, metric: ActivityCounter): numbe
 // A sequence first appearing inside the period has no true baseline: its first
 // in-period snapshot is lifetime volume and is NOT counted; later in-period
 // increases count from that first snapshot, flagged baselineIncomplete.
+//
+// Hardening (Bite 3A follow-up):
+//   - RESET SCANNING: every consecutive pair of valid observations from the
+//     selected baseline through the period end is checked. Any decrease is a
+//     reset, even if the counter later recovers above the baseline. The
+//     end-minus-baseline diff alone can hide a mid-period reset+recovery.
+//   - METRIC-SPECIFIC MISSING MEASUREMENTS: an in-period snapshot row whose
+//     value for THIS metric is null is a coverage gap for this metric even
+//     though the row exists. The known value is retained but the result
+//     carries missingMeasurements: true (trailing nulls mean later activity is
+//     unknown; interior nulls hide potential resets). Global row-date
+//     completeness alone cannot see this.
 export function sequencePeriodActivity(
   series: readonly OutreachReportingRow[], // one sequence, sorted ascending
   metric: ActivityCounter,
@@ -190,6 +219,10 @@ export function sequencePeriodActivity(
   let lastInPeriod: number | null = null; // last valid value inside period
   let inPeriodValueCount = 0; // usable (non-null) in-period observations
   let sawInPeriodRow = false;
+  let missingMeasurements = false; // any in-period row with a null value for this metric
+  // Ordered valid observations from the baseline (inclusive) through the
+  // period, for consecutive-decrease reset scanning.
+  const scanValues: number[] = [];
 
   for (const row of series) {
     const d = row.export_date;
@@ -198,10 +231,13 @@ export function sequencePeriodActivity(
       if (v !== null) baseline = v;
     } else if (d <= bounds.end) {
       sawInPeriodRow = true;
-      if (v !== null) {
+      if (v === null) {
+        missingMeasurements = true;
+      } else {
         if (firstInPeriod === null) firstInPeriod = v;
         lastInPeriod = v;
         inPeriodValueCount += 1;
+        scanValues.push(v);
       }
     } else {
       break;
@@ -215,10 +251,17 @@ export function sequencePeriodActivity(
     return { state: 'missing' };
   }
 
+  // Reset scan: baseline (when present) followed by every valid in-period
+  // observation. Any consecutive decrease is a reset/correction, regardless of
+  // whether the final value recovered.
+  const scan = baseline !== null ? [baseline, ...scanValues] : scanValues;
+  for (let i = 1; i < scan.length; i++) {
+    if (scan[i] < scan[i - 1]) return { state: 'reset' };
+  }
+
   if (baseline !== null) {
     const diff = lastInPeriod - baseline;
-    if (diff < 0) return { state: 'reset' };
-    return { state: 'present', value: diff, baselineIncomplete: false };
+    return { state: 'present', value: diff, baselineIncomplete: false, missingMeasurements };
   }
 
   // No pre-period baseline: the sequence first appears (for this metric)
@@ -230,11 +273,10 @@ export function sequencePeriodActivity(
     return { state: 'missing_baseline' };
   }
   const withinDiff = lastInPeriod - firstInPeriod;
-  if (withinDiff < 0) return { state: 'reset' };
   // Growth measured from the first in-period snapshot (which itself is NOT
   // counted). A measured zero growth across >=2 observations is a real zero,
   // still flagged baselineIncomplete because pre-debut activity is unknown.
-  return { state: 'present', value: withinDiff, baselineIncomplete: true };
+  return { state: 'present', value: withinDiff, baselineIncomplete: true, missingMeasurements };
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +295,7 @@ export function aggregateActivity(
   let present = 0;
   let resets = 0;
   let missingBaselines = 0;
+  let missingMeasurements = 0;
   let anyBaselineIncomplete = false;
   for (const series of deduped.bySequence.values()) {
     const a = sequencePeriodActivity(series, metric, period);
@@ -261,6 +304,7 @@ export function aggregateActivity(
         sum += a.value;
         present += 1;
         if (a.baselineIncomplete) anyBaselineIncomplete = true;
+        if (a.missingMeasurements) missingMeasurements += 1;
         break;
       case 'reset':
         resets += 1;
@@ -274,15 +318,50 @@ export function aggregateActivity(
         break; // not produced per-sequence; ambiguity tracked at dedupe level
     }
   }
-  const ambiguousDuplicates = deduped.ambiguousKeys.length;
+  const ambiguousDuplicates = countRelevantAmbiguousKeys(deduped, period);
   if (present === 0) return { state: 'missing' };
   return {
     state: 'present',
     value: sum,
     incomplete:
-      anyBaselineIncomplete || resets > 0 || missingBaselines > 0 || ambiguousDuplicates > 0,
-    issues: { resets, ambiguousDuplicates, missingBaselines },
+      anyBaselineIncomplete ||
+      resets > 0 ||
+      missingBaselines > 0 ||
+      missingMeasurements > 0 ||
+      ambiguousDuplicates > 0,
+    issues: { resets, ambiguousDuplicates, missingBaselines, missingMeasurements },
   };
+}
+
+// An ambiguous duplicate affects a period's result only when it is RELEVANT to
+// that period: either it falls inside the period, or it sits before the period
+// and would have been the affected sequence's baseline (no valid later
+// pre-period observation exists for that sequence). An ambiguity in an
+// unrelated month must not make every future period permanently incomplete.
+function countRelevantAmbiguousKeys(
+  deduped: DedupedSeries,
+  period: ReportingPeriod,
+): number {
+  const bounds = periodBounds(period);
+  if (!bounds) return 0;
+  let count = 0;
+  for (const key of deduped.ambiguousKeys) {
+    const d = key.export_date;
+    if (d > bounds.end) continue; // future ambiguity: irrelevant to this period
+    if (d >= bounds.start) {
+      count += 1; // inside the selected period: always relevant
+      continue;
+    }
+    // Pre-period: relevant only if it would have served as the baseline, i.e.
+    // the sequence has no valid observation AFTER this date and still before
+    // the period start.
+    const series = deduped.bySequence.get(key.sequence_id) ?? [];
+    const laterPrePeriod = series.some(
+      (r) => r.export_date > d && r.export_date < bounds.start,
+    );
+    if (!laterPrePeriod) count += 1;
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +435,18 @@ export function isThursday(date: string): boolean {
   return (((ymdToOrdinal(y, m, d) - REF_THURSDAY_ORDINAL) % 7) + 7) % 7 === 0;
 }
 
+// The latest Thursday strictly BEFORE the given date. Used for the required
+// boundary-baseline run: the scheduled Thursday immediately preceding a
+// period's start. Returns null for an invalid date.
+export function thursdayBefore(date: string): string | null {
+  if (!isValidIsoDate(date)) return null;
+  const [y, m, d] = date.split('-').map((s) => parseInt(s, 10));
+  const ord = ymdToOrdinal(y, m, d);
+  const dow = (((ord - REF_THURSDAY_ORDINAL) % 7) + 7) % 7; // 0 = Thursday
+  const back = dow === 0 ? 7 : dow; // same-day Thursday does not count as "before"
+  return ordinalToYmd(ord - back);
+}
+
 // All expected Thursday run dates that fall inside the period AND inside the
 // feed's observed lifetime [feedStart .. dataThrough]. Thursdays before the
 // feed existed are not "missing runs".
@@ -389,6 +480,16 @@ export interface OutreachCompleteness {
   // Expected Thursdays in the period (bounded by feed lifetime) with no
   // snapshot on that exact date. A Wednesday/manual run does NOT substitute.
   missingThursdays: string[];
+  // The required boundary-baseline run: the scheduled Thursday immediately
+  // BEFORE the period start (when the feed already existed then). null when
+  // the feed did not exist yet at that date.
+  requiredBaselineThursday: string | null;
+  // True when requiredBaselineThursday exists but has no snapshot. The period
+  // is then partial: an older snapshot as baseline silently widens the
+  // measurement window, so it is never assumed. A Wednesday snapshot near the
+  // boundary does not substitute (any alternative-boundary policy must be an
+  // explicit future decision).
+  missingBaselineThursday: boolean;
   // The final expected Thursday belonging to the period, when determinable.
   finalExpectedThursday: string | null;
   // Global latest export_date across the whole feed.
@@ -398,8 +499,9 @@ export interface OutreachCompleteness {
 
 // Completeness of the SELECTED period:
 //   - no snapshots inside the period -> missing
-//   - any expected Thursday without a snapshot, or data not yet reaching the
-//     period's final expected Thursday -> partial
+//   - the required pre-period boundary Thursday missing (while the feed
+//     existed), any expected in-period Thursday missing, or data not yet
+//     reaching the period's final expected Thursday -> partial
 //   - otherwise -> complete
 // Wednesday/extra snapshots never replace a missing Thursday, and (because
 // activity is a two-endpoint diff, not a sum of rows) extra snapshots are
@@ -416,12 +518,22 @@ export function assessOutreachCompleteness(
     return {
       completeness: 'missing',
       missingThursdays: [],
+      requiredBaselineThursday: null,
+      missingBaselineThursday: false,
       finalExpectedThursday: null,
       dataThrough,
       suppressDelta: true,
     };
   }
+  const allDates = new Set(dates);
   const inPeriod = dates.filter((d) => d >= bounds.start && d <= bounds.end);
+  // Required boundary baseline: the scheduled Thursday immediately before the
+  // period start, expected only if the feed already existed on that date.
+  const boundary = thursdayBefore(bounds.start);
+  const requiredBaselineThursday =
+    boundary !== null && boundary >= feedStart ? boundary : null;
+  const missingBaselineThursday =
+    requiredBaselineThursday !== null && !allDates.has(requiredBaselineThursday);
   // Final expected Thursday of the period, bounded only by the period (not by
   // dataThrough): the last Thursday on/before the period end, if it is on/after
   // the feed start.
@@ -433,6 +545,8 @@ export function assessOutreachCompleteness(
     return {
       completeness: 'missing',
       missingThursdays: [],
+      requiredBaselineThursday,
+      missingBaselineThursday,
       finalExpectedThursday,
       dataThrough,
       suppressDelta: true,
@@ -446,10 +560,13 @@ export function assessOutreachCompleteness(
     finalExpectedThursday !== null && dataThrough >= finalExpectedThursday
       ? dateSet.has(finalExpectedThursday)
       : false; // data has not reached the final Thursday yet -> partial
-  const complete = missingThursdays.length === 0 && reachedFinal;
+  const complete =
+    missingThursdays.length === 0 && reachedFinal && !missingBaselineThursday;
   return {
     completeness: complete ? 'complete' : 'partial',
     missingThursdays,
+    requiredBaselineThursday,
+    missingBaselineThursday,
     finalExpectedThursday,
     dataThrough,
     suppressDelta: !complete,

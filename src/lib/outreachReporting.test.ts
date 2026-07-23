@@ -58,7 +58,7 @@ describe('sequencePeriodActivity — baselines', () => {
     // April activity for seq 1: last-before-April = 300 (Mar 26); last-in-April = 420.
     const d = dedupeSnapshots(cleanSeries());
     const a = sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 4));
-    expect(a).toEqual({ state: 'present', value: 120, baselineIncomplete: false });
+    expect(a).toEqual({ state: 'present', value: 120, baselineIncomplete: false, missingMeasurements: false });
   });
 
   it('never counts the first-ever nonzero snapshot as activity', () => {
@@ -67,7 +67,7 @@ describe('sequencePeriodActivity — baselines', () => {
     const a = sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 3));
     // Growth measured from the first in-period snapshot: 300 - 100 = 200,
     // flagged incomplete because pre-debut activity is unknown.
-    expect(a).toEqual({ state: 'present', value: 200, baselineIncomplete: true });
+    expect(a).toEqual({ state: 'present', value: 200, baselineIncomplete: true, missingMeasurements: false });
   });
 
   it('a single debut snapshot yields missing_baseline (no measurable growth, no invented zero)', () => {
@@ -82,7 +82,7 @@ describe('sequencePeriodActivity — baselines', () => {
       row('2026-03-19', 8, { total_sent: 40 }),
     ]);
     const a = sequencePeriodActivity(d.bySequence.get(8)!, 'total_sent', month(2026, 3));
-    expect(a).toEqual({ state: 'present', value: 40, baselineIncomplete: true });
+    expect(a).toEqual({ state: 'present', value: 40, baselineIncomplete: true, missingMeasurements: false });
   });
 
   it('negative counter difference returns reset, never clamped to zero', () => {
@@ -106,7 +106,7 @@ describe('sequencePeriodActivity — baselines', () => {
     // total_sent measured, unchanged -> a real zero with a real baseline
     expect(
       sequencePeriodActivity(d.bySequence.get(10)!, 'total_sent', month(2026, 4)),
-    ).toEqual({ state: 'present', value: 0, baselineIncomplete: false });
+    ).toEqual({ state: 'present', value: 0, baselineIncomplete: false, missingMeasurements: false });
   });
 
   it('empty selected period returns missing', () => {
@@ -127,26 +127,26 @@ describe('period boundaries — Month, Quarter, Year, and rollovers', () => {
   it('January activity uses the December baseline (Dec -> Jan rollover)', () => {
     const d = dedupeSnapshots(spanRows);
     const a = sequencePeriodActivity(d.bySequence.get(2)!, 'opened', month(2027, 1));
-    expect(a).toEqual({ state: 'present', value: 15, baselineIncomplete: false }); // 40 - 25
+    expect(a).toEqual({ state: 'present', value: 15, baselineIncomplete: false, missingMeasurements: false }); // 40 - 25
   });
   it('Q1 activity uses the prior-year Q4 baseline (Q1 rollover)', () => {
     const d = dedupeSnapshots(spanRows);
     const a = sequencePeriodActivity(d.bySequence.get(2)!, 'opened', quarter(2027, 1));
-    expect(a).toEqual({ state: 'present', value: 15, baselineIncomplete: false });
+    expect(a).toEqual({ state: 'present', value: 15, baselineIncomplete: false, missingMeasurements: false });
   });
   it('year activity uses the prior-year baseline', () => {
     const d = dedupeSnapshots(spanRows);
     const a = sequencePeriodActivity(d.bySequence.get(2)!, 'opened', year(2027));
-    expect(a).toEqual({ state: 'present', value: 15, baselineIncomplete: false });
+    expect(a).toEqual({ state: 'present', value: 15, baselineIncomplete: false, missingMeasurements: false });
   });
   it('quarter and year use export_date calendar boundaries (not week_number)', () => {
     const d = dedupeSnapshots(cleanSeries());
     // Q1 2026 = Jan-Mar: growth from first in-period snapshot (100) to Mar 26 (300).
     const q1 = sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', quarter(2026, 1));
-    expect(q1).toEqual({ state: 'present', value: 200, baselineIncomplete: true });
+    expect(q1).toEqual({ state: 'present', value: 200, baselineIncomplete: true, missingMeasurements: false });
     // Q2 has a real Q1 baseline: 420 - 300 = 120.
     const q2 = sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', quarter(2026, 2));
-    expect(q2).toEqual({ state: 'present', value: 120, baselineIncomplete: false });
+    expect(q2).toEqual({ state: 'present', value: 120, baselineIncomplete: false, missingMeasurements: false });
   });
 });
 
@@ -160,7 +160,7 @@ describe('duplicates and identity', () => {
     expect(d.ambiguousKeys).toHaveLength(0);
     const a = sequencePeriodActivity(d.bySequence.get(3)!, 'clicked', month(2026, 3));
     // 60 - 50 = 10 from the first snapshot; NOT 50+50 summed.
-    expect(a).toEqual({ state: 'present', value: 10, baselineIncomplete: true });
+    expect(a).toEqual({ state: 'present', value: 10, baselineIncomplete: true, missingMeasurements: false });
   });
 
   it('changed duplicates resolve to the latest created_at when recency is reliable', () => {
@@ -172,7 +172,7 @@ describe('duplicates and identity', () => {
     expect(d.ambiguousKeys).toHaveLength(0);
     const a = sequencePeriodActivity(d.bySequence.get(4)!, 'replied', month(2026, 3));
     // latest rerun (9) wins as the Mar 19 value -> 12 - 9 = 3.
-    expect(a).toEqual({ state: 'present', value: 3, baselineIncomplete: true });
+    expect(a).toEqual({ state: 'present', value: 3, baselineIncomplete: true, missingMeasurements: false });
   });
 
   it('changed duplicates without reliable recency are an ambiguous-duplicate quality issue', () => {
@@ -190,7 +190,7 @@ describe('duplicates and identity', () => {
     ]);
     expect(d.bySequence.get(6)).toHaveLength(2); // one series, not two
     const a = sequencePeriodActivity(d.bySequence.get(6)!, 'total_sent', month(2026, 3));
-    expect(a).toEqual({ state: 'present', value: 30, baselineIncomplete: true });
+    expect(a).toEqual({ state: 'present', value: 30, baselineIncomplete: true, missingMeasurements: false });
   });
 });
 
@@ -223,24 +223,71 @@ describe('aggregation and rates', () => {
       row('2026-07-16', 1, { total_sent: 420, linkedin_tasks_completed: null }), // coverage break
       row('2026-07-23', 1, { total_sent: 460, linkedin_tasks_completed: null }),
     ]);
-    // total_sent July: 460 - 300 (Jun 25 baseline) = 160.
-    expect(aggregateActivity(d, 'total_sent', month(2026, 7))).toMatchObject({ state: 'present', value: 160 });
-    // linkedin July: baseline 50 exists, last valid IN July is 70 (Jul 9) -> +20,
-    // but the break means the rest of July is unknown; the value reflects only
-    // known coverage. (Completeness/data-through must be consulted separately.)
-    expect(aggregateActivity(d, 'linkedin_tasks_completed', month(2026, 7))).toMatchObject({ state: 'present', value: 20 });
+    // total_sent July: fully measured on every row -> complete: 460 - 300 = 160.
+    const sent = aggregateActivity(d, 'total_sent', month(2026, 7));
+    expect(sent).toMatchObject({ state: 'present', value: 160, incomplete: false });
+
+    // linkedin: the per-sequence result retains the known +20 (baseline 50,
+    // last valid Jul 9 = 70) but carries an explicit missing-measurement state:
+    const seq = sequencePeriodActivity(d.bySequence.get(1)!, 'linkedin_tasks_completed', month(2026, 7));
+    expect(seq).toEqual({ state: 'present', value: 20, baselineIncomplete: false, missingMeasurements: true });
+
+    // ...and the aggregate is explicitly INCOMPLETE with the gap counted:
+    const li = aggregateActivity(d, 'linkedin_tasks_completed', month(2026, 7));
+    expect(li).toMatchObject({
+      state: 'present',
+      value: 20,
+      incomplete: true,
+      issues: { missingMeasurements: 1 },
+    });
+  });
+
+  it('incomplete metric coverage suppresses comparison deltas (either side)', () => {
+    const d = dedupeSnapshots([
+      row('2026-06-25', 1, { linkedin_tasks_completed: 50 }),
+      row('2026-07-02', 1, { linkedin_tasks_completed: 60 }),
+      row('2026-07-09', 1, { linkedin_tasks_completed: 70 }),
+      row('2026-07-16', 1, { linkedin_tasks_completed: null }), // break in July
+      row('2026-07-23', 1, { linkedin_tasks_completed: null }),
+    ]);
+    const c = compareOutreachActivity(d, 'linkedin_tasks_completed', month(2026, 7), 'previous_period');
+    // Current July is present-but-incomplete: a consumer must suppress the
+    // delta whenever either side is incomplete or non-present.
+    const currentIncomplete = c.current.state !== 'present' || c.current.incomplete;
+    expect(currentIncomplete).toBe(true);
+    const comparisonUnusable =
+      c.comparison === null || c.comparison.state !== 'present' || c.comparison.incomplete;
+    // June comparison: 50 -> 60?? June has 6/25 only (single obs, no May
+    // baseline) -> missing_baseline aggregate -> missing. Either way unusable
+    // for a trustworthy delta.
+    expect(comparisonUnusable).toBe(true);
+  });
+
+  it('a mid-period null between valid measurements marks the metric incomplete', () => {
+    // Interior gap: values exist before and after the null, but the gap hides
+    // potential resets. Do not rely on global row-date completeness.
+    const d = dedupeSnapshots([
+      row('2026-03-26', 1, { opened: 100 }),
+      row('2026-04-02', 1, { opened: 110 }),
+      row('2026-04-09', 1, { opened: null }), // row exists; this metric missing
+      row('2026-04-16', 1, { opened: 130 }),
+    ]);
+    const a = sequencePeriodActivity(d.bySequence.get(1)!, 'opened', month(2026, 4));
+    expect(a).toEqual({ state: 'present', value: 30, baselineIncomplete: false, missingMeasurements: true });
+    const t = aggregateActivity(d, 'opened', month(2026, 4));
+    expect(t).toMatchObject({ state: 'present', incomplete: true, issues: { missingMeasurements: 1 } });
   });
 
   it('rates recompute from aggregated totals and never average percentages', () => {
-    const opened = { state: 'present', value: 50, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0 } } as const;
-    const delivered = { state: 'present', value: 1000, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0 } } as const;
+    const opened = { state: 'present', value: 50, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0, missingMeasurements: 0 } } as const;
+    const delivered = { state: 'present', value: 1000, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0, missingMeasurements: 0 } } as const;
     const r = rateFromTotals(opened, delivered);
     expect(r).toMatchObject({ state: 'present', percent: 5 });
   });
 
   it('division by zero yields missing, never Infinity or 0', () => {
-    const num = { state: 'present', value: 5, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0 } } as const;
-    const zeroDen = { state: 'present', value: 0, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0 } } as const;
+    const num = { state: 'present', value: 5, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0, missingMeasurements: 0 } } as const;
+    const zeroDen = { state: 'present', value: 0, incomplete: false, issues: { resets: 0, ambiguousDuplicates: 0, missingBaselines: 0, missingMeasurements: 0 } } as const;
     expect(rateFromTotals(num, zeroDen)).toEqual({ state: 'missing' });
     expect(rateFromTotals({ state: 'missing' }, zeroDen)).toEqual({ state: 'missing' });
   });
@@ -308,7 +355,7 @@ describe('Thursday cadence and completeness', () => {
       row('2026-04-09', 1, { total_sent: 140 }),
     ]);
     const a = sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 4));
-    expect(a).toEqual({ state: 'present', value: 40, baselineIncomplete: false }); // 140-100, not inflated
+    expect(a).toEqual({ state: 'present', value: 40, baselineIncomplete: false, missingMeasurements: false }); // 140-100, not inflated
   });
 
   it('a complete period has every expected Thursday including the final one', () => {
@@ -393,5 +440,179 @@ describe('comparisons — exact calendar periods only', () => {
     const c = compareOutreachActivity(d, 'total_sent', month(2026, 7), 'off');
     expect(c.comparisonPeriod).toBeNull();
     expect(c.comparison).toBeNull();
+  });
+});
+
+describe('intermediate reset detection (consecutive-observation scan)', () => {
+  it('detects a mid-period reset followed by partial recovery', () => {
+    // Baseline 100; drop to 50; recover to 80. End-minus-baseline = -20 would
+    // already be negative here, but the scan flags the 100->50 drop directly.
+    const d = dedupeSnapshots([
+      row('2026-03-26', 1, { total_sent: 100 }),
+      row('2026-04-02', 1, { total_sent: 50 }),
+      row('2026-04-09', 1, { total_sent: 80 }),
+    ]);
+    expect(sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 4))).toEqual({ state: 'reset' });
+  });
+
+  it('detects a mid-period reset even when the counter recovers ABOVE the baseline', () => {
+    // Baseline 100 -> 50 -> 130. End-minus-baseline alone reports +30 and
+    // hides the correction; the consecutive scan must return reset.
+    const d = dedupeSnapshots([
+      row('2026-03-26', 1, { total_sent: 100 }),
+      row('2026-04-02', 1, { total_sent: 50 }),
+      row('2026-04-09', 1, { total_sent: 130 }),
+    ]);
+    expect(sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 4))).toEqual({ state: 'reset' });
+  });
+
+  it('detects an in-period reset for a debut sequence (no pre-period baseline)', () => {
+    const d = dedupeSnapshots([
+      row('2026-04-02', 1, { total_sent: 90 }),
+      row('2026-04-09', 1, { total_sent: 40 }), // drop after debut
+      row('2026-04-16', 1, { total_sent: 120 }),
+    ]);
+    expect(sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 4))).toEqual({ state: 'reset' });
+  });
+
+  it('normal unchanged and increasing sequences stay present', () => {
+    const flat = dedupeSnapshots([
+      row('2026-03-26', 1, { total_sent: 100 }),
+      row('2026-04-02', 1, { total_sent: 100 }),
+      row('2026-04-09', 1, { total_sent: 100 }),
+    ]);
+    expect(sequencePeriodActivity(flat.bySequence.get(1)!, 'total_sent', month(2026, 4))).toEqual({
+      state: 'present', value: 0, baselineIncomplete: false, missingMeasurements: false,
+    });
+    const rising = dedupeSnapshots([
+      row('2026-03-26', 2, { total_sent: 100 }),
+      row('2026-04-02', 2, { total_sent: 130 }),
+      row('2026-04-09', 2, { total_sent: 170 }),
+    ]);
+    expect(sequencePeriodActivity(rising.bySequence.get(2)!, 'total_sent', month(2026, 4))).toEqual({
+      state: 'present', value: 70, baselineIncomplete: false, missingMeasurements: false,
+    });
+  });
+});
+
+describe('required boundary-baseline Thursday', () => {
+  it('all in-period Thursdays present but the required pre-period Thursday missing -> partial', () => {
+    // April 2026 Thursdays: Apr 2, 9, 16, 23, 30. Required boundary baseline:
+    // Thu Mar 26 (immediately before April 1). Feed existed since Mar 19, but
+    // the Mar 26 run is MISSING; only the older Mar 19 snapshot exists. April
+    // must not silently widen its window back to Mar 19.
+    const rows = [
+      row('2026-03-19', 1, { total_sent: 1 }),
+      // 2026-03-26 MISSING (the required boundary baseline)
+      row('2026-04-02', 1, { total_sent: 2 }),
+      row('2026-04-09', 1, { total_sent: 3 }),
+      row('2026-04-16', 1, { total_sent: 4 }),
+      row('2026-04-23', 1, { total_sent: 5 }),
+      row('2026-04-30', 1, { total_sent: 6 }),
+      row('2026-05-07', 1, { total_sent: 7 }),
+    ];
+    const c = assessOutreachCompleteness(rows, month(2026, 4));
+    expect(c.requiredBaselineThursday).toBe('2026-03-26');
+    expect(c.missingBaselineThursday).toBe(true);
+    expect(c.completeness).toBe('partial');
+    expect(c.suppressDelta).toBe(true);
+    expect(c.missingThursdays).toEqual([]); // every in-period Thursday IS present
+  });
+
+  it('a Wednesday snapshot near the boundary does not substitute for the required Thursday', () => {
+    const rows = [
+      row('2026-03-19', 1, { total_sent: 1 }),
+      row('2026-03-25', 1, { total_sent: 1 }), // Wednesday before the boundary
+      // Thursday 2026-03-26 still missing
+      row('2026-04-02', 1, { total_sent: 2 }),
+      row('2026-04-09', 1, { total_sent: 3 }),
+      row('2026-04-16', 1, { total_sent: 4 }),
+      row('2026-04-23', 1, { total_sent: 5 }),
+      row('2026-04-30', 1, { total_sent: 6 }),
+    ];
+    const c = assessOutreachCompleteness(rows, month(2026, 4));
+    expect(c.missingBaselineThursday).toBe(true);
+    expect(c.completeness).toBe('partial');
+  });
+
+  it('the boundary Thursday is not required before the feed existed', () => {
+    // Feed starts Apr 2; the pre-April boundary (Mar 26) predates the feed.
+    const rows = [
+      row('2026-04-02', 1, { total_sent: 2 }),
+      row('2026-04-09', 1, { total_sent: 3 }),
+      row('2026-04-16', 1, { total_sent: 4 }),
+      row('2026-04-23', 1, { total_sent: 5 }),
+      row('2026-04-30', 1, { total_sent: 6 }),
+      row('2026-05-07', 1, { total_sent: 7 }),
+    ];
+    const c = assessOutreachCompleteness(rows, month(2026, 4));
+    expect(c.requiredBaselineThursday).toBeNull();
+    expect(c.missingBaselineThursday).toBe(false);
+    expect(c.completeness).toBe('complete');
+  });
+
+  it('a present boundary Thursday plus all in-period Thursdays is complete', () => {
+    const rows = [
+      row('2026-03-26', 1, { total_sent: 1 }), // required boundary present
+      row('2026-04-02', 1, { total_sent: 2 }),
+      row('2026-04-09', 1, { total_sent: 3 }),
+      row('2026-04-16', 1, { total_sent: 4 }),
+      row('2026-04-23', 1, { total_sent: 5 }),
+      row('2026-04-30', 1, { total_sent: 6 }),
+      row('2026-05-07', 1, { total_sent: 7 }),
+    ];
+    const c = assessOutreachCompleteness(rows, month(2026, 4));
+    expect(c.requiredBaselineThursday).toBe('2026-03-26');
+    expect(c.missingBaselineThursday).toBe(false);
+    expect(c.completeness).toBe('complete');
+  });
+});
+
+describe('ambiguous-duplicate scoping', () => {
+  it('an unrelated May ambiguity does not mark a clean July incomplete', () => {
+    const d = dedupeSnapshots([
+      // May: ambiguous duplicate (changed values, no reliable recency).
+      row('2026-05-07', 2, { replied: 5 }, { created_at: null }),
+      row('2026-05-07', 2, { replied: 9 }, { created_at: null }),
+      // A later valid pre-July observation for seq 2 exists, so the May
+      // ambiguity cannot be July's baseline.
+      row('2026-06-25', 2, { replied: 12 }),
+      row('2026-07-02', 2, { replied: 15 }),
+      row('2026-07-30', 2, { replied: 20 }),
+      // Clean seq 1 in July too.
+      row('2026-06-25', 1, { replied: 100 }),
+      row('2026-07-30', 1, { replied: 130 }),
+    ]);
+    expect(d.ambiguousKeys).toHaveLength(1);
+    const july = aggregateActivity(d, 'replied', month(2026, 7));
+    expect(july).toMatchObject({
+      state: 'present',
+      value: 38, // seq1 +30, seq2 +8 (15->20 in July from 12 baseline? no: baseline 6/25=12, end 7/30=20 -> +8)
+      incomplete: false,
+      issues: { ambiguousDuplicates: 0 },
+    });
+  });
+
+  it('an ambiguity inside the selected period still counts', () => {
+    const d = dedupeSnapshots([
+      row('2026-06-25', 1, { replied: 10 }),
+      row('2026-07-02', 1, { replied: 12 }, { created_at: null }),
+      row('2026-07-02', 1, { replied: 14 }, { created_at: null }), // ambiguous IN July
+      row('2026-07-30', 1, { replied: 20 }),
+    ]);
+    const july = aggregateActivity(d, 'replied', month(2026, 7));
+    expect(july).toMatchObject({ state: 'present', incomplete: true, issues: { ambiguousDuplicates: 1 } });
+  });
+
+  it('a pre-period ambiguity that would have been the baseline counts', () => {
+    const d = dedupeSnapshots([
+      // The ONLY pre-July observation is ambiguous: it would have been July's baseline.
+      row('2026-06-25', 1, { replied: 10 }, { created_at: null }),
+      row('2026-06-25', 1, { replied: 12 }, { created_at: null }),
+      row('2026-07-02', 1, { replied: 15 }),
+      row('2026-07-30', 1, { replied: 20 }),
+    ]);
+    const july = aggregateActivity(d, 'replied', month(2026, 7));
+    expect(july).toMatchObject({ state: 'present', incomplete: true, issues: { ambiguousDuplicates: 1 } });
   });
 });

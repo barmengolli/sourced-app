@@ -129,15 +129,31 @@ March 1 and the last snapshot within March, not exact midnight-to-midnight.
   Later increases from that first snapshot may be counted, but the
   sequence/period is marked incomplete because earlier activity is unknown. A
   zero baseline is never invented.
+- **Metric-specific missing coverage.** A snapshot row can exist while ONE
+  metric's measurement is null (the observed LinkedIn-task break; pre-launch
+  `calls_answered`). A null measurement inside the period marks that metric's
+  result with an explicit missing-measurement state: the known partial value is
+  retained but the metric is incomplete (a trailing null means later activity
+  is unknown; an interior null hides potential resets). Aggregates count these
+  gaps in their issues and are marked incomplete; comparison deltas are
+  suppressed whenever either side's metric coverage is incomplete. Global
+  row-date completeness alone cannot detect this.
 - **Missing-run behavior.** A missing expected Thursday inside or bounding a
-  period widens the diff window silently; the period is flagged incomplete
-  rather than pretending exact coverage.
+  period is flagged (see completeness below); the period is incomplete rather
+  than pretending exact coverage.
 - **Duplicate-run behavior.** Duplicate natural keys are never summed. With a
   reliable recency signal (e.g. `created_at`), the latest row wins; otherwise
-  the key is an ambiguous-duplicate quality issue and the affected metric is
-  not silently resolved.
-- **Reset behavior.** A negative counter difference is a reset/correction
-  state, surfaced explicitly; it is never clamped to zero.
+  the key is an ambiguous-duplicate quality issue. Ambiguity is SCOPED: an
+  ambiguous duplicate affects a period's result only when it falls inside the
+  period or would have served as the affected sequence's baseline; an
+  ambiguity in an unrelated older month does not mark every later period
+  incomplete.
+- **Reset behavior (intermediate detection).** The ordered valid observations
+  from the selected baseline through the period end are scanned pairwise. ANY
+  consecutive decrease is a reset/correction state — including a mid-period
+  drop that later recovers above the baseline (where end-minus-baseline alone
+  would report a plausible positive number). Resets are surfaced explicitly and
+  never clamped to zero.
 - **Missing vs zero.** A missing value stays missing; a measured zero stays a
   zero. (Note the ingest `parseInt||0` caveat above: for ranges with known
   coverage breaks, stored zeros are treated as missing.)
@@ -145,14 +161,23 @@ March 1 and the last snapshot within March, not exact midnight-to-midnight.
   sequence's history.
 - **Data-through and completeness.** The global data-through date is the latest
   `export_date`. The expected cadence is Thursday (America/Denver intent). A
-  period is complete only when its final expected Thursday snapshot exists and
-  every metric has a valid baseline; a current period before its final expected
-  Thursday is partial. Extra Wednesday/manual snapshots do not replace a
-  missing Thursday and must not be double-counted. Partial and missing periods
-  suppress comparison deltas. **Limitation:** this detects a missing final
-  Thursday and missing baselines, but a rerun that never happened mid-period
-  simply widens a diff window; per-week gap detection flags it as incomplete
-  coverage, not as a corrected number.
+  period is complete only when: (1) the **required boundary baseline** — the
+  scheduled Thursday immediately before the period start, when the feed already
+  existed then — has a snapshot; (2) every expected in-period Thursday has a
+  snapshot; and (3) data has reached the period's final expected Thursday. A
+  missing boundary Thursday makes the period partial even when every in-period
+  Thursday is present, because falling back to an older snapshot silently
+  widens the measurement window; no baseline is invented, and a Wednesday
+  snapshot near the boundary does not substitute (any alternative-boundary
+  policy would be an explicit future decision, not an assumption). A current
+  period before its final expected Thursday is partial. Extra Wednesday/manual
+  snapshots never replace a missing Thursday and (because activity is a
+  two-endpoint diff, not a row sum) cannot be double-counted. Partial and
+  missing periods suppress comparison deltas. **Limitation:** missing expected
+  Thursdays (boundary and in-period) are detected and flag the period
+  incomplete; the calculation cannot reconstruct what the missing run would
+  have measured, so gaps surface as incompleteness, never as corrected
+  numbers.
 
 ## Aggregate reconciliation (read-only, deduplicated)
 
