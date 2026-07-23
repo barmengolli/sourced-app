@@ -147,6 +147,9 @@ export interface DedupedSeries {
   // sequence_id -> rows sorted by export_date ascending (one per date)
   bySequence: Map<number, OutreachReportingRow[]>;
   ambiguousKeys: Array<{ export_date: string; sequence_id: number }>;
+  // Global first export_date across all valid rows (the feed's birth date).
+  // Enables the pre-feed boundary exemption in sequencePeriodActivity.
+  feedStart: string | null;
 }
 
 export function dedupeSnapshots(rows: readonly OutreachReportingRow[]): DedupedSeries {
@@ -175,7 +178,14 @@ export function dedupeSnapshots(rows: readonly OutreachReportingRow[]): DedupedS
   for (const arr of bySequence.values()) {
     arr.sort((a, b) => (a.export_date < b.export_date ? -1 : 1));
   }
-  return { bySequence, ambiguousKeys };
+  // Feed birth date: earliest valid export_date across ALL rows (including
+  // ambiguous ones; the run happened even if its values are ambiguous).
+  let feedStart: string | null = null;
+  for (const r of rows) {
+    if (!isValidIsoDate(r.export_date)) continue;
+    if (feedStart === null || r.export_date < feedStart) feedStart = r.export_date;
+  }
+  return { bySequence, ambiguousKeys, feedStart };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,15 +216,41 @@ function counterValue(row: OutreachReportingRow, metric: ActivityCounter): numbe
 //     carries missingMeasurements: true (trailing nulls mean later activity is
 //     unknown; interior nulls hide potential resets). Global row-date
 //     completeness alone cannot see this.
+//   - SEQUENCE-AND-METRIC-LEVEL BOUNDARY BASELINE: when a sequence existed
+//     before the period, its complete baseline must come from the EXACT
+//     scheduled boundary-Thursday row (the Thursday immediately before the
+//     period start) with a NON-NULL measurement for the requested metric. An
+//     older snapshot is never promoted to a complete baseline (it would
+//     silently widen the measurement window); a same-row null for this metric
+//     invalidates only this metric, not others measured on that row. When the
+//     exact boundary is unavailable the result is an explicit
+//     missing_baseline. A sequence that first appears AFTER the boundary
+//     Thursday (debut in the boundary gap or inside the period) keeps the
+//     debut semantics: growth from its first available value counts, flagged
+//     baselineIncomplete. The optional feedStart waives the exact-Thursday
+//     requirement for periods whose boundary predates the feed itself
+//     (pre-feed exemption).
 export function sequencePeriodActivity(
   series: readonly OutreachReportingRow[], // one sequence, sorted ascending
   metric: ActivityCounter,
   period: ReportingPeriod,
+  feedStart?: string, // global first export_date; enables the pre-feed exemption
 ): SequenceActivity {
   const bounds = periodBounds(period);
   if (!bounds) return { state: 'missing' };
 
-  let baseline: number | null = null; // last valid value before period
+  // The exact scheduled boundary-Thursday for this period, and whether it is
+  // waived because the feed did not exist yet at that date.
+  const boundaryThursday = thursdayBefore(bounds.start);
+  const boundaryWaived =
+    boundaryThursday === null ||
+    (feedStart !== undefined && isValidIsoDate(feedStart) && boundaryThursday < feedStart);
+
+  let lastPrePeriodValue: number | null = null; // last non-null value before period (any date)
+  let lastPrePeriodValueDate: string | null = null;
+  let boundaryValue: number | null = null; // non-null value exactly on the boundary Thursday
+  let hasPrePeriodRow = false; // the sequence existed before the period
+  let firstPrePeriodDate: string | null = null;
   let firstInPeriod: number | null = null; // first valid value inside period
   let lastInPeriod: number | null = null; // last valid value inside period
   let inPeriodValueCount = 0; // usable (non-null) in-period observations
@@ -228,7 +264,13 @@ export function sequencePeriodActivity(
     const d = row.export_date;
     const v = counterValue(row, metric);
     if (d < bounds.start) {
-      if (v !== null) baseline = v;
+      hasPrePeriodRow = true;
+      if (firstPrePeriodDate === null) firstPrePeriodDate = d;
+      if (v !== null) {
+        lastPrePeriodValue = v;
+        lastPrePeriodValueDate = d;
+        if (boundaryThursday !== null && d === boundaryThursday) boundaryValue = v;
+      }
     } else if (d <= bounds.end) {
       sawInPeriodRow = true;
       if (v === null) {
@@ -251,6 +293,42 @@ export function sequencePeriodActivity(
     return { state: 'missing' };
   }
 
+  // Resolve the baseline under the exact-boundary rule.
+  //   complete baseline: the boundary-Thursday row's non-null value (or, when
+  //     the boundary requirement is waived pre-feed, the last pre-period value)
+  //   incomplete baseline: the sequence debuted AFTER the boundary Thursday
+  //     (its whole history starts inside the boundary gap), so its last
+  //     pre-period value bounds later growth but earlier activity is unknown
+  //   missing_baseline: the sequence existed on/before the boundary Thursday
+  //     but the exact boundary row/measurement is absent; an older snapshot is
+  //     never promoted to a complete baseline
+  let baseline: number | null = null;
+  let baselineIncomplete = false;
+  if (hasPrePeriodRow) {
+    if (boundaryWaived) {
+      baseline = lastPrePeriodValue; // pre-feed exemption keeps prior behavior
+      if (baseline === null) return { state: 'missing_baseline' };
+    } else if (boundaryValue !== null) {
+      baseline = boundaryValue; // the exact scheduled boundary measurement
+    } else if (
+      firstPrePeriodDate !== null &&
+      boundaryThursday !== null &&
+      firstPrePeriodDate > boundaryThursday &&
+      lastPrePeriodValue !== null &&
+      lastPrePeriodValueDate !== null &&
+      lastPrePeriodValueDate > boundaryThursday
+    ) {
+      // Debut inside the boundary gap: no exact boundary can exist for this
+      // sequence. Later growth counts from its first known value, incomplete.
+      baseline = lastPrePeriodValue;
+      baselineIncomplete = true;
+    } else {
+      // The sequence existed at (or before) the boundary, but the exact
+      // boundary-Thursday measurement for THIS metric is missing.
+      return { state: 'missing_baseline' };
+    }
+  }
+
   // Reset scan: baseline (when present) followed by every valid in-period
   // observation. Any consecutive decrease is a reset/correction, regardless of
   // whether the final value recovered.
@@ -261,11 +339,11 @@ export function sequencePeriodActivity(
 
   if (baseline !== null) {
     const diff = lastInPeriod - baseline;
-    return { state: 'present', value: diff, baselineIncomplete: false, missingMeasurements };
+    return { state: 'present', value: diff, baselineIncomplete, missingMeasurements };
   }
 
-  // No pre-period baseline: the sequence first appears (for this metric)
-  // inside the period. Never invent zero; never count the first snapshot.
+  // No pre-period rows at all: the sequence first appears inside the period.
+  // Never invent zero; never count the first snapshot.
   if (firstInPeriod === null) return { state: 'missing' };
   if (inPeriodValueCount < 2) {
     // Only one usable in-period observation and nothing before it: earlier
@@ -298,7 +376,7 @@ export function aggregateActivity(
   let missingMeasurements = 0;
   let anyBaselineIncomplete = false;
   for (const series of deduped.bySequence.values()) {
-    const a = sequencePeriodActivity(series, metric, period);
+    const a = sequencePeriodActivity(series, metric, period, deduped.feedStart ?? undefined);
     switch (a.state) {
       case 'present':
         sum += a.value;
@@ -582,6 +660,16 @@ export interface OutreachPeriodComparison {
   // null when comparison mode is off or the comparison period is invalid.
   comparison: MetricTotal | null;
   comparisonPeriod: ReportingPeriod | null;
+  // METRIC-LEVEL delta suppression, computed by the shared helper so callers
+  // never re-derive it. True when the comparison mode is off, the comparison
+  // period is invalid/unavailable, or either metric total is missing or
+  // incomplete. False ONLY when both totals are present AND complete.
+  //
+  // Bite 3B must combine this metric-level result with
+  // assessOutreachCompleteness for BOTH calendar periods (schedule-level
+  // coverage) before showing a delta: this flag covers the metric's own data
+  // quality; the completeness assessment covers the Thursday cadence.
+  suppressDelta: boolean;
 }
 
 // Compare a metric between the selected period and its EXACT calendar
@@ -597,5 +685,9 @@ export function compareOutreachActivity(
   const current = aggregateActivity(deduped, metric, period);
   const cmpPeriod = comparisonPeriod(period, mode);
   const comparison = cmpPeriod ? aggregateActivity(deduped, metric, cmpPeriod) : null;
-  return { current, comparison, comparisonPeriod: cmpPeriod };
+  const usable = (t: MetricTotal | null): boolean =>
+    t !== null && t.state === 'present' && !t.incomplete;
+  const suppressDelta =
+    mode === 'off' || cmpPeriod === null || !usable(current) || !usable(comparison);
+  return { current, comparison, comparisonPeriod: cmpPeriod, suppressDelta };
 }

@@ -242,7 +242,7 @@ describe('aggregation and rates', () => {
     });
   });
 
-  it('incomplete metric coverage suppresses comparison deltas (either side)', () => {
+  it('incomplete metric coverage suppresses comparison deltas via the shared flag', () => {
     const d = dedupeSnapshots([
       row('2026-06-25', 1, { linkedin_tasks_completed: 50 }),
       row('2026-07-02', 1, { linkedin_tasks_completed: 60 }),
@@ -251,16 +251,20 @@ describe('aggregation and rates', () => {
       row('2026-07-23', 1, { linkedin_tasks_completed: null }),
     ]);
     const c = compareOutreachActivity(d, 'linkedin_tasks_completed', month(2026, 7), 'previous_period');
-    // Current July is present-but-incomplete: a consumer must suppress the
-    // delta whenever either side is incomplete or non-present.
-    const currentIncomplete = c.current.state !== 'present' || c.current.incomplete;
-    expect(currentIncomplete).toBe(true);
-    const comparisonUnusable =
-      c.comparison === null || c.comparison.state !== 'present' || c.comparison.incomplete;
-    // June comparison: 50 -> 60?? June has 6/25 only (single obs, no May
-    // baseline) -> missing_baseline aggregate -> missing. Either way unusable
-    // for a trustworthy delta.
-    expect(comparisonUnusable).toBe(true);
+    // The shared helper is authoritative: current July is present-but-incomplete
+    // (missing measurements), so the delta is suppressed by the returned flag —
+    // no caller-side derivation.
+    expect(c.suppressDelta).toBe(true);
+  });
+
+  it('suppressDelta is true when comparison mode is off, even with clean data', () => {
+    const d = dedupeSnapshots([
+      row('2026-06-25', 1, { total_sent: 100 }),
+      row('2026-07-02', 1, { total_sent: 120 }),
+      row('2026-07-30', 1, { total_sent: 150 }),
+    ]);
+    const c = compareOutreachActivity(d, 'total_sent', month(2026, 7), 'off');
+    expect(c.suppressDelta).toBe(true);
   });
 
   it('a mid-period null between valid measurements marks the metric incomplete', () => {
@@ -419,8 +423,28 @@ describe('comparisons — exact calendar periods only', () => {
     expect(c.comparisonPeriod).toEqual({ grain: 'month', year: 2026, month: 6 });
     // ...and June has no snapshots, so the comparison is missing, not May's 60.
     expect(c.comparison).toEqual({ state: 'missing' });
-    // July's own activity is still computable (baseline May 28): 200 - 160 = 40.
-    expect(c.current).toMatchObject({ state: 'present', value: 40 });
+    // Under the exact-boundary contract, July's own baseline (the June 25
+    // boundary Thursday) is ALSO missing, so July's current is not silently
+    // computed from the stale May 28 snapshot either: the whole comparison is
+    // suppressed rather than widened.
+    expect(c.current).toEqual({ state: 'missing' });
+    expect(c.suppressDelta).toBe(true);
+  });
+
+  it('a valid exact boundary makes the current period computable and the shared flag authoritative', () => {
+    const withBoundary = [
+      ...rows,
+      row('2026-06-25', 1, { total_sent: 170 }), // July's exact boundary Thursday
+    ];
+    const d = dedupeSnapshots(withBoundary);
+    const c = compareOutreachActivity(d, 'total_sent', month(2026, 7), 'previous_period');
+    // July current: 200 - 170 (exact June 25 boundary) = 30, complete.
+    expect(c.current).toMatchObject({ state: 'present', value: 30, incomplete: false });
+    // June comparison: June's own boundary Thursday is May 28 (present), end
+    // June 25 = 170 -> +10 complete.
+    expect(c.comparison).toMatchObject({ state: 'present', value: 10, incomplete: false });
+    // Both sides present AND complete -> the shared flag permits the delta.
+    expect(c.suppressDelta).toBe(false);
   });
 
   it('previous year compares the same month in the prior year', () => {
@@ -614,5 +638,115 @@ describe('ambiguous-duplicate scoping', () => {
     ]);
     const july = aggregateActivity(d, 'replied', month(2026, 7));
     expect(july).toMatchObject({ state: 'present', incomplete: true, issues: { ambiguousDuplicates: 1 } });
+  });
+});
+
+describe('sequence-and-metric-level boundary baseline', () => {
+  // April 2026's exact boundary Thursday is 2026-03-26.
+
+  it('boundary Thursday exists globally for Sequence A but is missing for Sequence B', () => {
+    const d = dedupeSnapshots([
+      // Sequence A: exact boundary present -> complete April activity.
+      row('2026-03-26', 1, { total_sent: 100 }),
+      row('2026-04-30', 1, { total_sent: 150 }),
+      // Sequence B: existed earlier (Mar 19) but has NO Mar 26 boundary row.
+      row('2026-03-19', 2, { total_sent: 40 }),
+      row('2026-04-30', 2, { total_sent: 90 }),
+    ]);
+    expect(
+      sequencePeriodActivity(d.bySequence.get(1)!, 'total_sent', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 50, baselineIncomplete: false, missingMeasurements: false });
+    // Sequence B must NOT fall back to Mar 19 (window widening): explicit
+    // missing-baseline instead, even though the boundary exists feed-wide.
+    expect(
+      sequencePeriodActivity(d.bySequence.get(2)!, 'total_sent', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'missing_baseline' });
+    // Aggregate counts the gap and stays incomplete without zeroing seq A.
+    expect(aggregateActivity(d, 'total_sent', month(2026, 4))).toMatchObject({
+      state: 'present',
+      value: 50,
+      incomplete: true,
+      issues: { missingBaselines: 1 },
+    });
+  });
+
+  it('boundary row exists for the sequence but the target metric is null; another metric on the same row stays usable', () => {
+    const d = dedupeSnapshots([
+      row('2026-03-19', 3, { total_sent: 90, linkedin_tasks_completed: 10 }),
+      // Boundary row exists, but linkedin is null on it while total_sent is measured.
+      row('2026-03-26', 3, { total_sent: 100, linkedin_tasks_completed: null }),
+      row('2026-04-30', 3, { total_sent: 150, linkedin_tasks_completed: 30 }),
+    ]);
+    // The metric with a null boundary measurement gets missing_baseline (no
+    // fallback to the older Mar 19 value of 10)...
+    expect(
+      sequencePeriodActivity(d.bySequence.get(3)!, 'linkedin_tasks_completed', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'missing_baseline' });
+    // ...while total_sent, measured on the exact boundary row, is complete.
+    expect(
+      sequencePeriodActivity(d.bySequence.get(3)!, 'total_sent', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 50, baselineIncomplete: false, missingMeasurements: false });
+  });
+
+  it('a valid exact boundary produces the expected activity', () => {
+    const d = dedupeSnapshots([
+      row('2026-03-26', 4, { opened: 200 }),
+      row('2026-04-09', 4, { opened: 230 }),
+      row('2026-04-30', 4, { opened: 260 }),
+    ]);
+    expect(
+      sequencePeriodActivity(d.bySequence.get(4)!, 'opened', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 60, baselineIncomplete: false, missingMeasurements: false });
+  });
+
+  it('a genuinely new sequence retains the debut behavior', () => {
+    const d = dedupeSnapshots([
+      // Other feed data proves the feed existed before April.
+      row('2026-03-26', 1, { total_sent: 100 }),
+      row('2026-04-30', 1, { total_sent: 120 }),
+      // Sequence 5 debuts inside April: first snapshot never counted; later
+      // growth counts, baseline-incomplete.
+      row('2026-04-09', 5, { total_sent: 70 }),
+      row('2026-04-30', 5, { total_sent: 95 }),
+    ]);
+    expect(
+      sequencePeriodActivity(d.bySequence.get(5)!, 'total_sent', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 25, baselineIncomplete: true, missingMeasurements: false });
+  });
+
+  it('a sequence debuting inside the boundary gap keeps incomplete-baseline semantics', () => {
+    const d = dedupeSnapshots([
+      row('2026-03-26', 1, { total_sent: 10 }), // feed existed at the boundary
+      row('2026-04-30', 1, { total_sent: 15 }),
+      // Sequence 6's history starts Mar 28 (after the Mar 26 boundary): the
+      // exact boundary cannot exist for it. Later growth counts, incomplete.
+      row('2026-03-28', 6, { total_sent: 50 }),
+      row('2026-04-30', 6, { total_sent: 80 }),
+    ]);
+    expect(
+      sequencePeriodActivity(d.bySequence.get(6)!, 'total_sent', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 30, baselineIncomplete: true, missingMeasurements: false });
+  });
+
+  it('the pre-feed exemption remains intact', () => {
+    // Feed starts Apr 2 (inside April): the Mar 26 boundary predates the feed,
+    // so the exact-boundary requirement is waived; debut semantics apply.
+    const d = dedupeSnapshots([
+      row('2026-04-02', 7, { total_sent: 100 }),
+      row('2026-04-30', 7, { total_sent: 140 }),
+    ]);
+    expect(
+      sequencePeriodActivity(d.bySequence.get(7)!, 'total_sent', month(2026, 4), d.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 40, baselineIncomplete: true, missingMeasurements: false });
+    // And a MAY period on the same feed: May's boundary Thursday (Apr 30) is
+    // on/after the feed start and present, so it is required and satisfied.
+    const withMay = dedupeSnapshots([
+      row('2026-04-02', 7, { total_sent: 100 }),
+      row('2026-04-30', 7, { total_sent: 140 }),
+      row('2026-05-28', 7, { total_sent: 190 }),
+    ]);
+    expect(
+      sequencePeriodActivity(withMay.bySequence.get(7)!, 'total_sent', month(2026, 5), withMay.feedStart ?? undefined),
+    ).toEqual({ state: 'present', value: 50, baselineIncomplete: false, missingMeasurements: false });
   });
 });

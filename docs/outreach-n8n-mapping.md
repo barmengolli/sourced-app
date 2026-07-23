@@ -121,9 +121,21 @@ cumulative snapshots. Note: Thursday snapshots approximate calendar boundaries;
 "March activity" is really activity between the last snapshot on/before
 March 1 and the last snapshot within March, not exact midnight-to-midnight.
 
-- **Baseline behavior.** A period's activity for a sequence requires the last
-  valid snapshot before the period (baseline) and the last valid snapshot
-  inside the period. Activity = end − baseline.
+- **Baseline behavior (exact boundary, per sequence and metric).** A period's
+  complete activity for a sequence requires a baseline taken from the EXACT
+  scheduled boundary-Thursday row (the Thursday immediately before the period
+  start) with a NON-NULL measurement for the requested metric, plus the last
+  valid snapshot inside the period. Activity = end − boundary baseline. An
+  older snapshot is never promoted to a complete baseline — that would
+  silently widen the measurement window even when the boundary Thursday exists
+  for other sequences. The requirement is metric-specific: a null LinkedIn
+  measurement on the boundary row invalidates only LinkedIn, not `total_sent`
+  measured on the same row. When the sequence existed at the boundary but the
+  exact row/measurement is absent, the result is an explicit missing-baseline
+  condition. Exemptions: a sequence whose entire history starts after the
+  boundary Thursday (debut in the boundary gap or inside the period) keeps
+  debut semantics (growth from its first known value, flagged incomplete), and
+  a boundary that predates the feed itself is waived (pre-feed exemption).
 - **Newly appearing sequence.** A sequence's first-ever snapshot is a lifetime
   total, not period activity: it must **never** be counted as "debut volume."
   Later increases from that first snapshot may be counted, but the
@@ -178,6 +190,14 @@ March 1 and the last snapshot within March, not exact midnight-to-midnight.
   incomplete; the calculation cannot reconstruct what the missing run would
   have measured, so gaps surface as incompleteness, never as corrected
   numbers.
+- **Delta suppression (two layers).** The comparison helper returns an
+  authoritative METRIC-LEVEL `suppressDelta`: true when the comparison mode is
+  off, the comparison period is invalid or unavailable, or either metric total
+  is missing or incomplete; false only when both totals are present and
+  complete. **Bite 3B must combine this metric-level flag with
+  `assessOutreachCompleteness` for BOTH calendar periods** (schedule-level
+  Thursday coverage) before showing any delta: the flag covers the metric's
+  own data quality; the completeness assessment covers the run cadence.
 
 ## Aggregate reconciliation (read-only, deduplicated)
 
