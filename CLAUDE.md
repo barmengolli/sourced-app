@@ -36,7 +36,7 @@ Current navigation is defined in `src/constants/sidebar.ts` and routed in
 | Marketing Funnel | Data Entry, Leads & MQLs, Opportunities, Events, Spend, Compare |
 | Reach & Engagement | 6sense Dashboard, Import |
 | BDR Quota | Dashboard, Quotas |
-| Outreach | Data, Dashboard, Compare |
+| Outreach | Data, Dashboard |
 | LinkedIn Ads | Dashboard |
 | Campaigns | Overview, Tags |
 | Utilities | User Manual, Feedback & Bug Reports, Leads, Channels, Funnel Import, Settings |
@@ -144,13 +144,19 @@ alone is not proof of production state.
   schema drift.
 - Outreach uses its own legacy five-region taxonomy inferred from sequence
   names.
-- **The Outreach Dashboard is migrated (Bite 3B):** it uses Month, Quarter,
+- **The Outreach Dashboard is migrated (Bite 3B/3C):** it uses Month, Quarter,
   and Year with Derived activity, exact Thursday baselines, standardized
   Previous period / Previous year / Off comparisons, and combined
-  metric-level + cadence-level delta suppression. Weekly rows are retained
-  only as source/diagnostic detail on the Data tab; the Dashboard has no
-  Week control. The Data and Compare tabs are not yet migrated.
-- The full audited contract, reconciliation, the Bite 3B implementation
+  metric-level + cadence-level delta suppression. It shows a screenshot-ready
+  Sequence performance table (all metrics per sequence; rates recomputed from
+  aggregate counts; Prospects is a point-in-time snapshot, not totaled), and
+  reason-specific data-quality disclosures sourced from the same Bite 3A
+  results (comparison Off never hides them). Weekly rows are retained only as
+  source/diagnostic detail on the Data tab; the Dashboard has no Week control.
+- **Outreach Compare is retired (Bite 3C):** its nav item is removed and the
+  legacy route redirects to the Dashboard; the Compare page source is kept but
+  unrouted. The Data tab is unchanged and not yet migrated.
+- The full audited contract, reconciliation, the Bite 3B/3C implementation
   status, and the future email-variant design are in
   `docs/outreach-n8n-mapping.md`; read it when working on this integration.
 
