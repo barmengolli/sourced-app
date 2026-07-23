@@ -15,7 +15,7 @@ import FunnelSpendPage from './pages/FunnelSpendPage';
 import FunnelVelocityPage from './pages/FunnelVelocityPage';
 import OutreachDataPage from './pages/OutreachDataPage';
 import OutreachDashboardPage from './pages/OutreachDashboardPage';
-import OutreachComparePage from './pages/OutreachComparePage';
+// OutreachComparePage source is retained but no longer routed (Bite 3C).
 import SixSenseDashboardPage from './pages/SixSenseDashboardPage';
 import SixSenseImportPage from './pages/SixSenseImportPage';
 import BdrSection from './pages/BdrSection';
@@ -28,6 +28,7 @@ import type { ComparisonMode, ReportingPeriod } from './types/reporting';
 import type { SixSenseSnapshotInput } from './lib/sixsense';
 import { sectionForPage, SIDEBAR_SECTIONS } from './constants/sidebar';
 import { readJson, writeJson } from './lib/storage';
+import { redirectRetiredPage } from './lib/retiredRoutes';
 import { currentIsoWeek, currentQuarter } from './lib/dates';
 import type { PeriodFilter } from './lib/compute';
 import { REGIONS, type RegionKey } from './constants/regions';
@@ -67,7 +68,7 @@ function initialPage(): PageKey {
   const funnel = SIDEBAR_SECTIONS.find((s) => s.id === 'funnel');
   if (!funnel) return 'funnel-data';
   const last = readJson<PageKey | null>(funnel.lastTabStorageKey, null);
-  if (last && funnel.children.some((c) => c.key === last)) return last;
+  if (last && funnel.children.some((c) => c.key === last)) return redirectRetiredPage(last);
   return funnel.defaultChild;
 }
 
@@ -159,10 +160,11 @@ function PageBody({
       return <FunnelComparePage {...funnelProps} />;
     case 'outreach-data':
       return <OutreachDataPage {...outreachProps} />;
+    // 'outreach-compare' is retired (Bite 3C): redirectRetiredPage normalizes
+    // it to 'outreach-dashboard' in both navigate() and initialPage(), so the
+    // page state never holds the retired key and no route case is needed.
     case 'outreach-dashboard':
       return <OutreachDashboardPage {...outreachProps} />;
-    case 'outreach-compare':
-      return <OutreachComparePage {...outreachProps} />;
     case 'sixsense-dashboard':
       return <SixSenseDashboardPage {...sixSenseProps} />;
     case 'sixsense-import':
@@ -302,7 +304,8 @@ export default function App() {
   // Centralized navigate. Any path to a sub-page (sidebar click, parent
   // click, deep-link from a utility page) flows through here so the
   // "last visited child" record stays consistent.
-  const navigate = useCallback((next: PageKey) => {
+  const navigate = useCallback((requested: PageKey) => {
+    const next = redirectRetiredPage(requested);
     setPage(next);
     const section = sectionForPage(next);
     if (section) {
