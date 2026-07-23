@@ -24,6 +24,7 @@ import {
   periodLabel,
   comparisonLabel,
   previousPeriod,
+  periodBounds,
 } from '../lib/reportingPeriods';
 import {
   dedupeSnapshots,
@@ -203,7 +204,7 @@ export default function OutreachDashboardPage({
     <div className="p-8 space-y-4">
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold text-charcoal">
-          Outreach — Dashboard
+          Outreach Dashboard
         </h1>
         <ReportingBasisDisclosure
           basis="derived_activity"
@@ -249,7 +250,8 @@ export default function OutreachDashboardPage({
                 else next.add(r);
                 onRegionsChange(next);
               }}
-              onClear={() => onRegionsChange(new Set(OUTREACH_REGIONS))}
+              onClear={() => onRegionsChange(new Set())}
+              onSelectAll={() => onRegionsChange(new Set(OUTREACH_REGIONS))}
             />
           </ReportingFilterBar>
         </div>
@@ -299,7 +301,7 @@ export default function OutreachDashboardPage({
             />
             <EngagementFunnelCard deduped={deduped} period={period} />
             <SequenceRankingsCard deduped={deduped} period={period} />
-            <ActivityHeatmapCard deduped={deduped} period={period} />
+            <ActivityHeatmapCard deduped={deduped} period={period} feedRows={reportingRows} />
           </div>
         </>
       )}
@@ -480,6 +482,10 @@ function RegionPerformanceCard({
                 {metrics.map(({ key, label, direction, cmp }) => {
                   const suppress = cmp.suppressDelta || cadenceSuppress;
                   const cur = cmp.current;
+                  // Present-but-incomplete keeps the safe-known value with a
+                  // visible/accessible marker; its delta stays suppressed
+                  // (cmp.suppressDelta is already true for incomplete totals).
+                  const incomplete = cur.state === 'present' && cur.incomplete;
                   const delta =
                     !suppress && cur.state === 'present' && cmp.comparison?.state === 'present'
                       ? computeDelta(
@@ -492,8 +498,16 @@ function RegionPerformanceCard({
                     <div key={key} className="flex items-center justify-between py-2 gap-2">
                       <span className="text-xs text-slate-muted">{label}</span>
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-charcoal tabular-nums">
+                        <span
+                          className="text-sm font-semibold text-charcoal tabular-nums"
+                          data-incomplete={incomplete ? 'true' : undefined}
+                        >
                           {totalText(cur)}
+                          {incomplete && (
+                            <span aria-label="incomplete data" title="Incomplete data: safe-known value">
+                              *
+                            </span>
+                          )}
                         </span>
                         {delta && <DeltaDisplay result={delta} format={{ kind: 'number' }} />}
                       </div>
@@ -504,6 +518,11 @@ function RegionPerformanceCard({
             </div>
           ))}
         </div>
+      )}
+      {data.some((d) => d.metrics.some((m) => m.cmp.current.state === 'present' && m.cmp.current.incomplete)) && (
+        <p className="mt-2 text-[10px] text-slate-muted" data-testid="region-incomplete-legend">
+          * incomplete data
+        </p>
       )}
     </div>
   );
@@ -556,7 +575,9 @@ function EngagementFunnelCard({
     });
   }, [deduped, period]);
 
-  const hasData = stages.some((s) => s.value !== null && s.value > 0);
+  // Measured data exists when ANY stage total is present, even at a measured
+  // zero. "No data" is reserved for every stage being genuinely missing.
+  const hasData = stages.some((s) => s.value !== null);
 
   return (
     <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-funnel">
@@ -620,8 +641,46 @@ interface RankedSequence {
   display: string;
 }
 
-function seqActivityValue(a: SequenceActivity): number | null {
-  return a.state === 'present' ? a.value : null;
+// The sequence's name and enabled status AS OF the selected period end: taken
+// from the latest snapshot on or before the period's end. Never reads a future
+// snapshot; a rename never splits history (identity stays sequence_id).
+function statusAsOfPeriodEnd(
+  series: readonly OutreachReportingRow[],
+  period: ReportingPeriod,
+): { name: string; enabled: boolean } {
+  const bounds = periodBounds(period);
+  let name = series.length ? series[0].sequence_name : '';
+  let enabled = false;
+  for (const row of series) {
+    if (bounds && row.export_date > bounds.end) break; // no future leakage
+    name = row.sequence_name;
+    enabled = row.enabled ?? false;
+  }
+  return { name, enabled };
+}
+
+// A ranking-grade activity value: only a fully trustworthy 'present' result
+// qualifies. present-with-baselineIncomplete (unknown pre-debut activity) and
+// present-with-missingMeasurements (metric coverage gaps) are still incomplete
+// and are excluded as data-quality issues, alongside reset and
+// missing_baseline. A plain 'missing' (no rows) is simply inactive-for-period.
+type RankEligibility =
+  | { kind: 'ranked'; value: number }
+  | { kind: 'excluded' } // data-quality exclusion (counted visibly)
+  | { kind: 'inactive' }; // nothing to rank; not a quality issue
+
+function rankEligibility(a: SequenceActivity): RankEligibility {
+  switch (a.state) {
+    case 'present':
+      if (a.baselineIncomplete || a.missingMeasurements) return { kind: 'excluded' };
+      return { kind: 'ranked', value: a.value };
+    case 'missing':
+      return { kind: 'inactive' };
+    case 'reset':
+    case 'missing_baseline':
+    case 'ambiguous_duplicate':
+      return { kind: 'excluded' };
+  }
 }
 
 function SequenceRankingsCard({
@@ -638,34 +697,39 @@ function SequenceRankingsCard({
     const out: RankedSequence[] = [];
     let excludedCount = 0;
     for (const [id, series] of deduped.bySequence) {
-      const name = series.length ? series[series.length - 1].sequence_name : String(id);
+      const status = statusAsOfPeriodEnd(series, period);
+      // Disabled sequences are inactive, omitted without inflating the
+      // data-quality exclusion count.
+      if (!status.enabled) continue;
       if (metric.kind === 'count') {
-        const a = sequencePeriodActivity(series, metric.counter, period, deduped.feedStart ?? undefined);
-        const v = seqActivityValue(a);
-        if (v === null) {
-          // reset / missing / missing_baseline: excluded, never ranked as zero
-          if (a.state !== 'missing') excludedCount += 1;
+        const e = rankEligibility(
+          sequencePeriodActivity(series, metric.counter, period, deduped.feedStart ?? undefined),
+        );
+        if (e.kind === 'excluded') {
+          excludedCount += 1;
           continue;
         }
-        out.push({ sequence_id: id, name, value: v, display: v.toLocaleString() });
+        if (e.kind === 'inactive') continue;
+        out.push({ sequence_id: id, name: status.name, value: e.value, display: e.value.toLocaleString() });
       } else {
-        const num = sequencePeriodActivity(series, metric.num, period, deduped.feedStart ?? undefined);
-        const den = sequencePeriodActivity(series, metric.den, period, deduped.feedStart ?? undefined);
-        const nv = seqActivityValue(num);
-        const dv = seqActivityValue(den);
-        if (nv === null || dv === null) {
-          if (num.state === 'reset' || den.state === 'reset' || num.state === 'missing_baseline' || den.state === 'missing_baseline') {
-            excludedCount += 1;
-          }
+        const num = rankEligibility(
+          sequencePeriodActivity(series, metric.num, period, deduped.feedStart ?? undefined),
+        );
+        const den = rankEligibility(
+          sequencePeriodActivity(series, metric.den, period, deduped.feedStart ?? undefined),
+        );
+        if (num.kind === 'excluded' || den.kind === 'excluded') {
+          excludedCount += 1;
           continue;
         }
+        if (num.kind === 'inactive' || den.kind === 'inactive') continue;
         // Meaningful rates need real delivery volume in the period.
-        if (dv <= 10) continue;
+        if (den.value <= 10) continue;
         out.push({
           sequence_id: id,
-          name,
-          value: nv / dv,
-          display: `${((nv / dv) * 100).toFixed(1)}%`,
+          name: status.name,
+          value: num.value / den.value,
+          display: `${((num.value / den.value) * 100).toFixed(1)}%`,
         });
       }
     }
@@ -807,12 +871,27 @@ function rollingPeriods(period: ReportingPeriod, count: number): ReportingPeriod
 function ActivityHeatmapCard({
   deduped,
   period,
+  feedRows,
 }: {
   deduped: DedupedSeries;
   period: ReportingPeriod;
+  // The FULL normalized feed, for cadence assessment: a globally missed
+  // Thursday makes a column partial regardless of which sequences are shown.
+  feedRows: readonly OutreachReportingRow[];
 }) {
   const [metric, setMetric] = useState<ActivityCounter>('total_sent');
   const windowPeriods = useMemo(() => rollingPeriods(period, 5), [period]);
+
+  // Per-column Thursday-cadence completeness on the full feed.
+  const columnCadence = useMemo(
+    () =>
+      windowPeriods.map((p) => ({
+        period: p,
+        label: periodLabel(p),
+        completeness: assessOutreachCompleteness(feedRows, p).completeness,
+      })),
+    [windowPeriods, feedRows],
+  );
 
   const { rows, maxVal } = useMemo(() => {
     const out: {
@@ -821,7 +900,7 @@ function ActivityHeatmapCard({
       cells: { key: string; label: string; activity: SequenceActivity }[];
     }[] = [];
     for (const [id, series] of deduped.bySequence) {
-      const name = series.length ? series[series.length - 1].sequence_name : String(id);
+      const name = statusAsOfPeriodEnd(series, period).name;
       const cells = windowPeriods.map((p) => ({
         key: periodLabel(p),
         label: periodLabel(p),
@@ -843,7 +922,7 @@ function ActivityHeatmapCard({
       0,
     );
     return { rows: out, maxVal: max || 1 };
-  }, [deduped, windowPeriods, metric]);
+  }, [deduped, windowPeriods, metric, period]);
 
   return (
     <div className="bg-white rounded-lg border border-border shadow-sm p-4" data-testid="outreach-heatmap">
@@ -876,9 +955,21 @@ function ActivityHeatmapCard({
                   <th className="text-left px-2 py-1 text-slate-muted font-medium min-w-[180px]">
                     Sequence
                   </th>
-                  {windowPeriods.map((p) => (
-                    <th key={periodLabel(p)} className="text-center px-1 py-1 text-slate-muted font-medium w-14">
-                      {periodLabel(p)}
+                  {columnCadence.map((col) => (
+                    <th
+                      key={col.label}
+                      className="text-center px-1 py-1 text-slate-muted font-medium w-14"
+                      title={
+                        col.completeness === 'complete'
+                          ? `${col.label}: complete Thursday coverage`
+                          : col.completeness === 'partial'
+                            ? `${col.label}: partial period (a scheduled Thursday run is missing); values are safe-known, not complete totals`
+                            : `${col.label}: no snapshots in this period`
+                      }
+                      data-cadence={col.completeness}
+                    >
+                      {col.label}
+                      {col.completeness !== 'complete' ? '†' : ''}
                     </th>
                   ))}
                 </tr>
@@ -889,8 +980,14 @@ function ActivityHeatmapCard({
                     <td className="px-2 py-1 text-charcoal font-medium truncate max-w-[220px]" title={seq.name}>
                       {seq.name}
                     </td>
-                    {seq.cells.map((cell) => (
-                      <HeatCell key={cell.key} cell={cell} seqName={seq.name} maxVal={maxVal} />
+                    {seq.cells.map((cell, ci) => (
+                      <HeatCell
+                        key={cell.key}
+                        cell={cell}
+                        seqName={seq.name}
+                        maxVal={maxVal}
+                        columnPartial={columnCadence[ci]?.completeness !== 'complete'}
+                      />
                     ))}
                   </tr>
                 ))}
@@ -898,7 +995,7 @@ function ActivityHeatmapCard({
             </table>
           </div>
           <div className="flex items-center gap-3 mt-3 justify-end text-[9px] text-slate-muted">
-            <span>· = incomplete/reset, blank = missing</span>
+            <span>† = partial period cadence, * = incomplete value, · = reset/no baseline, blank = missing</span>
             <span>Low</span>
             <div className="flex gap-0.5">
               {[0.1, 0.3, 0.5, 0.7, 0.9].map((t) => (
@@ -914,16 +1011,20 @@ function ActivityHeatmapCard({
 }
 
 // One heatmap cell. A measured value (even zero) gets a heat tint and number;
-// reset/missing-baseline/incomplete cells show a distinct dot marker; missing
-// cells are blank. Missing is never rendered as a zero.
+// reset/missing-baseline cells show a distinct dot marker; missing cells are
+// blank. Missing is never rendered as a zero. A cell in a column whose global
+// Thursday cadence is partial keeps its safe-known value but is labeled
+// partial (never presented as a complete total).
 function HeatCell({
   cell,
   seqName,
   maxVal,
+  columnPartial,
 }: {
   cell: { key: string; label: string; activity: SequenceActivity };
   seqName: string;
   maxVal: number;
+  columnPartial: boolean;
 }) {
   const a = cell.activity;
   if (a.state === 'missing') {
@@ -951,13 +1052,20 @@ function HeatCell({
   const intensity = a.value / maxVal;
   const bg = heatColor(intensity);
   const text = intensity > 0.55 ? '#FFFFFF' : '#0F172A';
-  const suffix = a.baselineIncomplete || a.missingMeasurements ? '*' : '';
+  const valueIncomplete = a.baselineIncomplete || a.missingMeasurements;
+  const partial = columnPartial || valueIncomplete;
+  const suffix = valueIncomplete ? '*' : columnPartial ? '†' : '';
+  const titleNote = valueIncomplete
+    ? ' (incomplete)'
+    : columnPartial
+      ? ' (partial period: safe-known value, not a complete total)'
+      : '';
   return (
-    <td className="px-1 py-1 text-center" data-state="present">
+    <td className="px-1 py-1 text-center" data-state="present" data-partial={partial ? 'true' : 'false'}>
       <div
         className="rounded px-1 py-0.5 text-[9px] font-medium tabular-nums"
         style={{ backgroundColor: bg, color: text }}
-        title={`${seqName} — ${cell.label}: ${a.value.toLocaleString()}${suffix ? ' (incomplete)' : ''}`}
+        title={`${seqName} — ${cell.label}: ${a.value.toLocaleString()}${titleNote}`}
       >
         {a.value.toLocaleString()}
         {suffix}

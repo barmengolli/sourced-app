@@ -337,3 +337,136 @@ describe('filters apply identically to both periods', () => {
     expect(sent.textContent).not.toContain('5,050');
   });
 });
+
+describe('rankings eligibility (hardening)', () => {
+  const july = { grain: 'month', year: 2026, month: 7 } as const;
+
+  it('excludes a debut sequence (baselineIncomplete) with a visible count', async () => {
+    const user = userEvent.setup();
+    // Debut inside July: measurable growth but unknown pre-debut activity.
+    const debut = ['2026-07-02', '2026-07-30'].map((d, i) =>
+      snap({ export_date: d, sequence_id: 5, sequence_name: '[2026] - NA - Debut', outbound_calls: 30 + i * 20, created_at: `${d}T08:00:00Z` }),
+    );
+    render(<Harness initialSnapshots={[...fullSummer(), ...debut]} initialPeriod={july} />);
+    const rankings = screen.getByTestId('outreach-rankings');
+    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
+    expect(within(rankings).getByTestId('outreach-rankings-excluded').textContent).toContain('1 sequence excluded');
+    expect(within(rankings).queryByText('[2026] - NA - Debut')).toBeNull();
+  });
+
+  it('excludes a sequence with missingMeasurements with a visible count', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
+    const rankings = screen.getByTestId('outreach-rankings');
+    // LinkedIn Tasks: the adapter nulls 7/16+7/23, so seq 1's July linkedin is
+    // present-with-missingMeasurements -> excluded, never ranked.
+    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '4');
+    expect(within(rankings).getByTestId('outreach-rankings-excluded').textContent).toContain('1 sequence excluded');
+    expect(within(rankings).getByText('No sequences with enough data')).toBeTruthy();
+  });
+
+  it('omits a disabled sequence as inactive without counting it as a quality exclusion', async () => {
+    const user = userEvent.setup();
+    const disabled = fullSummer(6, '[2026] - NA - Disabled').map((s) => ({ ...s, enabled: false }));
+    render(<Harness initialSnapshots={[...fullSummer(), ...disabled]} initialPeriod={july} />);
+    const rankings = screen.getByTestId('outreach-rankings');
+    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
+    expect(within(rankings).queryByText('[2026] - NA - Disabled')).toBeNull();
+    // No data-quality exclusion note: disabled is inactive, not a quality issue.
+    expect(within(rankings).queryByTestId('outreach-rankings-excluded')).toBeNull();
+  });
+
+  it('keeps a fully measured enabled sequence ranked', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={july} />);
+    const rankings = screen.getByTestId('outreach-rankings');
+    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
+    expect(within(rankings).getByText('[2026] - NA - Seq A')).toBeTruthy();
+  });
+
+  it('resolves name and enabled status as of the selected period end (no future leakage)', async () => {
+    const user = userEvent.setup();
+    // Enabled + old name through July; renamed AND disabled in an August row.
+    const renamedLater = [
+      ...fullSummer(7, '[2026] - NA - Old Name'),
+      snap({ export_date: '2026-08-06', sequence_id: 7, sequence_name: '[2026] - NA - New Name', enabled: false, outbound_calls: 999, created_at: '2026-08-06T08:00:00Z' }),
+    ];
+    render(<Harness initialSnapshots={renamedLater} initialPeriod={july} />);
+    const rankings = screen.getByTestId('outreach-rankings');
+    await user.selectOptions(within(rankings).getByRole('combobox', { name: 'Ranking metric' }), '3');
+    // As of July's end the sequence was enabled and named Old Name: it ranks
+    // under the old name; the future August rename/disable does not leak back.
+    expect(within(rankings).getByText('[2026] - NA - Old Name')).toBeTruthy();
+    expect(within(rankings).queryByText('[2026] - NA - New Name')).toBeNull();
+  });
+});
+
+describe('funnel measured zero (hardening)', () => {
+  it('renders a fully measured zero-activity period as zeros, not No data', () => {
+    // Flat counters: every July diff is a measured 0 with complete baselines.
+    const flat = ['2026-05-28', '2026-06-04', '2026-06-11', '2026-06-18', '2026-06-25', '2026-07-02', '2026-07-09', '2026-07-16', '2026-07-23', '2026-07-30'].map((d) =>
+      snap({ export_date: d, sequence_id: 8, sequence_name: '[2026] - NA - Flat', total_sent: 400, delivered: 380, opened: 100, clicked: 30, replied: 10, created_at: `${d}T08:00:00Z` }),
+    );
+    render(<Harness initialSnapshots={flat} initialPeriod={{ grain: 'month', year: 2026, month: 7 }} />);
+    const funnel = screen.getByTestId('outreach-funnel');
+    expect(within(funnel).queryByText('No data')).toBeNull();
+    // Measured zeros render as 0 (five stages).
+    expect(within(funnel).getAllByText('0').length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('heatmap cadence (hardening)', () => {
+  it('marks a period with a missing intermediate Thursday as partial, not fully complete', () => {
+    // June is missing the 6/11 Thursday: valid endpoints exist, but the cadence
+    // is broken. The June column and its measured cells must carry partial
+    // markers instead of appearing fully complete.
+    const gappyJune = fullSummer().filter((s) => s.export_date !== '2026-06-11');
+    render(<Harness initialSnapshots={gappyJune} initialPeriod={{ grain: 'month', year: 2026, month: 7 }} />);
+    const heatmap = screen.getByTestId('outreach-heatmap');
+    const juneHeader = within(heatmap).getByText(/June 2026†/);
+    expect(juneHeader).toBeTruthy();
+    // June's measured cell is present but flagged partial (data-partial=true).
+    const partialCells = heatmap.querySelectorAll('td[data-state="present"][data-partial="true"]');
+    expect(partialCells.length).toBeGreaterThan(0);
+    // July (complete cadence) headers carry no dagger.
+    expect(within(heatmap).getByText('July 2026').textContent).not.toContain('†');
+  });
+});
+
+describe('region incomplete marker (hardening)', () => {
+  it('shows the safe-known value with a * marker and legend when a regional metric is incomplete', () => {
+    // LinkedIn July for seq 1 is present-but-incomplete (adapter gap nulls).
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={{ grain: 'month', year: 2026, month: 7 }} />);
+    const card = screen.getByTestId('outreach-region-performance');
+    // Safe-known value retained with an accessible incomplete marker.
+    expect(within(card).getAllByLabelText('incomplete data').length).toBeGreaterThan(0);
+    expect(within(card).getByTestId('region-incomplete-legend').textContent).toContain('* incomplete data');
+    // Its delta is suppressed (no delta chips inside the card for linkedin).
+    // (Cadence is complete here, so any rendered deltas belong to complete metrics.)
+  });
+});
+
+describe('region Clear/All control (hardening)', () => {
+  it('says Clear when all regions are selected and clears them', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={{ grain: 'month', year: 2026, month: 7 }} />);
+    // All regions start selected -> button reads Clear.
+    const clearBtn = screen.getByRole('button', { name: 'Clear Region' });
+    expect(clearBtn.textContent).toBe('Clear');
+    await user.click(clearBtn);
+    // All chips now unpressed and the control flips to All.
+    expect(screen.getByRole('button', { name: 'NA', pressed: false })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Select all Region' }).textContent).toBe('All');
+  });
+
+  it('says All when not all regions are selected and selects them all', async () => {
+    const user = userEvent.setup();
+    render(<Harness initialSnapshots={fullSummer()} initialPeriod={{ grain: 'month', year: 2026, month: 7 }} />);
+    // Deselect one region -> control flips to All.
+    await user.click(screen.getByRole('button', { name: 'EMEA', pressed: true }));
+    const allBtn = screen.getByRole('button', { name: 'Select all Region' });
+    expect(allBtn.textContent).toBe('All');
+    await user.click(allBtn);
+    expect(screen.getByRole('button', { name: 'EMEA', pressed: true })).toBeTruthy();
+  });
+});

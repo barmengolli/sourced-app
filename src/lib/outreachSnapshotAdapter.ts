@@ -52,6 +52,7 @@ export function toOutreachReportingRow(s: OutreachSnapshot): OutreachReportingRo
     sequence_id: s.sequence_id,
     sequence_name: s.sequence_name,
     created_at: s.created_at,
+    enabled: s.enabled,
     counters,
   };
 }

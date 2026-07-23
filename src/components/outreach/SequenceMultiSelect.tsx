@@ -5,6 +5,12 @@
 // "All Sequences" when filtering.
 
 import { useEffect, useRef, useState } from 'react';
+import {
+  CONTROL_BASE,
+  RADIUS_CONTROL,
+  FOCUS_RING,
+  STATE_INACTIVE,
+} from '../reporting/controlStyles';
 
 interface SequenceMultiSelectProps {
   sequences: { id: number; name: string }[];
@@ -57,7 +63,15 @@ export default function SequenceMultiSelect({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 border border-border rounded px-2.5 py-1 text-xs bg-bg hover:border-charcoal/30 focus:outline-none focus:ring-2 focus:ring-indigo/30 min-w-[160px] max-w-[280px]"
+        // Shared reporting-control styling: 32px height, 6px radius, shared
+        // border/focus/text tokens (CLAUDE.md section 5).
+        className={[
+          CONTROL_BASE,
+          RADIUS_CONTROL,
+          FOCUS_RING,
+          STATE_INACTIVE,
+          'gap-1.5 px-3 min-w-[160px] max-w-[280px] justify-between',
+        ].join(' ')}
       >
         <span className="truncate text-charcoal">{label}</span>
         <svg

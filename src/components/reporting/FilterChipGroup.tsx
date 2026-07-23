@@ -20,6 +20,12 @@ interface FilterChipGroupProps<T extends string> {
   selected: ReadonlyArray<T>;
   onToggle: (value: T) => void;
   onClear?: () => void;
+  // Optional Clear/All toggle mode: when provided together with onClear, the
+  // reset control switches between "Clear" (all chips selected -> clears via
+  // onClear) and "All" (some deselected -> selects all via onSelectAll), so it
+  // always has a visible effect. Without it, the original Clear-only behavior
+  // is unchanged.
+  onSelectAll?: () => void;
   showLabel?: boolean;
 }
 
@@ -29,10 +35,12 @@ export default function FilterChipGroup<T extends string>({
   selected,
   onToggle,
   onClear,
+  onSelectAll,
   showLabel = true,
 }: FilterChipGroupProps<T>) {
   const selectedSet = new Set(selected);
   const anySelected = selected.length > 0;
+  const allSelected = chips.length > 0 && chips.every((c) => selectedSet.has(c.value));
 
   return (
     <div className="inline-flex flex-col gap-1">
@@ -61,7 +69,17 @@ export default function FilterChipGroup<T extends string>({
             </button>
           );
         })}
-        {onClear ? (
+        {onClear && onSelectAll ? (
+          // Clear/All toggle mode: always actionable.
+          <button
+            type="button"
+            onClick={allSelected ? onClear : onSelectAll}
+            aria-label={allSelected ? `Clear ${label}` : `Select all ${label}`}
+            className={[CONTROL_BASE, RADIUS_CONTROL, FOCUS_RING, 'px-3', STATE_INACTIVE].join(' ')}
+          >
+            {allSelected ? 'Clear' : 'All'}
+          </button>
+        ) : onClear ? (
           <button
             type="button"
             onClick={onClear}

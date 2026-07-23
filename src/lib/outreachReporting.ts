@@ -65,6 +65,10 @@ export interface OutreachReportingRow {
   sequence_id: number;
   sequence_name: string;
   created_at: string | null;
+  // Point-in-time sequence status at this snapshot (optional; presentation
+  // concerns like ranking eligibility read it as-of a period end). Not an
+  // activity counter and never differenced.
+  enabled?: boolean;
   counters: Partial<Record<ActivityCounter, number | null>>;
 }
 
