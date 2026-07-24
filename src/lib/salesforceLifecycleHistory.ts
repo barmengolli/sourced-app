@@ -58,7 +58,16 @@ export interface SalesforceHistoryRow {
 // 'out_of_scope' marks real org values beyond Lead/MQL (deal-side stages);
 // rows moving INTO them are counted but produce no lifecycle event, because
 // HPP and later stages are tracked in attributions, not lead lifecycle.
-export type LifecycleValueMapping = StageKey | 'out_of_scope';
+//
+// Deliberately a closed literal union rather than StageKey-based: only lead,
+// mql, and out_of_scope are legal here. Deal stages (hpp, opp, pursuit,
+// closeWon, closeLost) must never become lead-lifecycle events, even if the
+// application's stage types widen later. Runtime configuration (for example
+// JSON-loaded) is re-validated in the adapter and rejected as invalid_config
+// when it carries any other value.
+export type LifecycleValueMapping = 'lead' | 'mql' | 'out_of_scope';
+
+const LEGAL_MAPPINGS: ReadonlySet<string> = new Set(['lead', 'mql', 'out_of_scope']);
 
 export interface LifecycleHistoryConfig {
   // Verified API name of the lifecycle field. Rows for any other field are
@@ -97,7 +106,9 @@ export interface PersonSupportingDates {
 
 export type HistoryIssueKind =
   | 'invalid_config'
-  | 'duplicate_history_id'
+  | 'invalid_source_row'
+  | 'invalid_history_timestamp'
+  | 'conflicting_duplicate_history_id'
   | 'unknown_lifecycle_value'
   | 'blank_lifecycle_value'
   | 'out_of_scope_transition'
@@ -105,7 +116,8 @@ export type HistoryIssueKind =
   | 'history_continuity_gap'
   | 'incomplete_historical_baseline'
   | 'supporting_dates_reversed'
-  | 'supporting_mql_date_without_history';
+  | 'supporting_mql_date_without_history'
+  | 'invalid_supporting_date';
 
 export interface HistoryIssue {
   kind: HistoryIssueKind;
@@ -156,6 +168,31 @@ function pushIssue(issues: HistoryIssue[], kind: HistoryIssueKind, count = 1): v
 // Adapter
 // ---------------------------------------------------------------------------
 
+// A Salesforce/ISO timestamp with a real calendar date and a sane time part.
+// Accepts a date-only value or a 'T'-separated time with optional fractional
+// seconds and offset. Anything else is malformed and can never become a
+// confirmed lifecycle date.
+const TIME_PART = /^T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+function isValidHistoryTimestamp(value: string): boolean {
+  if (!isValidIsoDate(value.slice(0, 10))) return false;
+  const rest = value.slice(10);
+  return rest === '' || TIME_PART.test(rest);
+}
+
+// Two rows with the same historyId are an exact (safe) duplicate only when
+// every relevant field matches.
+function sameRowContent(a: SalesforceHistoryRow, b: SalesforceHistoryRow): boolean {
+  return (
+    a.parentId === b.parentId &&
+    a.parentObject === b.parentObject &&
+    a.field === b.field &&
+    a.oldValue === b.oldValue &&
+    a.newValue === b.newValue &&
+    a.changedAt === b.changedAt
+  );
+}
+
 type MappedValue = { kind: 'stage'; stage: StageKey } | { kind: 'out_of_scope' } | { kind: 'blank' } | { kind: 'unknown' };
 
 function mapValue(value: string | null, config: LifecycleHistoryConfig): MappedValue {
@@ -178,34 +215,71 @@ export function adaptLifecycleHistory(
   const issues: HistoryIssue[] = [];
   const review: HistoryReviewItem[] = [];
 
-  if (!config.lifecycleFieldApiName.trim()) {
-    return {
-      state: 'invalid',
-      persons: [],
-      lifecycles: [],
-      review,
-      duplicatesIgnored: 0,
-      otherFieldRowsIgnored: 0,
-      outOfScopeRowsIgnored: 0,
-      unchangedRowsIgnored: 0,
-      issues: [{ kind: 'invalid_config', count: 1 }],
-      historyAvailableSince: config.historyAvailableSince,
-    };
+  const invalidResult = (): HistoryAdapterResult => ({
+    state: 'invalid',
+    persons: [],
+    lifecycles: [],
+    review,
+    duplicatesIgnored: 0,
+    otherFieldRowsIgnored: 0,
+    outOfScopeRowsIgnored: 0,
+    unchangedRowsIgnored: 0,
+    issues: [{ kind: 'invalid_config', count: 1 }],
+    historyAvailableSince: config.historyAvailableSince,
+  });
+
+  // Configuration is validated before any record is processed. A blank field
+  // name, an illegal stage mapping (deal stages can never become
+  // lead-lifecycle events, even via untyped JSON-loaded config), or a
+  // malformed coverage date rejects the whole run as invalid_config.
+  if (!config.lifecycleFieldApiName.trim()) return invalidResult();
+  for (const mapped of Object.values(config.stageValueMap)) {
+    if (!LEGAL_MAPPINGS.has(mapped)) return invalidResult();
+  }
+  if (config.historyAvailableSince !== null && !isValidIsoDate(config.historyAvailableSince)) {
+    return invalidResult();
   }
 
-  // 1. Idempotency: the history-record Id deduplicates before anything else.
-  const seenIds = new Set<string>();
-  let duplicatesIgnored = 0;
-  const unique: SalesforceHistoryRow[] = [];
+  // 1. Source-row validation. A malformed row is reviewed, never guessed: an
+  // invalid timestamp must never surface as a salesforce_confirmed event, and
+  // the current date is never substituted.
+  const wellFormed: SalesforceHistoryRow[] = [];
   for (const row of rows) {
-    if (seenIds.has(row.historyId)) {
-      duplicatesIgnored += 1;
+    if (!row.historyId.trim() || !row.parentId.trim()) {
+      pushIssue(issues, 'invalid_source_row');
+      review.push({ reason: 'invalid_source_row', historyId: row.historyId.trim() || undefined });
       continue;
     }
-    seenIds.add(row.historyId);
-    unique.push(row);
+    if (!isValidHistoryTimestamp(row.changedAt)) {
+      pushIssue(issues, 'invalid_history_timestamp');
+      review.push({ reason: 'invalid_history_timestamp', historyId: row.historyId });
+      continue;
+    }
+    wellFormed.push(row);
   }
-  if (duplicatesIgnored > 0) pushIssue(issues, 'duplicate_history_id', duplicatesIgnored);
+
+  // 2. Idempotency: the history-record Id deduplicates before anything else.
+  // An exact repeat cannot change the result, so it is only counted
+  // (informational, does not degrade state). Rows sharing an Id with
+  // DIFFERENT content are a conflict: no version is trusted, the Id is
+  // routed to review, and no event is emitted for it.
+  const byId = new Map<string, SalesforceHistoryRow[]>();
+  for (const row of wellFormed) {
+    if (!byId.has(row.historyId)) byId.set(row.historyId, []);
+    byId.get(row.historyId)!.push(row);
+  }
+  let duplicatesIgnored = 0;
+  const unique: SalesforceHistoryRow[] = [];
+  for (const [historyId, group] of byId) {
+    const first = group[0];
+    if (!group.every((r) => sameRowContent(r, first))) {
+      pushIssue(issues, 'conflicting_duplicate_history_id');
+      review.push({ reason: 'conflicting_duplicate_history_id', historyId });
+      continue;
+    }
+    duplicatesIgnored += group.length - 1;
+    unique.push(first);
+  }
 
   // 2. Keep only lifecycle-field rows; other tracked fields are not errors.
   let otherFieldRowsIgnored = 0;
@@ -314,14 +388,15 @@ export function adaptLifecycleHistory(
         pushIssue(personIssues, 'history_continuity_gap');
       }
 
-      const day = row.changedAt.slice(0, 10);
       events.push({
         leadId: personKey,
         fromStage: oldStage,
         toStage: newStage,
         // The history row's CreatedDate is Salesforce's own record of when
         // the value changed: a confirmed transition time for the SFDC field.
-        effectiveDate: isValidIsoDate(day) ? day : null,
+        // Row validation guarantees this date is a real calendar date; a
+        // malformed timestamp was reviewed and never reaches this point.
+        effectiveDate: row.changedAt.slice(0, 10),
         observedAt: row.changedAt,
         dateSource: 'salesforce_confirmed',
         raw: { historyId: row.historyId, parentObject: row.parentObject },
@@ -331,9 +406,17 @@ export function adaptLifecycleHistory(
     }
 
     // Supporting evidence: corroboration and contradiction only, never event
-    // creation.
+    // creation. A malformed supporting date routes the person to review and
+    // is excluded from every date comparison; garbage never participates.
     const support = supportingDates[personKey];
-    if (support) {
+    const supportInvalid =
+      support !== undefined &&
+      ((support.becameLeadDate != null && !isValidIsoDate(support.becameLeadDate)) ||
+        (support.becameMqlDate != null && !isValidIsoDate(support.becameMqlDate)));
+    if (supportInvalid) {
+      pushIssue(personIssues, 'invalid_supporting_date');
+      review.push({ reason: 'invalid_supporting_date', personKey });
+    } else if (support) {
       const { becameLeadDate, becameMqlDate } = support;
       if (becameLeadDate && becameMqlDate && becameMqlDate < becameLeadDate) {
         pushIssue(personIssues, 'supporting_dates_reversed');

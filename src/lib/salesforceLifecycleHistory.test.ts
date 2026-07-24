@@ -8,6 +8,7 @@ import { adaptLifecycleHistory } from './salesforceLifecycleHistory';
 import type {
   SalesforceHistoryRow,
   LifecycleHistoryConfig,
+  LifecycleValueMapping,
   PersonIdentityMap,
 } from './salesforceLifecycleHistory';
 import { assessLeadLifecycle, acquisitionCohortReport } from './funnelCohorts';
@@ -115,13 +116,31 @@ describe('lifecycle transitions from history rows', () => {
 });
 
 describe('idempotency and ordering', () => {
-  it('a duplicate history-record Id never produces a second event', () => {
+  it('an exact duplicate history row is informational and never degrades the result', () => {
     const rows = roundTrip();
     const twice = adaptLifecycleHistory([...rows, { ...rows[1] }], config, identity);
     const once = adaptLifecycleHistory(rows, config, identity);
     expect(twice.persons[0].events).toEqual(once.persons[0].events);
     expect(twice.duplicatesIgnored).toBe(1);
-    expect(twice.issues.find((i) => i.kind === 'duplicate_history_id')?.count).toBe(1);
+    // An exact repeat cannot change the result: no issue, state stays
+    // complete, nothing is presented as unreliable.
+    expect(twice.issues).toEqual([]);
+    expect(twice.state).toBe('complete');
+  });
+
+  it('rows sharing a historyId with different content are a conflict routed to review', () => {
+    const rows = roundTrip();
+    const conflicting = { ...rows[1], newValue: 'Lead', oldValue: 'Marketing Qualified Lead' };
+    const r = adaptLifecycleHistory([...rows, conflicting], config, identity);
+    expect(r.review).toContainEqual({ reason: 'conflicting_duplicate_history_id', historyId: rows[1].historyId });
+    expect(r.state).toBe('incomplete');
+    // Neither version of the conflicted row is silently chosen: the round
+    // trip loses that transition entirely until a human resolves it.
+    expect(r.persons[0].events.map((e) => e.effectiveDate)).toEqual([
+      '2026-02-01',
+      '2026-04-01',
+      '2026-05-01',
+    ]);
   });
 
   it('same-timestamp changes order deterministically by history Id', () => {
@@ -303,6 +322,100 @@ describe('converted Lead and Contact identity', () => {
     // The Q3 requalification does not create a Q3 acquisition-cohort member.
     const q3 = acquisitionCohortReport(r.lifecycles, { grain: 'quarter', year: 2026, quarter: 3 }, '2026-12-31');
     expect(q3.uniqueLeads).toBe(0);
+  });
+});
+
+describe('source validation (hardening)', () => {
+  it('rejects a deal-stage lifecycle mapping at compile time and at runtime', () => {
+    // Compile time: a deal stage is not assignable to the mapping type.
+    // @ts-expect-error deal stages are not legal lead-lifecycle mappings
+    const illegalMapping: LifecycleValueMapping = 'hpp';
+    void illegalMapping;
+    // Runtime: untyped (JSON-loaded) configuration carrying the same illegal
+    // value is rejected before any record is processed.
+    const untyped = JSON.parse('{"Lead":"lead","Sales Qualified Lead":"hpp"}') as Record<
+      string,
+      LifecycleValueMapping
+    >;
+    const r = adaptLifecycleHistory(roundTrip(), { ...config, stageValueMap: untyped }, identity);
+    expect(r.state).toBe('invalid');
+    expect(r.issues).toEqual([{ kind: 'invalid_config', count: 1 }]);
+    expect(r.persons).toHaveLength(0);
+  });
+
+  it('an unparseable changedAt is reviewed, never a confirmed event', () => {
+    const r = adaptLifecycleHistory(
+      [row({ historyId: 'h-v1', changedAt: 'not-a-timestamp' })],
+      config,
+      identity,
+    );
+    expect(r.persons).toHaveLength(0);
+    expect(r.review).toEqual([{ reason: 'invalid_history_timestamp', historyId: 'h-v1' }]);
+  });
+
+  it('an impossible calendar timestamp is reviewed, not current-dated', () => {
+    const bad = ['2026-02-30T09:00:00Z', '2026-13-01T09:00:00Z', '2026-02-01T25:00:00Z'];
+    for (const changedAt of bad) {
+      const r = adaptLifecycleHistory([row({ historyId: 'h-v2', changedAt })], config, identity);
+      expect(r.persons).toHaveLength(0);
+      expect(r.review[0].reason).toBe('invalid_history_timestamp');
+    }
+    // No emitted event may ever pair salesforce_confirmed with a null date.
+    const ok = adaptLifecycleHistory(roundTrip(), config, identity);
+    for (const e of ok.persons[0].events) {
+      expect(e.effectiveDate).not.toBeNull();
+    }
+  });
+
+  it('a blank historyId is an invalid source row', () => {
+    const r = adaptLifecycleHistory([row({ historyId: '  ' })], config, identity);
+    expect(r.persons).toHaveLength(0);
+    expect(r.review).toEqual([{ reason: 'invalid_source_row', historyId: undefined }]);
+  });
+
+  it('a blank parentId is an invalid source row, not an unmapped identity', () => {
+    const r = adaptLifecycleHistory([row({ historyId: 'h-v3', parentId: '' })], config, identity);
+    expect(r.persons).toHaveLength(0);
+    expect(r.review).toEqual([{ reason: 'invalid_source_row', historyId: 'h-v3' }]);
+    expect(r.issues.some((i) => i.kind === 'unmapped_person_identity')).toBe(false);
+  });
+
+  it('an invalid became-a-lead date routes the person to review and joins no comparison', () => {
+    const r = adaptLifecycleHistory(roundTrip(), config, identity, {
+      'person-1': { becameLeadDate: '2026-13-40', becameMqlDate: '2026-03-01' },
+    });
+    expect(r.review).toContainEqual({ reason: 'invalid_supporting_date', personKey: 'person-1' });
+    // The garbage date participates in no reversed-date or coverage check.
+    expect(r.review.some((x) => x.reason === 'supporting_dates_reversed')).toBe(false);
+    expect(r.persons[0].incompleteHistoricalBaseline).toBe(false);
+  });
+
+  it('an invalid became-MQL date routes the person to review', () => {
+    const r = adaptLifecycleHistory([roundTrip()[0]], config, identity, {
+      'person-1': { becameMqlDate: 'sometime soon' },
+    });
+    expect(r.review).toContainEqual({ reason: 'invalid_supporting_date', personKey: 'person-1' });
+    expect(r.review.some((x) => x.reason === 'supporting_mql_date_without_history')).toBe(false);
+  });
+
+  it('an invalid historyAvailableSince is an invalid configuration', () => {
+    const r = adaptLifecycleHistory(roundTrip(), { ...config, historyAvailableSince: 'soon' }, identity);
+    expect(r.state).toBe('invalid');
+    expect(r.issues).toEqual([{ kind: 'invalid_config', count: 1 }]);
+  });
+
+  it('valid Salesforce timestamps continue to process exactly as before', () => {
+    // The actual Salesforce wire format: milliseconds plus a colonless offset.
+    const withOffset = adaptLifecycleHistory(
+      [row({ historyId: 'h-v4', changedAt: '2026-02-01T09:00:00.000+0000' })],
+      config,
+      identity,
+    );
+    expect(withOffset.persons[0].events).toHaveLength(1);
+    expect(withOffset.persons[0].events[0].effectiveDate).toBe('2026-02-01');
+    const full = adaptLifecycleHistory(roundTrip(), config, identity);
+    expect(full.state).toBe('complete');
+    expect(full.persons[0].events).toHaveLength(4);
   });
 });
 

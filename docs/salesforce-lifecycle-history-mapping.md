@@ -154,11 +154,41 @@ ContactHistory rows), a `LifecycleHistoryConfig`, a verified
   those in attributions, not lead lifecycle). Values missing from the map are
   unknown and route the row to review.
 
+### Input validation
+
+Configuration and rows are validated before anything is processed:
+
+- Only `lead`, `mql`, and `out_of_scope` are legal stage mappings. Deal
+  stages (HPP, OPP, Pursuit, closed states) can never become lead-lifecycle
+  events: the mapping type is a closed literal union at compile time, and
+  untyped (for example JSON-loaded) configuration is re-validated at runtime.
+  An illegal mapping, a blank field API name, or a malformed
+  `historyAvailableSince` rejects the whole run as `invalid_config` without
+  processing any record.
+- Every row must carry a nonblank history Id, a nonblank parent Id, and a
+  well-formed timestamp whose calendar date is real (2026-02-30 or a 25th
+  hour is malformed). Malformed rows are routed to review
+  (`invalid_source_row` / `invalid_history_timestamp`); a malformed source
+  timestamp is never accepted as a confirmed lifecycle date, the current
+  date is never substituted, and no emitted event can pair
+  `salesforce_confirmed` with a missing date.
+- Supporting dates must be real calendar dates. An invalid one routes that
+  person to review (`invalid_supporting_date`) and is excluded from every
+  date comparison.
+
 ### Identity and idempotency
 
 - The history record's own `Id` is the source event identity and the
   idempotency key: reprocessing the same row can never produce a second
-  lifecycle event. Duplicates are counted and reported.
+  lifecycle event.
+- Exact duplicates (same Id, every relevant field identical) are
+  informational: they cannot change the result, so they are counted in
+  `duplicatesIgnored` and do not degrade a complete result or present the
+  data as unreliable.
+- Rows sharing an Id with DIFFERENT content are a conflicting duplicate: a
+  quality failure. No version is trusted, the Id is routed to review
+  (`conflicting_duplicate_history_id`), no event is emitted for it, and the
+  result is marked incomplete.
 - A person's email is never an identity.
 - Lead Ids and Contact Ids are never assumed to be the same person. The
   caller supplies a verified `PersonIdentityMap` (built from
