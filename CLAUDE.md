@@ -271,6 +271,19 @@ Pure implementation: `src/lib/funnelCohorts.ts` and
 SFDC CampaignMember workflow's verified gaps and the open Salesforce
 field-name questions.
 
+`docs/salesforce-lifecycle-history-mapping.md` extends this with the
+Salesforce field-history ingestion foundation:
+`src/lib/salesforceLifecycleHistory.ts` is a pure adapter from
+LeadHistory/ContactHistory-shaped rows to the lifecycle contract. History
+record Id is the idempotency key, field API names are configuration (the
+exact lifecycle field name is still admin-unconfirmed), Lead/Contact identity
+requires a verified conversion map, unknown or contradictory values route to
+review, and persons whose lifecycle predates available history carry an
+incomplete-baseline flag. API history retention (24 months maximum without
+Field Audit Trail) is insufficient for the two-year cycle, so the long-term
+pattern is a regular ingest into an application-owned append-only store; that
+store, the n8n change, and all dashboard wiring remain unimplemented.
+
 ### Identity and deduplication
 
 - Lead email is the canonical identity key and is stored lowercase.
