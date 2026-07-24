@@ -8,6 +8,8 @@ import {
   currentFunnelSnapshot,
   movementSummary,
   DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP,
+  DEFAULT_OPPORTUNITY_TERMINAL_STAGE_MAP,
+  DEFAULT_OPPORTUNITY_OPEN_STAGE_VALUES,
 } from './opportunityStageHistory';
 import type {
   OpportunityHistoryRow,
@@ -18,12 +20,8 @@ const config: OpportunityStageConfig = {
   recordTypeFieldName: 'Opportunity Record Type',
   recordTypeMap: DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP,
   stageFieldName: 'Stage',
-  terminalStageMap: {
-    'Closed Won': 'won',
-    'Closed Lost': 'lost',
-    Disqualified: 'disqualified',
-    'Nurture Stage': 'nurture',
-  },
+  terminalStageMap: DEFAULT_OPPORTUNITY_TERMINAL_STAGE_MAP,
+  openStageValues: DEFAULT_OPPORTUNITY_OPEN_STAGE_VALUES,
 };
 
 let seq = 0;
@@ -325,7 +323,7 @@ describe('terminal status is separate from funnel level', () => {
   it('close-won arrives through the Stage field while the record type keeps the level', () => {
     const rows = [
       ...forwardPath(),
-      row({ historyId: 'oh-w1', field: 'Stage', oldValue: 'Synthetic Open Stage', newValue: 'Closed Won', changedAt: '2026-04-01T09:00:00Z' }),
+      row({ historyId: 'oh-w1', field: 'Stage', oldValue: '7) Proposal', newValue: '100) Closed-Won', changedAt: '2026-04-01T09:00:00Z' }),
     ];
     const r = adaptOpportunityHistory(rows, config);
     const o = one(r);
@@ -335,10 +333,53 @@ describe('terminal status is separate from funnel level', () => {
     expect(r.terminalLedger[0].toStatus).toBe('won');
   });
 
+  it('every observed closed Stage label maps to its terminal status', () => {
+    const expected: Array<[string, string]> = [
+      ['100) Closed-Won', 'won'],
+      ['Closed-Lost-Competitor', 'lost'],
+      ['Closed-Lost-InHouse', 'lost'],
+      ['Closed-Disqualified', 'disqualified'],
+      ['Closed-Nurture', 'nurture'],
+    ];
+    for (const [label, status] of expected) {
+      const r = adaptOpportunityHistory(
+        [
+          row({ historyId: `oh-c-${label}`, field: 'Stage', oldValue: '3) Qualification', newValue: label, changedAt: '2026-04-01T09:00:00Z' }),
+        ],
+        config,
+      );
+      expect(one(r).terminalStatus).toBe(status);
+      expect(r.review).toEqual([]);
+    }
+  });
+
+  it('every observed open Stage label keeps the deal open or reopens it', () => {
+    for (const label of DEFAULT_OPPORTUNITY_OPEN_STAGE_VALUES) {
+      const r = adaptOpportunityHistory(
+        [
+          row({ historyId: 'oh-o1', field: 'Stage', oldValue: '1) Suspect', newValue: '100) Closed-Won', changedAt: '2026-04-01T09:00:00Z' }),
+          row({ historyId: 'oh-o2', field: 'Stage', oldValue: '100) Closed-Won', newValue: label, changedAt: '2026-05-01T09:00:00Z' }),
+        ],
+        config,
+      );
+      expect(one(r).terminalStatus).toBe('open');
+      expect(r.review).toEqual([]);
+    }
+  });
+
+  it("the org's own 'Opportunity Assesment' spelling is matched as-is", () => {
+    const r = adaptOpportunityHistory(
+      [row({ historyId: 'oh-sp1', field: 'Stage', oldValue: '1) Suspect', newValue: '2) Opportunity Assesment', changedAt: '2026-02-01T09:00:00Z' })],
+      config,
+    );
+    expect(one(r).terminalStatus).toBe('open');
+    expect(r.review).toEqual([]);
+  });
+
   it('detail-stage moves between open values are not terminal changes', () => {
     const rows = [
       ...forwardPath(),
-      row({ historyId: 'oh-d1', field: 'Stage', oldValue: 'Synthetic Open Stage', newValue: 'Another Open Stage', changedAt: '2026-03-15T09:00:00Z' }),
+      row({ historyId: 'oh-d1', field: 'Stage', oldValue: '4) Discovery', newValue: '7) Proposal', changedAt: '2026-03-15T09:00:00Z' }),
     ];
     const r = adaptOpportunityHistory(rows, config);
     expect(r.terminalLedger).toHaveLength(0);
@@ -348,14 +389,97 @@ describe('terminal status is separate from funnel level', () => {
   it('reopening after closure is supported when history proves it', () => {
     const rows = [
       ...forwardPath(),
-      row({ historyId: 'oh-w2', field: 'Stage', oldValue: 'Synthetic Open Stage', newValue: 'Closed Lost', changedAt: '2026-04-01T09:00:00Z' }),
-      row({ historyId: 'oh-w3', field: 'Stage', oldValue: 'Closed Lost', newValue: 'Synthetic Open Stage', changedAt: '2026-05-01T09:00:00Z' }),
+      row({ historyId: 'oh-w2', field: 'Stage', oldValue: '7) Proposal', newValue: 'Closed-Lost-Competitor', changedAt: '2026-04-01T09:00:00Z' }),
+      row({ historyId: 'oh-w3', field: 'Stage', oldValue: 'Closed-Lost-Competitor', newValue: '4) Discovery', changedAt: '2026-05-01T09:00:00Z' }),
     ];
     const r = adaptOpportunityHistory(rows, config);
     const o = one(r);
     expect(o.terminalStatus).toBe('open');
     // Both the closure and the reopening remain in the terminal ledger.
     expect(r.terminalLedger.map((e) => `${e.fromStatus}>${e.toStatus}`)).toEqual(['open>lost', 'lost>open']);
+  });
+
+  it('an unknown Stage value is reviewed and never closes or reopens the deal', () => {
+    const rows = [
+      row({ historyId: 'oh-uq1', field: 'Stage', oldValue: '3) Qualification', newValue: '100) Closed-Won', changedAt: '2026-04-01T09:00:00Z' }),
+      row({ historyId: 'oh-uq2', field: 'Stage', oldValue: '100) Closed-Won', newValue: '99) Synthetic Mystery Stage', changedAt: '2026-05-01T09:00:00Z' }),
+    ];
+    const r = adaptOpportunityHistory(rows, config);
+    const o = one(r);
+    // The unknown value did not reopen the closed deal.
+    expect(o.terminalStatus).toBe('won');
+    expect(r.terminalLedger).toHaveLength(1);
+    expect(r.review).toContainEqual({ reason: 'unknown_stage_value', historyId: 'oh-uq2', opportunityId: 'syn-opp-1' });
+    expect(r.state).toBe('incomplete');
+  });
+});
+
+describe('same-timestamp ambiguity', () => {
+  it('two conflicting record-type transitions at one timestamp are flagged, not ordered by History ID', () => {
+    const rows = [
+      row({ historyId: 'oh-a1', oldValue: null, newValue: 'Opportunity', changedAt: '2026-01-01T09:00:00Z' }),
+      // Both claim to leave Opportunity at the same instant, to different
+      // destinations: no order is provable and outcomes differ.
+      row({ historyId: 'oh-a2', oldValue: 'Opportunity', newValue: 'High Potential Prospect', changedAt: '2026-02-01T09:00:00Z' }),
+      row({ historyId: 'oh-a3', oldValue: 'Opportunity', newValue: 'Pursuit', changedAt: '2026-02-01T09:00:00Z' }),
+    ];
+    const r = adaptOpportunityHistory(rows, config);
+    const o = one(r);
+    expect(r.review.some((x) => x.reason === 'ambiguous_same_timestamp')).toBe(true);
+    // The resulting stage depends on unprovable ordering: unknown, velocity
+    // fully suppressed, not reportable.
+    expect(o.currentStage).toBeNull();
+    expect(o.currentState).toBe('unknown');
+    expect(o.velocity).toEqual({ hppToOppDays: null, oppToPursuitDays: null, hppToPursuitDays: null });
+    expect(o.reportable).toBe(false);
+    // Every source event is preserved for audit.
+    expect(r.ledger).toHaveLength(3);
+    expect(r.state).toBe('incomplete');
+  });
+
+  it('a same-timestamp group whose order is proven by old-value chaining is not ambiguous', () => {
+    const rows = [
+      row({ historyId: 'oh-ch1', oldValue: null, newValue: 'High Potential Prospect', changedAt: '2026-01-01T09:00:00Z' }),
+      row({ historyId: 'oh-ch2', oldValue: 'High Potential Prospect', newValue: 'Opportunity', changedAt: '2026-01-01T09:00:00Z' }),
+    ];
+    const r = adaptOpportunityHistory(rows, config);
+    const o = one(r);
+    expect(r.review).toEqual([]);
+    expect(o.currentStage).toBe('opp');
+    expect(o.activeDates).toEqual({ hpp: '2026-01-01', opp: '2026-01-01', pursuit: null });
+  });
+
+  it('same-timestamp terminal and record-type events stay independently interpretable', () => {
+    const rows = [
+      ...forwardPath(),
+      row({ historyId: 'oh-tt1', field: 'Stage', oldValue: '7) Proposal', newValue: '100) Closed-Won', changedAt: '2026-03-01T09:00:00Z' }),
+    ];
+    const r = adaptOpportunityHistory(rows, config);
+    const o = one(r);
+    // The Stage closure and the record-type move share a timestamp but live
+    // in separate ledgers: no ambiguity between them.
+    expect(r.review).toEqual([]);
+    expect(o.currentStage).toBe('pursuit');
+    expect(o.terminalStatus).toBe('won');
+  });
+
+  it('harmless unrelated same-timestamp events create no ambiguity', () => {
+    const rows = [
+      ...forwardPath(),
+      row({ historyId: 'oh-hf1', field: 'Synthetic Other Field', oldValue: 'a', newValue: 'b', changedAt: '2026-03-01T09:00:00Z' }),
+    ];
+    const r = adaptOpportunityHistory(rows, config);
+    expect(r.review).toEqual([]);
+    expect(r.otherFieldRowsIgnored).toBe(1);
+    expect(one(r).currentStage).toBe('pursuit');
+  });
+
+  it('normal sequential timestamps keep full path and velocity behavior', () => {
+    const r = adaptOpportunityHistory(forwardPath(), config);
+    const o = one(r);
+    expect(r.review).toEqual([]);
+    expect(o.velocity.hppToOppDays).toBe(31);
+    expect(o.velocity.oppToPursuitDays).toBe(28);
   });
 });
 

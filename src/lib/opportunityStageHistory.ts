@@ -82,11 +82,42 @@ export interface OpportunityStageConfig {
   // route to review. Never keyed by RecordType Id.
   recordTypeMap: Record<string, OpportunityRecordTypeState>;
   // Optional: the history field label for the detailed Stage field, plus the
-  // mapping of terminal stage values. Stage values absent from the map are
-  // ordinary open stages. Detailed Stage values are never funnel levels.
+  // mapping of terminal stage values and the closed set of KNOWN open stage
+  // values. A stage value in neither set is unknown: it is flagged for
+  // review and never closes or reopens the opportunity. Detailed Stage
+  // values are never funnel levels.
   stageFieldName?: string;
   terminalStageMap?: Record<string, Exclude<OpportunityTerminalState, 'open' | 'unknown'>>;
+  openStageValues?: string[];
 }
+
+// The observed closed Stage labels, verified against the July 2026 read-only
+// audit. Exact source spellings.
+export const DEFAULT_OPPORTUNITY_TERMINAL_STAGE_MAP: Record<
+  string,
+  Exclude<OpportunityTerminalState, 'open' | 'unknown'>
+> = {
+  '100) Closed-Won': 'won',
+  'Closed-Lost-Competitor': 'lost',
+  'Closed-Lost-InHouse': 'lost',
+  'Closed-Disqualified': 'disqualified',
+  'Closed-Nurture': 'nurture',
+};
+
+// The observed open Stage labels. 'Opportunity Assesment' preserves the
+// Salesforce org's own spelling; source data is matched as-is, never
+// silently corrected.
+export const DEFAULT_OPPORTUNITY_OPEN_STAGE_VALUES: string[] = [
+  '1) Suspect',
+  '2) Opportunity Assesment',
+  '3) Qualification',
+  '4) Discovery',
+  '5) Pitching',
+  '6) POC',
+  '7) Proposal',
+  '8) Negotiation',
+  '10) Awaiting Execution',
+];
 
 // The confirmed record-type mapping including legacy labels and developer
 // names, verified complete against the July 2026 history export (every
@@ -147,6 +178,8 @@ export type OpportunityIssueKind =
   | 'invalid_history_timestamp'
   | 'conflicting_duplicate_history_id'
   | 'unknown_record_type'
+  | 'unknown_stage_value'
+  | 'ambiguous_same_timestamp'
   | 'incomplete_baseline'
   | 'inconsistent_path_dates';
 
@@ -286,9 +319,61 @@ function mapRecordType(value: string | null, config: OpportunityStageConfig): Ma
   return { kind: 'state', state: mapped };
 }
 
-function mapTerminal(value: string | null, config: OpportunityStageConfig): OpportunityTerminalState {
-  if (value === null || value.trim() === '') return 'open';
-  return config.terminalStageMap?.[value.trim()] ?? 'open';
+type MappedStageValue =
+  | { kind: 'terminal'; status: Exclude<OpportunityTerminalState, 'open' | 'unknown'> }
+  | { kind: 'open' }
+  | { kind: 'blank' }
+  | { kind: 'unknown' };
+
+// Classify a detailed Stage value against the CLOSED sets of known terminal
+// and known open labels. Anything else is unknown: it is never allowed to
+// close or reopen an opportunity on its own.
+function mapStageValue(value: string | null, config: OpportunityStageConfig): MappedStageValue {
+  if (value === null || value.trim() === '') return { kind: 'blank' };
+  const v = value.trim();
+  const terminal = config.terminalStageMap?.[v];
+  if (terminal !== undefined) return { kind: 'terminal', status: terminal };
+  if (config.openStageValues?.includes(v)) return { kind: 'open' };
+  return { kind: 'unknown' };
+}
+
+// One derived-path simulation state. applyPathStep is the single
+// implementation of the current-path rules, used both by the main
+// derivation and by same-timestamp permutation checks.
+interface PathSim {
+  state: OpportunityEventState | null;
+  dates: Record<OpportunityFunnelStage, string | null>;
+}
+
+function applyPathStep(sim: PathSim, toState: OpportunityEventState, day: string): PathSim {
+  const next: PathSim = { state: toState, dates: { ...sim.dates } };
+  if (toState === 'hpp' || toState === 'opp' || toState === 'pursuit') {
+    next.dates[toState] = day;
+    for (const s of FUNNEL_STAGES) {
+      if (STAGE_RANK[s] > STAGE_RANK[toState]) next.dates[s] = null;
+    }
+  }
+  // out_of_scope / unknown suspend the visible stage without erasing dates.
+  return next;
+}
+
+function samePathSim(a: PathSim, b: PathSim): boolean {
+  return (
+    a.state === b.state &&
+    a.dates.hpp === b.dates.hpp &&
+    a.dates.opp === b.dates.opp &&
+    a.dates.pursuit === b.dates.pursuit
+  );
+}
+
+function permutations<T>(items: T[]): T[][] {
+  if (items.length <= 1) return [items];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += 1) {
+    const rest = [...items.slice(0, i), ...items.slice(i + 1)];
+    for (const p of permutations(rest)) out.push([items[i], ...p]);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,8 +407,14 @@ export function adaptOpportunityHistory(
     if (!key.trim() || !LEGAL_RECORD_TYPE_STATES.has(state)) return invalidResult();
   }
   if (config.terminalStageMap) {
-    for (const state of Object.values(config.terminalStageMap)) {
-      if (!LEGAL_TERMINAL_STATES.has(state)) return invalidResult();
+    for (const [key, state] of Object.entries(config.terminalStageMap)) {
+      if (!key.trim() || !LEGAL_TERMINAL_STATES.has(state)) return invalidResult();
+    }
+  }
+  if (config.openStageValues) {
+    for (const v of config.openStageValues) {
+      // A value cannot be both a known open stage and a terminal stage.
+      if (!v.trim() || config.terminalStageMap?.[v.trim()] !== undefined) return invalidResult();
     }
   }
 
@@ -440,6 +531,15 @@ export function adaptOpportunityHistory(
       }
     }
 
+    // Pass 1 over record-type rows: validation, ledger, and the per-row
+    // facts (movement counts, entries) that do not depend on same-timestamp
+    // ordering. Path resolution happens in pass 2.
+    interface RtStep {
+      row: OpportunityHistoryRow;
+      fromState: OpportunityEventState | null;
+      toState: OpportunityEventState;
+    }
+    const steps: RtStep[] = [];
     let firstHistoryEvent = true;
     for (const row of ordered(recordTypeRows.get(opportunityId) ?? [])) {
       const oldMapped = mapRecordType(row.oldValue, config);
@@ -447,7 +547,7 @@ export function adaptOpportunityHistory(
       const fromState: OpportunityEventState | null =
         oldMapped.kind === 'state' ? oldMapped.state : oldMapped.kind === 'unknown' ? 'unknown' : null;
       const toState: OpportunityEventState =
-        newMapped.kind === 'state' ? newMapped.state : newMapped.kind === 'unknown' ? 'unknown' : 'unknown';
+        newMapped.kind === 'state' ? newMapped.state : 'unknown';
 
       if (newMapped.kind === 'blank') {
         // A cleared record type is malformed source data for this contract.
@@ -469,6 +569,9 @@ export function adaptOpportunityHistory(
       if (firstHistoryEvent && oldMapped.kind !== 'blank') incompleteBaseline = true;
       firstHistoryEvent = false;
 
+      // Ledger order is deterministic storage order (timestamp, then history
+      // Id); for same-timestamp groups it is NOT a claim about business
+      // order, which pass 2 resolves or flags.
       ledger.push({
         sourceHistoryId: row.historyId,
         salesforceOpportunityId: opportunityId,
@@ -481,8 +584,8 @@ export function adaptOpportunityHistory(
         rawRecordType: { oldValue: row.oldValue, newValue: row.newValue },
       });
 
-      // Movement classification: only funnel-to-funnel moves are forward or
-      // backward; excluded/unknown endpoints are visits, not funnel moves.
+      // Movement classification is a per-row fact (each row's own old/new
+      // values), independent of same-timestamp ordering.
       const fromRank = fromState && fromState !== 'out_of_scope' && fromState !== 'unknown' ? STAGE_RANK[fromState] : null;
       const toRank = toState !== 'out_of_scope' && toState !== 'unknown' ? STAGE_RANK[toState] : null;
       if (fromRank !== null && toRank !== null) {
@@ -495,32 +598,110 @@ export function adaptOpportunityHistory(
           if (delta === -2) backwardSkips += 1;
         }
       }
+      if (toRank !== null) entries[toState as OpportunityFunnelStage] += 1;
 
-      // Derived current path.
-      if (toRank !== null) {
-        const stage = toState as OpportunityFunnelStage;
-        entries[stage] += 1;
-        activeDates[stage] = row.changedAt.slice(0, 10);
-        // A backward move invalidates the higher stages on the CURRENT path
-        // only; the ledger above keeps every historical event.
-        for (const s of FUNNEL_STAGES) {
-          if (STAGE_RANK[s] > STAGE_RANK[stage]) activeDates[s] = null;
-        }
-      }
-      // Moving into out_of_scope/unknown suspends the visible stage without
-      // erasing already-known entry dates or the ledger.
-      currentState = toState;
+      steps.push({ row, fromState, toState });
     }
 
+    // Pass 2: derived current path. Steps sharing one exact timestamp are
+    // never business-ordered by History Id: the order must be proven by
+    // old-value chaining, or every ordering must produce the same outcome;
+    // otherwise the group is ambiguous, affected dates are suppressed, and
+    // the events remain in the ledger for audit.
+    let sim: PathSim = { state: currentState, dates: { ...activeDates } };
+    let index = 0;
+    while (index < steps.length) {
+      const group: RtStep[] = [steps[index]];
+      let next = index + 1;
+      while (next < steps.length && steps[next].row.changedAt === steps[index].row.changedAt) {
+        group.push(steps[next]);
+        next += 1;
+      }
+      const day = group[0].row.changedAt.slice(0, 10);
+      if (group.length === 1) {
+        sim = applyPathStep(sim, group[0].toState, day);
+      } else {
+        const run = (perm: RtStep[]): PathSim =>
+          perm.reduce((acc, st) => applyPathStep(acc, st.toState, day), sim);
+        const allAgree = (perms: RtStep[][]): PathSim | null => {
+          const outcomes = perms.map(run);
+          return outcomes.every((o) => samePathSim(o, outcomes[0])) ? outcomes[0] : null;
+        };
+        let resolved: PathSim | null = null;
+        if (group.length <= 4) {
+          // An order proven by the source's own old values is business
+          // evidence, not a History Id guess.
+          const chained = permutations(group).filter((perm) => {
+            let state = sim.state;
+            for (const st of perm) {
+              if (st.fromState === null) {
+                // A blank old value is the first assignment: it can only
+                // chain when nothing precedes it.
+                if (state !== null) return false;
+              } else if (st.fromState !== 'unknown' && state !== null && st.fromState !== state) {
+                return false;
+              }
+              state = st.toState;
+            }
+            return true;
+          });
+          if (chained.length > 0) resolved = allAgree(chained);
+          if (resolved === null) resolved = allAgree(permutations(group));
+        }
+        if (resolved === null) {
+          pushIssue(oppIssues, 'ambiguous_same_timestamp');
+          review.push({ reason: 'ambiguous_same_timestamp', opportunityId, historyId: group[0].row.historyId });
+          const outcomes = permutations(group.slice(0, 4)).map(run);
+          const finalStates = new Set(outcomes.map((o) => o.state));
+          if (finalStates.size === 1) {
+            // The stage is certain; only the disagreeing milestone dates are
+            // unknowable, so those (and their velocity) are suppressed.
+            const dates: PathSim['dates'] = { hpp: null, opp: null, pursuit: null };
+            for (const s of FUNNEL_STAGES) {
+              const values = new Set(outcomes.map((o) => o.dates[s]));
+              dates[s] = values.size === 1 ? outcomes[0].dates[s] : null;
+            }
+            resolved = { state: outcomes[0].state, dates };
+          } else {
+            // Even the resulting stage depends on unprovable ordering.
+            blocked = true;
+            resolved = { state: 'unknown', dates: { hpp: null, opp: null, pursuit: null } };
+          }
+        }
+        sim = resolved;
+      }
+      index = next;
+    }
+    currentState = sim.state;
+    activeDates.hpp = sim.dates.hpp;
+    activeDates.opp = sim.dates.opp;
+    activeDates.pursuit = sim.dates.pursuit;
+
     // Terminal status from the detailed Stage field, kept separate from
-    // record-type movement. Unmapped stage values are ordinary open stages.
+    // record-type movement. Known terminal labels close; known open labels
+    // keep the deal open or reopen a closed one; a value in NEITHER closed
+    // set is unknown: flagged for review and never allowed to close or
+    // reopen the opportunity on its own.
     let terminalStatus: OpportunityTerminalState = 'unknown';
     const oppStageRows = ordered(stageRows.get(opportunityId) ?? []);
     if (oppStageRows.length > 0) {
       terminalStatus = 'open';
       for (const row of oppStageRows) {
-        const fromStatus = mapTerminal(row.oldValue, config);
-        const toStatus = mapTerminal(row.newValue, config);
+        const oldStage = mapStageValue(row.oldValue, config);
+        const newStage = mapStageValue(row.newValue, config);
+        if (newStage.kind === 'unknown' || newStage.kind === 'blank') {
+          pushIssue(oppIssues, 'unknown_stage_value');
+          review.push({ reason: 'unknown_stage_value', historyId: row.historyId, opportunityId });
+          continue;
+        }
+        const toStatus: OpportunityTerminalState =
+          newStage.kind === 'terminal' ? newStage.status : 'open';
+        const fromStatus: OpportunityTerminalState =
+          oldStage.kind === 'terminal'
+            ? oldStage.status
+            : oldStage.kind === 'unknown'
+              ? 'unknown'
+              : 'open';
         if (fromStatus === toStatus) continue; // open-to-open detail moves
         terminalLedger.push({
           sourceHistoryId: row.historyId,
@@ -530,8 +711,8 @@ export function adaptOpportunityHistory(
           changedAt: row.changedAt,
           rawStage: { oldValue: row.oldValue, newValue: row.newValue },
         });
-        // Reopening (terminal back to open) is supported when history
-        // proves it; the terminal ledger retains the closure.
+        // Reopening (terminal back to a known open value) is supported when
+        // history proves it; the terminal ledger retains the closure.
         terminalStatus = toStatus;
       }
     }

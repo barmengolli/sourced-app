@@ -75,6 +75,25 @@ Terminal-status changes (from the detailed Stage field) form a separate
 record; reopening is supported when history proves it. Moves between two
 open detail stages are not terminal changes.
 
+The observed org Stage labels are covered by two CLOSED sets, exported as
+defaults:
+
+| Terminal label (exact source spelling) | Status |
+|---|---|
+| `100) Closed-Won` | won |
+| `Closed-Lost-Competitor` | lost |
+| `Closed-Lost-InHouse` | lost |
+| `Closed-Disqualified` | disqualified |
+| `Closed-Nurture` | nurture |
+
+Known open labels: `1) Suspect`, `2) Opportunity Assesment` (the org's own
+spelling, matched as-is and never silently corrected), `3) Qualification`,
+`4) Discovery`, `5) Pitching`, `6) POC`, `7) Proposal`, `8) Negotiation`,
+`10) Awaiting Execution`. A known open label keeps the deal open or reopens
+a previously closed one. A Stage value in NEITHER set is unknown: it is
+retained and flagged for review (`unknown_stage_value`) and never silently
+closes or reopens the opportunity on its own.
+
 ## 4. Derived current state
 
 `adaptOpportunityHistory` derives, per Opportunity:
@@ -175,8 +194,21 @@ Follows the hardened lead-history adapter patterns:
 - Unknown record-type value: retained as out_of_scope/unknown ledger
   evidence, flagged for review, never mapped to a visible stage.
 - Events order by the full Salesforce CreatedDate timestamp with History ID
-  as the stable tie-break. Date-only ordering is never used, because
-  multiple changes can happen on one day.
+  as the stable STORAGE tie-break. Date-only ordering is never used: the
+  audit CSV's date-only columns are unsuitable for production ordering, and
+  ingestion must pull `OpportunityFieldHistory.CreatedDate` as a full
+  timestamp.
+- History ID never decides BUSINESS order. When several record-type
+  transitions for one Opportunity share one exact timestamp, the order is
+  accepted only when the rows' own old values prove a unique chain, or when
+  every possible ordering produces the identical outcome. Otherwise the
+  group is `ambiguous_same_timestamp`: reviewed rather than guessed, the
+  affected current-path dates (and their velocity) are suppressed, the
+  current stage becomes unknown when even the resulting stage depends on the
+  ordering, and every source event stays in the ledger for audit.
+  Same-timestamp events in separate ledgers (a record-type move plus a Stage
+  closure) and harmless simultaneous changes to unrelated fields never
+  create this issue.
 
 ## 8. Future ingestion recommendation (not implemented)
 
