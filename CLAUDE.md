@@ -271,6 +271,18 @@ Pure implementation: `src/lib/funnelCohorts.ts` and
 SFDC CampaignMember workflow's verified gaps and the open Salesforce
 field-name questions.
 
+`docs/opportunity-stage-history-contract.md` defines the Opportunity
+movement and velocity contract: the funnel level is the Opportunity Record
+Type (HPP/Opportunity/Pursuit via a closed alias mapping, never RecordType
+IDs), movement is non-monotonic (regressions, skips, re-entries, Nurture
+visits), and `src/lib/opportunityStageHistory.ts` derives an append-only
+movement ledger plus a current path where a regression clears higher-stage
+dates without deleting history, skipped stages stay null, and velocity uses
+only the current valid path (null, never zero, when unavailable). Terminal
+status (won/lost/reopened) comes from the detailed Stage field, separately
+from record-type movement. Not wired into dashboards, Create HPP, or
+attributions.
+
 `docs/salesforce-lifecycle-history-mapping.md` extends this with the
 Salesforce field-history ingestion foundation:
 `src/lib/salesforceLifecycleHistory.ts` is a pure adapter from
