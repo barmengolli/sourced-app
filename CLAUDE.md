@@ -283,6 +283,21 @@ status (won/lost/reopened) comes from the detailed Stage field, separately
 from record-type movement. Not wired into dashboards, Create HPP, or
 attributions.
 
+`docs/opportunity-ledger-storage.md` defines the storage for that contract
+(Bite 5B): five `sf_opportunity_*` tables in an authored but UNAPPLIED
+migration (`migrations/2026-07-24_opportunity_ledger_storage.sql`) covering
+the Salesforce snapshot, an append-only event ledger (unique History ID,
+UPDATE/DELETE blocked by trigger), 1:1-while-active deal links keyed only by
+exact Salesforce Opportunity ID, a review inbox (channel mandatory before
+approval, lead optional, constrained issue codes), and sync runs with
+SystemModstamp/history-CreatedDate watermarks. RLS is enabled with no
+policies (no anon access; service-role ingestion and a future authenticated
+review API are the writers). `src/lib/opportunityImportStorage.ts` holds the
+pure state-machine/approval/link/duplicate validation. Derived milestones
+are never persisted; Bite 5A remains the only calculation path. Nothing is
+activated: no ingestion, no live deal creation or linking, no dashboard
+change.
+
 `docs/salesforce-lifecycle-history-mapping.md` extends this with the
 Salesforce field-history ingestion foundation:
 `src/lib/salesforceLifecycleHistory.ts` is a pure adapter from
