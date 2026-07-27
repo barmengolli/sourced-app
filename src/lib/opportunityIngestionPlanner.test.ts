@@ -334,8 +334,8 @@ describe('idempotency and duplicates', () => {
     const p = plan(records, [], existing);
     expect(p.diagnostics.reviewIssueUpdates).toBe(1);
     const update = p.operations.find((o) => o.op === 'update_review_issues');
-    expect(update && update.op === 'update_review_issues' && update.auditEvent.event_type).toBe('issues_updated');
-    expect(update && update.op === 'update_review_issues' && update.auditEvent.dedupe_key).toContain('issues:SYNTH-OPP-A');
+    expect(update && update.op === 'update_review_issues' && update.auditEvents[0].event_type).toBe('issues_updated');
+    expect(update && update.op === 'update_review_issues' && update.auditEvents[0].dedupe_key).toContain('issues:SYNTH-OPP-A');
     // Region evidence arrived, so missing_region is gone from the new codes.
     expect(update && update.op === 'update_review_issues' && update.projection.issueCodes).not.toContain('missing_region');
   });
@@ -414,7 +414,7 @@ describe('fingerprints and stale protection (hardening)', () => {
   it('a missing source modification timestamp fails validation', () => {
     expect(() =>
       buildSnapshotPayload(opp({ SystemModstamp: null, LastModifiedDate: null })),
-    ).toThrow(/missing source SystemModstamp/);
+    ).toThrow(/missing or unparseable source SystemModstamp/);
   });
 
   it('an older source timestamp is a stale no-op and cannot overwrite', () => {
@@ -451,8 +451,10 @@ describe('fingerprints and stale protection (hardening)', () => {
     const p = plan([rec], [], existing);
     expect(p.diagnostics.snapshotConflicts).toBe(1);
     expect(p.diagnostics.snapshotsPlanned).toBe(0);
-    // A conflicted batch is not appliable: serialization fails closed.
-    expect(() => serializeApplyPayload(p)).toThrow(/not appliable/);
+    // The disputed snapshot is withheld while the rest of the batch stays
+    // appliable; the database race-guard (SF002) covers apply-time races.
+    const payload = serializeApplyPayload(p);
+    expect(payload.p_snapshots).toHaveLength(0);
   });
 });
 
@@ -522,14 +524,14 @@ describe('serialization boundary (hardening)', () => {
     expect(snap.business_units).toBe('Synthetic LOB');
     expect(snap.saas_revenue).toBe(111);
     expect(snap.saas_revenue_usd).toBe(222);
-    expect(snap.sf_last_modified_at).toBe('2026-06-01T09:00:00.000+0000');
+    expect(snap.sf_last_modified_at).toBe('2026-06-01T09:00:00.000Z');
     expect(snap.content_hash).toMatch(/^sha256:/);
     // Events carry their canonical content hash; reviews carry their audit.
     expect(payload.p_events).toHaveLength(1);
     expect(payload.p_events[0].content_hash).toMatch(/^sha256:/);
     expect(payload.p_reviews).toHaveLength(1);
     expect(payload.p_reviews[0].kind).toBe('create');
-    expect(payload.p_reviews[0].audit.event_type).toBe('review_created');
+    expect(payload.p_reviews[0].audits[0].event_type).toBe('review_created');
     // The excluded record enters NOTHING.
     expect(JSON.stringify(payload)).not.toContain('SYNTH-OPP-RT2');
     // Watermarks ride in p_run.
@@ -676,5 +678,238 @@ describe('staging workflow template safety (static)', () => {
       expect(template.nodes.some((n) => n.type.toLowerCase().includes(forbidden))).toBe(false);
     }
     expect(raw).not.toMatch(/service_role|bearer |apikey/);
+  });
+});
+
+describe('conflict_observed audit coupling (final hardening)', () => {
+  const conflictRows = () => [
+    hist({
+      OpportunityId: 'SYNTH-OPP-A',
+      Id: 'SYNTH-HIST-X',
+      NewValue: 'Opportunity',
+      OldValue: 'High Potential Prospect',
+    }),
+  ];
+  const storedContent = (rows: SalesforceOpportunityHistoryRecord[]): ExistingStagingState => ({
+    ...EMPTY,
+    eventContentByHistoryId: {
+      'SYNTH-HIST-X': {
+        sfOpportunityId: 'SYNTH-OPP-A',
+        sourceField: 'RecordType',
+        oldValue: null,
+        newValue: 'High Potential Prospect',
+        changedAt: rows[0].CreatedDate,
+      },
+    },
+  });
+
+  it('a new review couples review_created with conflict_observed evidence', () => {
+    const rows = conflictRows();
+    const p = plan([opp({ Id: 'SYNTH-OPP-A' })], rows, storedContent(rows));
+    const create = p.operations.find((o) => o.op === 'create_review');
+    expect(create).toBeTruthy();
+    if (!create || create.op !== 'create_review') throw new Error('unreachable');
+    expect(create.auditEvents[0].event_type).toBe('review_created');
+    const conflict = create.auditEvents.find((e) => e.event_type === 'conflict_observed');
+    expect(conflict).toBeTruthy();
+    // Evidence: both content hashes and the History Id, no competing row.
+    expect(conflict!.sf_history_id).toBe('SYNTH-HIST-X');
+    expect(conflict!.accepted_content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(conflict!.conflicting_content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(conflict!.accepted_content_hash).not.toBe(conflict!.conflicting_content_hash);
+    expect(conflict!.dedupe_key).toMatch(/^conflict:SYNTH-HIST-X:sha256:/);
+  });
+
+  it('an existing pending review couples issues_updated with conflict_observed', () => {
+    const rows = conflictRows();
+    const existing: ExistingStagingState = {
+      ...storedContent(rows),
+      reviews: { 'SYNTH-OPP-A': { reviewState: 'pending', issueCodes: [], channelId: null } },
+    };
+    const p = plan([opp({ Id: 'SYNTH-OPP-A' })], rows, existing);
+    const update = p.operations.find((o) => o.op === 'update_review_issues');
+    expect(update).toBeTruthy();
+    if (!update || update.op !== 'update_review_issues') throw new Error('unreachable');
+    expect(update.auditEvents[0].event_type).toBe('issues_updated');
+    expect(update.auditEvents.some((e) => e.event_type === 'conflict_observed')).toBe(true);
+    expect(update.projection.issueCodes).toContain('conflicting_history_id');
+  });
+
+  it('unchanged issue codes still record the evidence via an audit-only operation', () => {
+    const rows = conflictRows();
+    const base = storedContent(rows);
+    const first = plan(
+      [opp({ Id: 'SYNTH-OPP-A' })],
+      rows,
+      { ...base, reviews: { 'SYNTH-OPP-A': { reviewState: 'pending', issueCodes: [], channelId: null } } },
+    );
+    const update = first.operations.find((o) => o.op === 'update_review_issues');
+    if (!update || update.op !== 'update_review_issues') throw new Error('expected an issues update');
+    // Rerun with the settled codes: no projection change, evidence still travels.
+    const second = plan(
+      [opp({ Id: 'SYNTH-OPP-A' })],
+      rows,
+      {
+        ...base,
+        reviews: {
+          'SYNTH-OPP-A': {
+            reviewState: 'pending',
+            issueCodes: update.projection.issueCodes,
+            channelId: null,
+          },
+        },
+      },
+    );
+    expect(second.diagnostics.reviewIssueUpdates).toBe(0);
+    const auditOnly = second.operations.find((o) => o.op === 'append_review_audit');
+    expect(auditOnly).toBeTruthy();
+    if (!auditOnly || auditOnly.op !== 'append_review_audit') throw new Error('unreachable');
+    expect(auditOnly.auditEvents.length).toBeGreaterThan(0);
+    expect(auditOnly.auditEvents.every((e) => e.event_type === 'conflict_observed')).toBe(true);
+    // Serialized as an audit_only item that never touches the review row.
+    const payload = serializeApplyPayload(second);
+    const item = payload.p_reviews.find((r) => r.kind === 'audit_only');
+    expect(item).toBeTruthy();
+    expect(item!.issue_codes).toEqual([]);
+  });
+
+  it('identical reobservation keeps the dedupe key; different content gets a new one', () => {
+    const rows = conflictRows();
+    const base = storedContent(rows);
+    const keyOf = (p: ReturnType<typeof plan>) => {
+      const create = p.operations.find((o) => o.op === 'create_review');
+      if (!create || create.op !== 'create_review') throw new Error('expected create');
+      return create.auditEvents.find((e) => e.event_type === 'conflict_observed')!.dedupe_key;
+    };
+    const keyA = keyOf(plan([opp({ Id: 'SYNTH-OPP-A' })], rows, base));
+    const keyAgain = keyOf(plan([opp({ Id: 'SYNTH-OPP-A' })], rows, base));
+    expect(keyAgain).toBe(keyA);
+    // A DIFFERENT conflicting version of the same History Id is separately
+    // auditable: new conflicting hash, new dedupe key.
+    const differentRows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', Id: 'SYNTH-HIST-X', NewValue: 'Pursuit', OldValue: 'High Potential Prospect' }),
+    ];
+    const keyB = keyOf(plan([opp({ Id: 'SYNTH-OPP-A' })], differentRows, {
+      ...base,
+      eventContentByHistoryId: {
+        'SYNTH-HIST-X': { ...base.eventContentByHistoryId['SYNTH-HIST-X'], changedAt: differentRows[0].CreatedDate },
+      },
+    }));
+    expect(keyB).not.toBe(keyA);
+  });
+
+  it('no content hashes or History Ids leak into aggregate diagnostics', () => {
+    const rows = conflictRows();
+    const p = plan([opp({ Id: 'SYNTH-OPP-A' })], rows, storedContent(rows));
+    const serialized = JSON.stringify(p.diagnostics);
+    expect(serialized).not.toContain('sha256:');
+    expect(serialized).not.toContain('SYNTH-HIST');
+  });
+});
+
+describe('timestamp instants and deterministic serialization (final hardening)', () => {
+  it('representation differences at the same instant are not changes', () => {
+    // +0000 and Z are the same instant: with an identical fingerprint this
+    // is an idempotent no-op, never a stale skip or a conflict.
+    const rec = opp({ Id: 'SYNTH-OPP-T1', SystemModstamp: '2026-06-01T09:00:00.000+0000' });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-T1': {
+          contentHash: buildSnapshotPayload(rec).content_hash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: { 'SYNTH-OPP-T1': { reviewState: 'pending', issueCodes: [], channelId: null } },
+    };
+    const p = plan([rec], [], existing);
+    expect(p.diagnostics.snapshotsPlanned).toBe(0);
+    expect(p.diagnostics.staleSnapshotsSkipped).toBe(0);
+    expect(p.diagnostics.snapshotConflicts).toBe(0);
+    expect(p.diagnostics.snapshotNoops).toBe(1);
+  });
+
+  it('an unparseable source timestamp fails validation', () => {
+    expect(() =>
+      buildSnapshotPayload(opp({ SystemModstamp: 'not-a-timestamp', LastModifiedDate: null })),
+    ).toThrow(/unparseable source SystemModstamp/);
+  });
+
+  it('the snapshot payload carries the normalized ISO instant', () => {
+    const payload = buildSnapshotPayload(opp({ SystemModstamp: '2026-06-01T09:00:00.000+0000' }));
+    expect(payload.sf_last_modified_at).toBe('2026-06-01T09:00:00.000Z');
+  });
+
+  it('apply payload arrays are deterministically ordered for deadlock avoidance', () => {
+    const p = plan([
+      opp({ Id: 'SYNTH-OPP-Z' }),
+      opp({ Id: 'SYNTH-OPP-B' }),
+      opp({ Id: 'SYNTH-OPP-M' }),
+    ]);
+    const payload = serializeApplyPayload(p);
+    const snapshotIds = payload.p_snapshots.map((x) => x.sf_opportunity_id);
+    expect(snapshotIds).toEqual([...snapshotIds].sort());
+    const reviewIds = payload.p_reviews.map((x) => x.sf_opportunity_id);
+    expect(reviewIds).toEqual([...reviewIds].sort());
+  });
+});
+
+describe('apply-function migration final hardening (static SQL)', () => {
+  const MIGRATION = readFileSync(
+    resolve(process.cwd(), 'migrations/2026-07-27_opportunity_ingestion_apply_fn.sql'),
+    'utf8',
+  );
+
+  it('snapshot upsert is one concurrency-safe guarded statement', () => {
+    expect(MIGRATION).toContain('ON CONFLICT (sf_opportunity_id) DO UPDATE SET');
+    // The guard: updates apply only when the incoming stamp is strictly newer.
+    expect(MIGRATION).toContain('WHERE public.sf_opportunities.sf_last_modified_at IS NULL');
+    expect(MIGRATION).toContain('OR public.sf_opportunities.sf_last_modified_at < EXCLUDED.sf_last_modified_at');
+    // The post-inspection classifies via the conflict-locked row, not an
+    // unlocked pre-check before the write.
+    expect(MIGRATION).toContain('no unlocked pre-check');
+    const upsertAt = MIGRATION.indexOf('ON CONFLICT (sf_opportunity_id) DO UPDATE SET');
+    const inspectAt = MIGRATION.indexOf('SELECT sf_last_modified_at, content_hash INTO v_existing_stamp');
+    expect(inspectAt).toBeGreaterThan(upsertAt);
+  });
+
+  it('the run row is created from server-generated values only', () => {
+    expect(MIGRATION).toContain("VALUES ('salesforce', pg_catalog.now(), 'running')");
+    // Caller-provided run metadata is cast only INSIDE the protected block,
+    // after the run row already exists.
+    const runRowAt = MIGRATION.indexOf("VALUES ('salesforce', pg_catalog.now(), 'running')");
+    const callerCastAt = MIGRATION.indexOf("p_run->>'started_at'");
+    expect(runRowAt).toBeGreaterThan(-1);
+    expect(callerCastAt).toBeGreaterThan(runRowAt);
+  });
+
+  it('audit dedupe compares the complete canonical identity, null-safe', () => {
+    for (const field of [
+      'event_type',
+      'previous_state',
+      'new_state',
+      'issue_codes_snapshot',
+      'actor_type',
+      'actor_id',
+      'sf_history_id',
+      'accepted_content_hash',
+      'conflicting_content_hash',
+      'note',
+    ]) {
+      expect(MIGRATION).toContain(`e.${field} IS NOT DISTINCT FROM`);
+    }
+    // occurred_at is observation metadata: excluded, first observation wins.
+    const codeOnly = MIGRATION.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+    expect(codeOnly).not.toContain('e.occurred_at IS NOT DISTINCT FROM');
+    expect(MIGRATION).toContain('first observation wins');
+  });
+
+  it('review items carry coupled audit arrays including audit_only evidence', () => {
+    expect(MIGRATION).toContain("v_item->'audits'");
+    expect(MIGRATION).toContain("'audit_only'");
+    expect(MIGRATION).toContain('audit-only item expected an existing review');
+    // The audit_only path never modifies the review projection.
+    expect(MIGRATION).not.toMatch(/audit_only'[\s\S]{0,400}UPDATE public\.sf_opportunity_reviews/);
   });
 });

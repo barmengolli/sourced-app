@@ -76,8 +76,12 @@ the 5A derivation, and the 5B review builders. It emits an explicit plan
 of allowlisted operations only: snapshot upserts and no-ops, append-only
 event inserts, informational duplicate no-ops, blocked conflicts,
 review creations coupled with their review_created audit events, pending
-review issue updates coupled with issues_updated audit events, and exactly
-one sync-run diagnostics operation.
+review issue updates coupled with issues_updated audit events,
+audit-only items that attach conflict_observed evidence to an existing
+review whose issue codes did not change, and exactly one sync-run
+diagnostics operation. Each review item carries an ARRAY of coupled
+audit events because a single observation can require several ledger
+entries at once (for example review_created plus conflict_observed).
 
 The serialization boundary (`serializeApplyPayload`) converts a plan into
 the exact `sf_apply_opportunity_ingestion` parameters: full snapshot
@@ -85,10 +89,30 @@ payloads carrying every approved evidence field (raw values and source
 USER IDS only, never configured employee names; all three Industry
 Vertical candidates as separate raw fields; no canonical choice, no
 Customer Expansion rule), events with their canonical SHA-256 content
-hash, and review items carrying their audit event INSIDE the item so the
-database enforces coupling. Unknown operation kinds fail closed, blocked
-conflicts make the batch non-appliable, and `summarizeDryRunPlan` reports
-counts with zero writes attempted. Fingerprints are SHA-256 over an
+hash, and review items carrying their audit events INSIDE the item so the
+database enforces coupling. Unknown operation kinds fail closed, and
+`summarizeDryRunPlan` reports counts with zero writes attempted.
+
+Conflict batch policy: a planner-detected conflict withholds ONLY the
+disputed piece. The blocked snapshot or the disputed History-Id event
+stays out of the payload while every unrelated safe snapshot, event, and
+review still applies; the affected review gains `conflicting_history_id`
+and carries the conflict evidence (accepted and conflicting canonical
+content hashes plus the Salesforce History Id) as `conflict_observed`
+audit events with the deterministic dedupe key
+`conflict:<historyId>:<conflictingHash>`. An identical reobservation of
+the same conflict dedupes to a no-op; a DIFFERENT conflicting version of
+the same History Id produces a new, separately auditable ledger entry.
+Only a database-level race that surfaces an unexpected conflict during
+apply (SF002/SF003/SF004) fails the atomic batch, because at that point
+the planner's view of existing state was wrong. No hashes or History Ids
+appear in aggregate diagnostics.
+
+Audit-event idempotency policy: dedupe compares the complete canonical
+audit identity (event type, previous and new state, issue-code snapshot,
+actor type and id, History Id, accepted and conflicting content hashes,
+and note) with null-safe equality. `occurred_at` is deliberately
+excluded: it is observation metadata, and the first observation wins. Fingerprints are SHA-256 over an
 explicitly ordered canonical field list (key order irrelevant; every
 staged field included).
 
@@ -96,8 +120,16 @@ Stale-write protection carries the source SystemModstamp end to end: an
 older timestamp is a stale no-op that can never overwrite, an identical
 timestamp with identical fingerprint no-ops, an identical timestamp with
 DIFFERENT content is a blocked conflict never silently chosen, and a
-missing source timestamp fails validation, at both the planner and the
-database boundary.
+missing or unparseable source timestamp fails validation, at both the
+planner and the database boundary. The planner compares timestamps as
+parsed instants (representation differences such as `+0000` versus `Z`
+never masquerade as changes) and fingerprints over the normalized ISO
+form. At the database the snapshot upsert is concurrency-safe: one
+`INSERT ... ON CONFLICT DO UPDATE` whose WHERE clause permits the update
+only when the incoming SystemModstamp is strictly newer is the sole
+authority; when nothing was written, the conflict-locked current row is
+inspected to classify a stale no-op, an idempotent no-op, or a blocked
+same-timestamp conflict.
 
 Review preservation: reviewer-controlled state (channel_id, lead_id,
 notes, reviewed_by, BDR selection, human review state) is inviolable. A

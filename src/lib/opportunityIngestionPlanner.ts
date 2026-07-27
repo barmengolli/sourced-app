@@ -31,6 +31,7 @@ import type { OpportunityRecordTypeState } from './opportunityStageHistory';
 import {
   buildReviewSeed,
   createReviewMutation,
+  recordIngestionConflict,
   classifyIncomingEvent,
   buildRecordTypeEventInsert,
   buildTerminalEventInsert,
@@ -171,13 +172,28 @@ export function normalizedRecordTypeState(
   return DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[dev] ?? 'unknown';
 }
 
+// Parse a source timestamp into a numeric instant. Deterministic (no clock
+// read); returns null for unparseable values. Comparison always happens on
+// instants, never on raw strings, preserving timezone semantics.
+export function parseSourceInstant(value: string | null): number | null {
+  if (value === null) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 export function buildSnapshotPayload(rec: SalesforceOpportunityRecord): SnapshotPayload {
-  const modstamp = str(rec.SystemModstamp) ?? str(rec.LastModifiedDate);
-  if (modstamp === null) {
-    // A staged snapshot without a source modification timestamp cannot
-    // participate in stale-write protection: fail validation, never guess.
-    throw new Error('snapshot validation: missing source SystemModstamp/LastModifiedDate');
+  const modstampRaw = str(rec.SystemModstamp) ?? str(rec.LastModifiedDate);
+  const modstampMs = parseSourceInstant(modstampRaw);
+  if (modstampRaw === null || modstampMs === null) {
+    // A staged snapshot without a REAL, parseable source modification
+    // timestamp cannot participate in stale-write protection: fail
+    // validation, never guess.
+    throw new Error('snapshot validation: missing or unparseable source SystemModstamp/LastModifiedDate');
   }
+  // Normalized to a canonical UTC instant so fingerprints and comparisons
+  // are representation-independent; the instant (timezone semantics) is
+  // preserved exactly.
+  const modstamp = new Date(modstampMs).toISOString();
   const withoutHash: Omit<SnapshotPayload, 'content_hash'> = {
     sf_opportunity_id: rec.Id,
     record_type_developer_name: str(rec.RecordType?.DeveloperName),
@@ -246,6 +262,19 @@ export function eventContentFingerprint(event: EventInsert): string {
   return `sha256:${sha256Hex(canonical)}`;
 }
 
+// Canonical fingerprint of stored/incoming event CONTENT, used as conflict
+// evidence (accepted versus conflicting hashes) in the audit ledger.
+export function eventRowContentFingerprint(content: EventRowContent): string {
+  const canonical = JSON.stringify([
+    content.sfOpportunityId,
+    content.sourceField,
+    content.oldValue,
+    content.newValue,
+    content.changedAt,
+  ]);
+  return `sha256:${sha256Hex(canonical)}`;
+}
+
 // ---------------------------------------------------------------------------
 // Planned operations (discriminated, table-typed, allowlisted)
 // ---------------------------------------------------------------------------
@@ -273,14 +302,25 @@ export type PlannedOperation =
       op: 'create_review';
       table: 'sf_opportunity_reviews';
       seed: ReviewSeed;
-      auditEvent: ReviewEventInsert; // review_created, coupled by construction
+      // review_created first, plus any conflict_observed evidence: coupled
+      // atomically by construction.
+      auditEvents: ReviewEventInsert[];
     }
   | {
       op: 'update_review_issues';
       table: 'sf_opportunity_reviews';
       sfOpportunityId: string;
       projection: ReviewProjection;
-      auditEvent: ReviewEventInsert; // issues_updated, coupled by construction
+      // issues_updated plus any conflict_observed evidence.
+      auditEvents: ReviewEventInsert[];
+    }
+  | {
+      op: 'append_review_audit';
+      table: 'sf_opportunity_review_events';
+      sfOpportunityId: string;
+      // conflict_observed evidence for an existing review whose issue codes
+      // did not change; SQL dedupe makes reobservation a no-op.
+      auditEvents: ReviewEventInsert[];
     }
   | {
       op: 'record_sync_run';
@@ -447,14 +487,15 @@ export function planStagingIngestion(
     const payload = buildSnapshotPayload(rec);
     const prior = existing.snapshots[rec.Id];
     if (prior) {
-      const priorStamp = prior.sfLastModifiedAt;
-      if (priorStamp !== null && payload.sf_last_modified_at < priorStamp) {
+      const priorMs = parseSourceInstant(prior.sfLastModifiedAt);
+      const incomingMs = parseSourceInstant(payload.sf_last_modified_at)!;
+      if (priorMs !== null && incomingMs < priorMs) {
         // Older source data can never overwrite newer staged data.
         operations.push({ op: 'noop_stale_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
         staleSnapshotsSkipped += 1;
         continue;
       }
-      if (priorStamp !== null && payload.sf_last_modified_at === priorStamp) {
+      if (priorMs !== null && incomingMs === priorMs) {
         if (prior.contentHash === payload.content_hash) {
           operations.push({ op: 'noop_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
           snapshotNoops += 1;
@@ -482,7 +523,10 @@ export function planStagingIngestion(
   }
 
   // --- Append-only history events for staged opportunities only.
-  const conflictedByOpportunity = new Map<string, string[]>();
+  const conflictedByOpportunity = new Map<
+    string,
+    Array<{ historyId: string; acceptedHash: string; conflictingHash: string }>
+  >();
   let exactDuplicateEvents = 0;
   const recordTypeField = DRY_RUN_STAGE_CONFIG.recordTypeFieldName;
   const stageField = DRY_RUN_STAGE_CONFIG.stageFieldName ?? 'StageName';
@@ -510,7 +554,13 @@ export function planStagingIngestion(
         sfOpportunityId: row.opportunityId,
       });
       const list = conflictedByOpportunity.get(row.opportunityId) ?? [];
-      list.push(row.historyId);
+      list.push({
+        historyId: row.historyId,
+        // The stored version stays authoritative; both versions travel to
+        // the audit ledger as hashes, never as competing event rows.
+        acceptedHash: eventRowContentFingerprint(stored!),
+        conflictingHash: eventRowContentFingerprint(incoming),
+      });
       conflictedByOpportunity.set(row.opportunityId, list);
       continue;
     }
@@ -575,6 +625,23 @@ export function planStagingIngestion(
     }
 
     const existingReview = existing.reviews[rec.Id];
+    // conflict_observed audit evidence per the Bite 5B contract: hashes and
+    // the Salesforce History Id, deterministic dedupe key, no competing
+    // event version stored. Built against the projection each mutation
+    // produces so codes and evidence stay consistent.
+    const buildConflictAudits = (projection: ReviewProjection): ReviewEventInsert[] =>
+      (conflictedByOpportunity.get(rec.Id) ?? []).map((c) =>
+        recordIngestionConflict(
+          projection,
+          {
+            sfHistoryId: c.historyId,
+            acceptedContentHash: c.acceptedHash,
+            conflictingContentHash: c.conflictingHash,
+          },
+          { actorType: 'ingestion', occurredAt: config.runStartedAt },
+        ).auditEvent,
+      );
+
     if (outcome === 'eligible_new_candidate' && !existingReview) {
       const mutation = createReviewMutation(seed, {
         actorType: 'ingestion',
@@ -584,7 +651,7 @@ export function planStagingIngestion(
         op: 'create_review',
         table: 'sf_opportunity_reviews',
         seed,
-        auditEvent: mutation.auditEvent,
+        auditEvents: [mutation.auditEvent, ...buildConflictAudits(mutation.projection)],
       });
       reviewsCreated += 1;
       continue;
@@ -599,33 +666,48 @@ export function planStagingIngestion(
       }
       const currentCodes = [...existingReview.issueCodes].sort().join('|');
       const nextCodes = [...nextIssueCodes].sort().join('|');
+      const projection: ReviewProjection = {
+        reviewState: existingReview.reviewState,
+        issueCodes: nextIssueCodes,
+        channelId: existingReview.channelId,
+        leadId: existingReview.leadId ?? null,
+      };
       if (currentCodes !== nextCodes) {
         operations.push({
           op: 'update_review_issues',
           table: 'sf_opportunity_reviews',
           sfOpportunityId: rec.Id,
-          projection: {
-            reviewState: existingReview.reviewState,
-            issueCodes: nextIssueCodes,
-            channelId: existingReview.channelId,
-            leadId: existingReview.leadId ?? null,
-          },
-          auditEvent: {
-            event_type: 'issues_updated',
-            previous_state: null,
-            new_state: null,
-            issue_codes_snapshot: [...nextIssueCodes].sort(),
-            actor_type: 'ingestion',
-            actor_id: null,
-            note: null,
-            sf_history_id: null,
-            accepted_content_hash: null,
-            conflicting_content_hash: null,
-            dedupe_key: `issues:${rec.Id}:${nextCodes}`,
-            occurred_at: config.runStartedAt,
-          },
+          projection,
+          auditEvents: [
+            {
+              event_type: 'issues_updated',
+              previous_state: null,
+              new_state: null,
+              issue_codes_snapshot: [...nextIssueCodes].sort(),
+              actor_type: 'ingestion',
+              actor_id: null,
+              note: null,
+              sf_history_id: null,
+              accepted_content_hash: null,
+              conflicting_content_hash: null,
+              dedupe_key: `issues:${rec.Id}:${nextCodes}`,
+              occurred_at: config.runStartedAt,
+            },
+            ...buildConflictAudits(projection),
+          ],
         });
         reviewIssueUpdates += 1;
+      } else if (conflictedByOpportunity.has(rec.Id)) {
+        // Codes unchanged (the conflict was already recorded) but the
+        // evidence still travels: SQL dedupe makes an identical
+        // reobservation a no-op while a different conflicting hash stays
+        // separately auditable.
+        operations.push({
+          op: 'append_review_audit',
+          table: 'sf_opportunity_review_events',
+          sfOpportunityId: rec.Id,
+          auditEvents: buildConflictAudits(projection),
+        });
       }
     }
   }
@@ -673,12 +755,15 @@ export function planStagingIngestion(
 export interface ApplyPayload {
   p_snapshots: SnapshotPayload[];
   p_events: Array<EventInsert & { content_hash: string }>;
-  // Reviews carry their audit event INSIDE the item so the SQL function can
-  // enforce projection/audit coupling atomically.
-  p_reviews: Array<
-    | { kind: 'create'; sf_opportunity_id: string; issue_codes: ReviewIssueCode[]; audit: ReviewEventInsert }
-    | { kind: 'update_issues'; sf_opportunity_id: string; issue_codes: ReviewIssueCode[]; audit: ReviewEventInsert }
-  >;
+  // Reviews carry their audit events INSIDE the item so the SQL function
+  // can enforce projection/audit coupling atomically; audit_only items add
+  // conflict evidence to an existing review without touching it.
+  p_reviews: Array<{
+    kind: 'create' | 'update_issues' | 'audit_only';
+    sf_opportunity_id: string;
+    issue_codes: ReviewIssueCode[];
+    audits: ReviewEventInsert[];
+  }>;
   p_run: {
     started_at: string;
     watermark_system_modstamp: string | null;
@@ -689,11 +774,11 @@ export interface ApplyPayload {
 }
 
 export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
-  // Any blocked conflict makes the batch non-appliable: the executor must
-  // resolve conflicts through review first. Fail closed.
-  if (plan.diagnostics.snapshotConflicts > 0) {
-    throw new Error('serialize: snapshot conflicts present; the batch is not appliable until reviewed');
-  }
+  // Conflict policy: a planner-detected conflict withholds ONLY the
+  // disputed piece (the blocked snapshot or event stays out of the
+  // payload) while unrelated safe data still applies; the review carries
+  // the conflict evidence. A database-level race that surfaces an
+  // unexpected conflict during apply fails the atomic batch instead.
   const payload: ApplyPayload = {
     p_snapshots: [],
     p_events: [],
@@ -719,7 +804,7 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
           kind: 'create',
           sf_opportunity_id: operation.seed.sf_opportunity_id,
           issue_codes: operation.seed.issue_codes,
-          audit: operation.auditEvent,
+          audits: operation.auditEvents,
         });
         break;
       case 'update_review_issues':
@@ -727,7 +812,15 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
           kind: 'update_issues',
           sf_opportunity_id: operation.sfOpportunityId,
           issue_codes: operation.projection.issueCodes,
-          audit: operation.auditEvent,
+          audits: operation.auditEvents,
+        });
+        break;
+      case 'append_review_audit':
+        payload.p_reviews.push({
+          kind: 'audit_only',
+          sf_opportunity_id: operation.sfOpportunityId,
+          issue_codes: [],
+          audits: operation.auditEvents,
         });
         break;
       case 'noop_snapshot':
@@ -736,8 +829,9 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
       case 'block_snapshot_conflict':
       case 'block_conflicting_event':
       case 'record_sync_run':
-        // No-ops carry nothing; blocked conflicts stay out of the payload
-        // (they are review work); the run row is written by the function.
+        // No-ops carry nothing; blocked pieces stay out of the payload
+        // (their evidence rides on the review); the run row is written by
+        // the function.
         break;
       default: {
         // Fail closed on anything the serializer does not explicitly know.
@@ -746,6 +840,11 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
       }
     }
   }
+  // Deterministic ordering so two concurrent invocations lock rows in the
+  // same order (deadlock avoidance at the database boundary).
+  payload.p_snapshots.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
+  payload.p_events.sort((a, b) => a.sf_history_id.localeCompare(b.sf_history_id));
+  payload.p_reviews.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
   return payload;
 }
 
