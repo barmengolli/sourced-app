@@ -312,6 +312,24 @@ CreatedDate-only backfills are documented unsafe; watermarks are
 SystemModstamp plus history CreatedDate. Nothing is written anywhere and
 5C2 requires the listed approvals first.
 
+`docs/opportunity-staging-ingestion.md` (Bite 5C2A) is the staging
+ingestion foundation: `src/lib/opportunityIngestionPlanner.ts` turns 5C1
+discovery results plus protected staging state into an allowlisted plan
+(snapshot upserts, append-only event inserts, coupled review
+creates/updates, sync-run diagnostics; the type system contains no
+approval, link, deal, or attribution operation and only the six
+`sf_opportunity_*` tables). Eligibility: current hpp/opp/pursuit, open or
+created in the configured cohort year (2026 first run); Service and
+unknown types are excluded from the queue but still staged; linked deals
+sync without reapproval (Service moves preserve links and derive funnel
+unavailability; returns restore without review); decided reviews are never
+reopened. A PENDING restricted SECURITY DEFINER apply function
+(`2026-07-27_opportunity_ingestion_apply_fn.sql`, unapplied) provides
+atomic batch writes with watermarks only on full success. The apply path
+does not exist yet: the planner's server-side execution environment is a
+documented open infrastructure decision, and the workflow shell fails
+closed. Staging never affects visible reporting.
+
 `docs/salesforce-lifecycle-history-mapping.md` extends this with the
 Salesforce field-history ingestion foundation:
 `src/lib/salesforceLifecycleHistory.ts` is a pure adapter from
