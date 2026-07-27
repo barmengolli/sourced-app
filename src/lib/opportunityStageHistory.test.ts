@@ -258,7 +258,7 @@ describe('validation and deduplication', () => {
     const rows = forwardPath();
     const conflict = { ...rows[1], newValue: 'Pursuit' };
     const r = adaptOpportunityHistory([...rows, conflict], config);
-    expect(r.review).toContainEqual({ reason: 'conflicting_duplicate_history_id', historyId: 'oh-f2' });
+    expect(r.review).toContainEqual({ reason: 'conflicting_duplicate_history_id', historyId: 'oh-f2', opportunityId: 'syn-opp-1' });
     expect(r.state).toBe('incomplete');
     expect(r.ledger.map((e) => e.sourceHistoryId)).toEqual(['oh-f1', 'oh-f3']);
   });

@@ -448,7 +448,13 @@ export function adaptOpportunityHistory(
     const first = group[0];
     if (!group.every((r) => sameRowContent(r, first))) {
       pushIssue(issues, 'conflicting_duplicate_history_id');
-      review.push({ reason: 'conflicting_duplicate_history_id', historyId });
+      // The first-seen row's opportunity attributes the conflict to a deal
+      // so the review inbox can carry it per-opportunity.
+      review.push({
+        reason: 'conflicting_duplicate_history_id',
+        historyId,
+        opportunityId: first.opportunityId,
+      });
       continue;
     }
     duplicatesIgnored += group.length - 1;
