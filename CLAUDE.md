@@ -298,6 +298,20 @@ are never persisted; Bite 5A remains the only calculation path. Nothing is
 activated: no ingestion, no live deal creation or linking, no dashboard
 change.
 
+`docs/salesforce-opportunity-sync.md` (Bite 5C1) proves the Opportunity
+extraction read-only before any ingestion: a DISABLED, manual-trigger-only
+n8n dry-run template (embedded in the doc, statically tested for zero
+write-capable nodes and no embedded credentials) that describes the
+Opportunity object for exact custom-field API names, pulls included deals
+by RecordType.DeveloperName plus their OpportunityFieldHistory with full
+timestamps, and emits an aggregates-only summary (dry_run: true,
+writes_attempted: 0). `src/lib/salesforceOpportunitySync.ts` is the pure
+mapping layer into the Bite 5A contract (batching, scope counts,
+buildDryRunSummary via the real 5A derivation and 5B review seeding).
+CreatedDate-only backfills are documented unsafe; watermarks are
+SystemModstamp plus history CreatedDate. Nothing is written anywhere and
+5C2 requires the listed approvals first.
+
 `docs/salesforce-lifecycle-history-mapping.md` extends this with the
 Salesforce field-history ingestion foundation:
 `src/lib/salesforceLifecycleHistory.ts` is a pure adapter from

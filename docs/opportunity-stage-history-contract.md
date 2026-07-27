@@ -24,7 +24,7 @@ mapping, exported as `DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP`:
 | `hpp` | High Potential Prospect, High_Potential_Prospect |
 | `opp` | Opportunity, Leads, Sales Accepted Opportunity |
 | `pursuit` | Pursuit, Licensing, Sales Qualified Opportunity |
-| `out_of_scope` | Nurture |
+| `out_of_scope` | Nurture, Service (business-confirmed 2026-07-27) |
 | unknown (review) | any unmapped value |
 
 This mapping was verified complete against the July 2026 history export:
