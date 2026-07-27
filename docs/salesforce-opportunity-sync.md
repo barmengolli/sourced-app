@@ -22,10 +22,31 @@ fields are confirmed by the Salesforce object model and used directly:
 | Amount, CloseDate | standard | confirmed |
 | OwnerId, Owner.Name | standard | confirmed |
 | Primary Campaign Source | standard `CampaignId` (+ `Campaign.Name`) | confirmed |
-| CurrencyIsoCode | standard, EXISTS ONLY with multi-currency enabled | unresolved: confirm before adding to SOQL |
+| Currency | standard `CurrencyIsoCode` (multi-currency enabled) | confirmed via runtime describe |
 
-Custom fields remain UNRESOLVED and are never guessed. The workflow's first
-node discovers them read-only via `FieldDefinition`:
+Custom fields CONFIRMED via the runtime FieldDefinition/describe step
+(second live run), recorded in `CONFIRMED_CUSTOM_FIELDS`:
+
+| Label | API name |
+|---|---|
+| Commercial Region | `Commercial_Region__c` |
+| HPP Date | `HPP_Date__c` |
+| Opportunity Date | `Opportunity_Date__c` |
+| Pursuit Date | `Pursuit_Date__c` |
+| Sales Development Rep / BDR | `Sales_Development_Rep__c` |
+| SaaS Revenue | `SaaS_Revenue__c` |
+| SaaS Revenue USD | `SaaS_Revenue_USD__c` |
+| GTM - Cube | `GTM_Cube__c` |
+| Customer Expansion | `Existing_Customer_or_New_Business__c` |
+| Line of Business (LOB) | `Business_Units__c` |
+
+Industry Vertical remains INTENTIONALLY UNRESOLVED: Salesforce carries
+multiple candidates (`Insurance_vertical__c`, `Industry_Vertical__c`,
+`Pursuit_Industry_Vertical__c`). The dry run pulls the two directly-named
+candidates and reports nonblank coverage per candidate
+(`industryVertical.nonblankCoverage`) so the choice is a data-informed
+business decision, never silent. The discovery query stays available for
+future fields:
 
 ```sql
 SELECT QualifiedApiName, Label, DataType, IsFieldHistoryTracked
@@ -33,16 +54,10 @@ FROM FieldDefinition
 WHERE EntityDefinition.QualifiedApiName = 'Opportunity'
 ```
 
-Filter the output (in the discovery node's Code step) to the labels:
-Commercial Region, HPP Date, Opportunity Date, Pursuit Date, BDR / BDR
-Contact, SaaS Revenue (and its currency), GTM - Cube, Customer Expansion,
-Industry Vertical, Line of Business (LOB). Record for each: confirmed label,
-confirmed API name, field type, whether queryable, and whether required for
-first ingestion (Commercial Region: yes, review inbox seeds missing_region;
-milestone dates: evidence only, Bite 5A derives milestones from history; the
-rest: review-inbox context only). Do not commit describe output containing
-org-specific IDs. Until confirmed, the Opportunity SOQL uses standard fields
-only.
+Milestone dates are evidence only (Bite 5A derives milestones from
+history); Commercial Region feeds the missing_region review seed; the rest
+are review-inbox context. Do not commit describe output containing
+org-specific field IDs or internal FieldDefinition URLs.
 
 ## 2. Current Opportunity query
 
@@ -55,8 +70,13 @@ SELECT Id, Name, AccountId, Account.Name,
        RecordType.DeveloperName, RecordType.Name,
        StageName, IsClosed, IsWon,
        CreatedDate, LastModifiedDate, SystemModstamp,
-       Amount, CloseDate, OwnerId, Owner.Name,
-       CampaignId, Campaign.Name
+       Amount, CurrencyIsoCode, CloseDate, OwnerId, Owner.Name,
+       CampaignId, Campaign.Name,
+       Commercial_Region__c, HPP_Date__c, Opportunity_Date__c,
+       Pursuit_Date__c, Sales_Development_Rep__c,
+       SaaS_Revenue__c, SaaS_Revenue_USD__c, GTM_Cube__c,
+       Existing_Customer_or_New_Business__c, Business_Units__c,
+       Industry_Vertical__c, Pursuit_Industry_Vertical__c
 FROM Opportunity
 WHERE RecordType.DeveloperName IN ('High_Potential_Prospect', 'Leads', 'Licensing')
   AND (IsClosed = false
@@ -109,25 +129,43 @@ arrive under `Field = 'RecordType'` (578 rows) and stage changes under
 CRITICAL, confirmed by the first live run: `OpportunityFieldHistory`
 returns RecordTypeId VALUES in OldValue/NewValue, not labels or
 DeveloperNames (612 unknown record-type values across 578 rows: both sides
-unmapped). The workflow therefore performs a read-only RecordType query
-(`SELECT Id, Name, DeveloperName, SobjectType FROM RecordType WHERE
-SobjectType = 'Opportunity'`) and resolves values through a RUNTIME map,
-RecordType Id to DeveloperName to normalized stage, indexing both 15- and
-18-character id forms. RecordType ids are never hardcoded and never appear
+unmapped). The workflow therefore performs a read-only RecordType query,
+now over ALL objects (`SELECT Id, Name, DeveloperName, SobjectType FROM
+RecordType`), and resolves values through a RUNTIME map, RecordType Id to
+DeveloperName to normalized stage, indexing both 15- and 18-character id
+forms. Querying all objects lets the 34 values that remained unmapped
+after the second run be NAMED: the summary's `recordTypeDiagnostics` lists
+each unmapped value's Record Type Name, DeveloperName, occurrence count,
+old/new/both, and whether runtime metadata confirms it belongs to
+Opportunity. Those values are reported for a business decision, never
+auto-classified, and RecordType ids are never hardcoded and never appear
 in the aggregate summary. Historical labels and DeveloperNames keep
 resolving directly; values that remain unresolved stay unknown and require
 review. Value diagnostics separate blank historical baselines (a blank
 OldValue on an initial row is normal, not unknown), unresolved
 Salesforce-ID-shaped values, unmapped nonblank labels, and successful
 resolutions, reporting value OCCURRENCES and affected ROWS as distinct
-units. Unknown nonblank Stage labels (1,463 occurrences in the first run,
-largely pre-standard picklist history) are collected as an aggregate-only
-diagnostic (distinct label, occurrence count, seen as old/new/both) so the
-Stage map can be extended deliberately; no label is ever fuzzy-matched.
-Same-timestamp co-occurrence is CLASSIFIED, not alarmed: the first run's
-274 candidates split into harmless cross-ledger groups, uniquely provable
-chains, and materially ambiguous groups; only the material ones create
-ambiguous_same_timestamp review issues, with Bite 5A as the authority.
+units.
+
+The second run's Stage-label diagnostics produced explicit LEGACY ALIASES,
+now in `LEGACY_TERMINAL_STAGE_ALIASES` and `LEGACY_OPEN_STAGE_ALIASES`
+(exact matches after whitespace and zero-width-character normalization;
+never fuzzy): Recycle/Nurture variants map to nurture, Close-Lost-No
+Decision variants to lost, Closed-Won variants to won, CP DQ - Project
+Cancelled to disqualified, and twenty-three legacy open labels (Suspect,
+Opportunity Assessment, Demo / Oral Presentations, Contract Agreement
+variants, and the rest) stay open or reopen. Current aliases are
+preserved, and only genuinely unknown nonblank labels remain in the
+`unknownLabels` diagnostic.
+
+Same-timestamp co-occurrence is CLASSIFIED, not alarmed, in MUTUALLY
+EXCLUSIVE categories satisfying candidateGroups =
+harmlessCrossLedgerGroups + uniquelyProvableOrOrderIndependent + the last
+category. In the authoritative summary the last category is
+`materiallyAmbiguous` (decided by Bite 5A, the only place that creates
+ambiguous_same_timestamp review issues). The n8n mirror labels its last
+category `remainingForAuthoritativeEvaluation` and never creates review
+issues: those groups simply require the authoritative Bite 5A evaluation.
 
 Pagination: the n8n Salesforce node follows `queryMore` for large results;
 leave "Return All" on for both queries. API cost is modest (one describe,
@@ -259,7 +297,7 @@ and no embedded secrets.
       },
       "parameters": {
         "resource": "search",
-        "query": "SELECT Id, Name, AccountId, Account.Name, RecordType.DeveloperName, RecordType.Name, StageName, IsClosed, IsWon, CreatedDate, LastModifiedDate, SystemModstamp, Amount, CloseDate, OwnerId, Owner.Name, CampaignId, Campaign.Name FROM Opportunity WHERE RecordType.DeveloperName IN ('High_Potential_Prospect', 'Leads', 'Licensing') AND (IsClosed = false OR CreatedDate >= 2026-01-01T00:00:00Z OR SystemModstamp >= 2026-01-01T00:00:00Z OR (IsClosed = true AND CloseDate >= 2026-01-01)) ORDER BY SystemModstamp ASC"
+        "query": "SELECT Id, Name, AccountId, Account.Name, RecordType.DeveloperName, RecordType.Name, StageName, IsClosed, IsWon, CreatedDate, LastModifiedDate, SystemModstamp, Amount, CurrencyIsoCode, CloseDate, OwnerId, Owner.Name, CampaignId, Campaign.Name, Commercial_Region__c, HPP_Date__c, Opportunity_Date__c, Pursuit_Date__c, Sales_Development_Rep__c, SaaS_Revenue__c, SaaS_Revenue_USD__c, GTM_Cube__c, Existing_Customer_or_New_Business__c, Business_Units__c, Industry_Vertical__c, Pursuit_Industry_Vertical__c FROM Opportunity WHERE RecordType.DeveloperName IN ('High_Potential_Prospect', 'Leads', 'Licensing') AND (IsClosed = false OR CreatedDate >= 2026-01-01T00:00:00Z OR SystemModstamp >= 2026-01-01T00:00:00Z OR (IsClosed = true AND CloseDate >= 2026-01-01)) ORDER BY SystemModstamp ASC"
       }
     },
     {
@@ -305,7 +343,7 @@ and no embedded secrets.
         0
       ],
       "parameters": {
-        "jsCode": "// READ ONLY / DRY RUN. Transport-level aggregates only. The committed\n// buildDryRunSummary (src/lib/salesforceOpportunitySync.ts) is the\n// authoritative full summary via the Bite 5A derivation; this node mirrors\n// its counters for the manual run. NO identifier, name, account, owner,\n// campaign, or RecordType Id leaves this node.\nconst opps = $('READ ONLY: Fetch included Opportunities').all().map((i) => i.json);\nconst hist = $('READ ONLY: Fetch OpportunityFieldHistory').all().map((i) => i.json);\nconst rts = $('READ ONLY: Fetch Opportunity RecordTypes').all().map((i) => i.json);\nconst YEAR_START = '2026-01-01';\nconst INCLUDED = { High_Potential_Prospect: 'hpp', Leads: 'opp', Licensing: 'pursuit' };\nconst RT_MAP = { 'High Potential Prospect': 'hpp', High_Potential_Prospect: 'hpp', Opportunity: 'opp', Leads: 'opp', 'Sales Accepted Opportunity': 'opp', Pursuit: 'pursuit', Licensing: 'pursuit', 'Sales Qualified Opportunity': 'pursuit', Nurture: 'out_of_scope' };\nconst RANK = { hpp: 1, opp: 2, pursuit: 3 };\nconst TERMINAL = ['100) Closed-Won', 'Closed-Lost-Competitor', 'Closed-Lost-InHouse', 'Closed-Disqualified', 'Closed-Nurture'];\nconst OPEN = ['1) Suspect', '2) Opportunity Assesment', '3) Qualification', '4) Discovery', '5) Pitching', '6) POC', '7) Proposal', '8) Negotiation', '10) Awaiting Execution'];\nconst ID_SHAPE = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;\nconst validTs = (v) => /^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d/.test(String(v || ''));\n// Runtime RecordType Id map (never hardcoded, never emitted).\nconst idMap = {};\nfor (const rt of rts) {\n  const id = String(rt.Id || '').trim();\n  const dev = String(rt.DeveloperName || '').trim();\n  if (!id || !dev) continue;\n  idMap[id] = dev;\n  if (id.length === 18) idMap[id.slice(0, 15)] = dev;\n}\nconst rtValueCounts = { resolvedViaIdMap: 0, resolvedAsKnownValue: 0, blankBaseline: 0, unresolvedIdShaped: 0, unmappedNonblankLabel: 0, affectedRows: 0 };\nconst resolveRt = (raw) => {\n  const v = String(raw || '').trim();\n  if (!v) { rtValueCounts.blankBaseline += 1; return null; }\n  if (idMap[v] !== undefined) { rtValueCounts.resolvedViaIdMap += 1; return idMap[v]; }\n  if (RT_MAP[v] !== undefined) { rtValueCounts.resolvedAsKnownValue += 1; return v; }\n  if (ID_SHAPE.test(v)) { rtValueCounts.unresolvedIdShaped += 1; return v; }\n  rtValueCounts.unmappedNonblankLabel += 1;\n  return v;\n};\nconst scope = { discovered: opps.length, openNow: 0, closedNow: 0, createdInYear: 0, modifiedInYear: 0, closedWithCloseDateInYear: 0, olderOpen: 0 };\nconst byDev = {}; const byStage = { hpp: 0, opp: 0, pursuit: 0, out_of_scope: 0, unknown: 0 };\nfor (const o of opps) {\n  const dn = (o.RecordType && o.RecordType.DeveloperName) || 'missing';\n  byDev[dn] = (byDev[dn] || 0) + 1;\n  const st = INCLUDED[dn] || 'unknown';\n  byStage[st] = (byStage[st] || 0) + 1;\n  const created = String(o.CreatedDate || '').slice(0, 10);\n  const modified = String(o.SystemModstamp || o.LastModifiedDate || '').slice(0, 10);\n  if (o.IsClosed === false) scope.openNow += 1;\n  if (o.IsClosed === true) scope.closedNow += 1;\n  if (created >= YEAR_START) scope.createdInYear += 1;\n  if (modified >= YEAR_START) scope.modifiedInYear += 1;\n  if (o.IsClosed === true && String(o.CloseDate || '') >= YEAR_START) scope.closedWithCloseDateInYear += 1;\n  if (o.IsClosed === false && created && created < YEAR_START) scope.olderOpen += 1;\n}\nconst byId = new Map();\nlet exactDuplicates = 0; const conflicting = new Set();\nlet invalidTimestamps = 0; let rtRows = 0; let stageRows = 0;\nlet fwd = 0; let back = 0; let fskip = 0; let bskip = 0;\nconst stageValueCounts = { resolved: 0, blankBaseline: 0, unknownNonblank: 0, affectedRows: 0 };\nconst unknownStageLabels = new Map();\nconst rtGroups = new Map();\nconst stageStamps = new Set();\nfor (const h of hist) {\n  const key = String(h.Id || '');\n  const content = [h.OpportunityId, h.Field, h.OldValue, h.NewValue, h.CreatedDate].join(' ');\n  if (byId.has(key)) {\n    if (byId.get(key) === content) exactDuplicates += 1; else conflicting.add(key);\n    continue;\n  }\n  byId.set(key, content);\n  if (!validTs(h.CreatedDate)) { invalidTimestamps += 1; continue; }\n  const tsKey = h.OpportunityId + '|' + h.CreatedDate;\n  if (h.Field === 'RecordType') {\n    rtRows += 1;\n    const before = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;\n    const from = RT_MAP[resolveRt(h.OldValue)];\n    const to = RT_MAP[resolveRt(h.NewValue)];\n    if (rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel > before) rtValueCounts.affectedRows += 1;\n    if (RANK[from] && RANK[to]) {\n      const d = RANK[to] - RANK[from];\n      if (d > 0) { fwd += 1; if (d === 2) fskip += 1; }\n      if (d < 0) { back += 1; if (d === -2) bskip += 1; }\n    }\n    if (!rtGroups.has(tsKey)) rtGroups.set(tsKey, []);\n    rtGroups.get(tsKey).push({ from, to });\n  } else if (h.Field === 'StageName') {\n    stageRows += 1;\n    stageStamps.add(tsKey);\n    let rowAffected = false;\n    for (const side of ['old', 'new']) {\n      const s = String((side === 'old' ? h.OldValue : h.NewValue) || '').trim();\n      if (!s) { stageValueCounts.blankBaseline += 1; continue; }\n      if (TERMINAL.includes(s) || OPEN.includes(s)) { stageValueCounts.resolved += 1; continue; }\n      stageValueCounts.unknownNonblank += 1; rowAffected = true;\n      const e = unknownStageLabels.get(s) || { occurrences: 0, old: false, new: false };\n      e.occurrences += 1; e[side] = true; unknownStageLabels.set(s, e);\n    }\n    if (rowAffected) stageValueCounts.affectedRows += 1;\n  }\n}\n// Same-timestamp classification (mirror; Bite 5A is authoritative).\nlet candidateGroups = 0; let provable = 0; let materiallyAmbiguous = 0; let harmlessCrossLedger = 0;\nfor (const [tsKey, moves] of rtGroups) {\n  if (stageStamps.has(tsKey)) harmlessCrossLedger += 1;\n  if (moves.length < 2) continue;\n  candidateGroups += 1;\n  if (moves.length === 2 && (moves[0].to === moves[1].from || moves[1].to === moves[0].from)) provable += 1;\n  else materiallyAmbiguous += 1;\n}\nconst stageLabelDiagnostics = [...unknownStageLabels.entries()]\n  .map(([label, x]) => ({ label, occurrences: x.occurrences, seenAs: x.old && x.new ? 'both' : x.old ? 'old' : 'new' }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.label.localeCompare(b.label));\nreturn [{ json: {\n  executedAt: new Date().toISOString(),\n  dry_run: true,\n  writes_attempted: 0,\n  scope,\n  countsByRecordTypeDeveloperName: byDev,\n  countsByNormalizedCurrentStage: byStage,\n  history: { rowsDiscovered: hist.length, recordTypeRows: rtRows, stageRows, otherFieldRows: hist.length - rtRows - stageRows, exactDuplicates, conflictingDuplicateHistoryIds: conflicting.size, invalidTimestamps, recordTypeValues: rtValueCounts, stageValues: { ...stageValueCounts, unknownLabels: stageLabelDiagnostics } },\n  movement: { forwardMoves: fwd, backwardMoves: back, forwardSkips: fskip, backwardSkips: bskip, sameTimestamp: { candidateGroups, harmlessCrossLedgerGroups: harmlessCrossLedger, uniquelyProvableByChaining: provable, materiallyAmbiguousConservative: materiallyAmbiguous } },\n  note: 'Mirror aggregates. Authoritative full summary: buildDryRunSummary in src/lib/salesforceOpportunitySync.ts (Bite 5A derivation is the authority on material ambiguity; the mirror is conservative for groups larger than two).'\n} }];"
+        "jsCode": "// READ ONLY / DRY RUN. Transport-level aggregates only; this mirror NEVER\n// creates ambiguous_same_timestamp review issues. Only the authoritative\n// Bite 5A calculation (buildDryRunSummary in\n// src/lib/salesforceOpportunitySync.ts) may do that. NO identifier, name of\n// a deal/account/owner/campaign, or RecordType Id leaves this node; record\n// type NAMES and Stage LABELS are configuration metadata and may appear.\nconst opps = $('READ ONLY: Fetch included Opportunities').all().map((i) => i.json);\nconst hist = $('READ ONLY: Fetch OpportunityFieldHistory').all().map((i) => i.json);\nconst rts = $('READ ONLY: Fetch Opportunity RecordTypes').all().map((i) => i.json);\nconst YEAR_START = '2026-01-01';\nconst INCLUDED = { High_Potential_Prospect: 'hpp', Leads: 'opp', Licensing: 'pursuit' };\nconst RT_MAP = { 'High Potential Prospect': 'hpp', High_Potential_Prospect: 'hpp', Opportunity: 'opp', Leads: 'opp', 'Sales Accepted Opportunity': 'opp', Pursuit: 'pursuit', Licensing: 'pursuit', 'Sales Qualified Opportunity': 'pursuit', Nurture: 'out_of_scope' };\nconst RANK = { hpp: 1, opp: 2, pursuit: 3 };\nconst TERMINAL = ['100) Closed-Won', 'Closed-Lost-Competitor', 'Closed-Lost-InHouse', 'Closed-Disqualified', 'Closed-Nurture', '0. Recycle/Nurture', 'Recycle / Nurture', '0) Recycle / Nurture', 'Close-Lost-No Decision', 'Close-No Decision', 'Closed-Won', '9) Closed-Won', 'CP DQ - Project Cancelled'];\nconst OPEN = ['1) Suspect', '2) Opportunity Assesment', '3) Qualification', '4) Discovery', '5) Pitching', '6) POC', '7) Proposal', '8) Negotiation', '10) Awaiting Execution', 'Suspect', '1. Suspect', 'Opportunity Assessment', '2. Opportunity Assessment', 'Qualification', '1) Qualification', 'Demo / Oral Presentations', 'Pitching', '3) Pitching', 'Proposal', 'Discovery', '2) Discovery', 'Initial Proposal / Term Sheet', 'Proof of Concept', 'Negotiation', 'Risk Assessment', '4.1) Pursuit Evaluation', '9) Contract Agreement', 'Contract Agreement / Awaiting Execution', 'Awaiting Execution', 'Contract Creation', 'Contract Agreement', '7) Contract Agreement'];\nconst IV_CANDIDATES = ['Industry_Vertical__c', 'Pursuit_Industry_Vertical__c'];\nconst ID_SHAPE = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;\nconst norm = (v) => String(v == null ? '' : v).replace(/[\u200b\u200c\u200d\ufeff]/g, '').trim();\nconst validTs = (v) => /^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d/.test(String(v || ''));\n// Runtime RecordType map over ALL objects so non-Opportunity or retired\n// types can be NAMED in diagnostics. Ids never leave this node.\nconst idMap = {};\nfor (const rt of rts) {\n  const id = norm(rt.Id); const dev = norm(rt.DeveloperName);\n  if (!id || !dev) continue;\n  const entry = { dev, name: norm(rt.Name) || dev, isOpp: norm(rt.SobjectType) === 'Opportunity' };\n  idMap[id] = entry;\n  if (id.length === 18) idMap[id.slice(0, 15)] = entry;\n}\nconst rtValueCounts = { resolvedViaIdMap: 0, resolvedAsKnownValue: 0, blankBaseline: 0, unresolvedIdShaped: 0, unmappedNonblankLabel: 0, affectedRows: 0 };\nconst rtDiagnostics = new Map();\nconst noteRt = (key, name, dev, isOpp, side) => {\n  const d = rtDiagnostics.get(key) || { name, developerName: dev, occurrences: 0, old: false, new: false, confirmedOpportunityType: isOpp };\n  d.occurrences += 1; d[side] = true; rtDiagnostics.set(key, d);\n};\nconst resolveRt = (raw, side) => {\n  const v = norm(raw);\n  if (!v) { rtValueCounts.blankBaseline += 1; return null; }\n  const ref = idMap[v];\n  if (ref !== undefined) {\n    rtValueCounts.resolvedViaIdMap += 1;\n    if (RT_MAP[ref.dev] === undefined) noteRt(ref.dev, ref.name, ref.dev, ref.isOpp, side);\n    return ref.dev;\n  }\n  if (RT_MAP[v] !== undefined) { rtValueCounts.resolvedAsKnownValue += 1; return v; }\n  if (ID_SHAPE.test(v)) { rtValueCounts.unresolvedIdShaped += 1; return v; }\n  rtValueCounts.unmappedNonblankLabel += 1;\n  noteRt(v, v, null, false, side);\n  return v;\n};\nconst scope = { discovered: opps.length, openNow: 0, closedNow: 0, createdInYear: 0, modifiedInYear: 0, closedWithCloseDateInYear: 0, olderOpen: 0 };\nconst byDev = {}; const byStage = { hpp: 0, opp: 0, pursuit: 0, out_of_scope: 0, unknown: 0 };\nconst ivCoverage = {};\nfor (const f of IV_CANDIDATES) ivCoverage[f] = 0;\nfor (const o of opps) {\n  const dn = (o.RecordType && o.RecordType.DeveloperName) || 'missing';\n  byDev[dn] = (byDev[dn] || 0) + 1;\n  const st = INCLUDED[dn] || 'unknown';\n  byStage[st] = (byStage[st] || 0) + 1;\n  for (const f of IV_CANDIDATES) { if (norm(o[f])) ivCoverage[f] += 1; }\n  const created = String(o.CreatedDate || '').slice(0, 10);\n  const modified = String(o.SystemModstamp || o.LastModifiedDate || '').slice(0, 10);\n  if (o.IsClosed === false) scope.openNow += 1;\n  if (o.IsClosed === true) scope.closedNow += 1;\n  if (created >= YEAR_START) scope.createdInYear += 1;\n  if (modified >= YEAR_START) scope.modifiedInYear += 1;\n  if (o.IsClosed === true && String(o.CloseDate || '') >= YEAR_START) scope.closedWithCloseDateInYear += 1;\n  if (o.IsClosed === false && created && created < YEAR_START) scope.olderOpen += 1;\n}\nconst byId = new Map();\nlet exactDuplicates = 0; const conflicting = new Set();\nlet invalidTimestamps = 0; let rtRows = 0; let stageRows = 0;\nlet fwd = 0; let back = 0; let fskip = 0; let bskip = 0;\nconst stageValueCounts = { resolved: 0, blankBaseline: 0, unknownNonblank: 0, affectedRows: 0 };\nconst unknownStageLabels = new Map();\nconst stamps = new Map();\nfor (const h of hist) {\n  const key = String(h.Id || '');\n  const content = [h.OpportunityId, h.Field, h.OldValue, h.NewValue, h.CreatedDate].join(' ');\n  if (byId.has(key)) {\n    if (byId.get(key) === content) exactDuplicates += 1; else conflicting.add(key);\n    continue;\n  }\n  byId.set(key, content);\n  if (!validTs(h.CreatedDate)) { invalidTimestamps += 1; continue; }\n  const tsKey = h.OpportunityId + '|' + h.CreatedDate;\n  if (h.Field === 'RecordType') {\n    rtRows += 1;\n    const before = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;\n    const from = RT_MAP[resolveRt(h.OldValue, 'old')];\n    const to = RT_MAP[resolveRt(h.NewValue, 'new')];\n    if (rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel > before) rtValueCounts.affectedRows += 1;\n    if (RANK[from] && RANK[to]) {\n      const d = RANK[to] - RANK[from];\n      if (d > 0) { fwd += 1; if (d === 2) fskip += 1; }\n      if (d < 0) { back += 1; if (d === -2) bskip += 1; }\n    }\n    const c = stamps.get(tsKey) || { rt: [], stage: 0 };\n    c.rt.push({ from, to }); stamps.set(tsKey, c);\n  } else if (h.Field === 'StageName') {\n    stageRows += 1;\n    const c = stamps.get(tsKey) || { rt: [], stage: 0 };\n    c.stage += 1; stamps.set(tsKey, c);\n    let rowAffected = false;\n    for (const side of ['old', 'new']) {\n      const s = norm(side === 'old' ? h.OldValue : h.NewValue);\n      if (!s) { stageValueCounts.blankBaseline += 1; continue; }\n      if (TERMINAL.includes(s) || OPEN.includes(s)) { stageValueCounts.resolved += 1; continue; }\n      stageValueCounts.unknownNonblank += 1; rowAffected = true;\n      const e = unknownStageLabels.get(s) || { occurrences: 0, old: false, new: false };\n      e.occurrences += 1; e[side] = true; unknownStageLabels.set(s, e);\n    }\n    if (rowAffected) stageValueCounts.affectedRows += 1;\n  }\n}\n// MUTUALLY EXCLUSIVE same-timestamp categories:\n// candidateGroups = harmlessCrossLedgerGroups\n//   + uniquelyProvableOrOrderIndependent + remainingForAuthoritativeEvaluation.\nlet candidateGroups = 0; let harmless = 0; let provable = 0; let remaining = 0;\nfor (const c of stamps.values()) {\n  if (c.rt.length + c.stage < 2) continue;\n  candidateGroups += 1;\n  if (c.rt.length < 2) { harmless += 1; continue; }\n  if (c.rt.length === 2 && (c.rt[0].to === c.rt[1].from || c.rt[1].to === c.rt[0].from)) provable += 1;\n  else remaining += 1;\n}\nconst stageLabelDiagnostics = [...unknownStageLabels.entries()]\n  .map(([label, x]) => ({ label, occurrences: x.occurrences, seenAs: x.old && x.new ? 'both' : x.old ? 'old' : 'new' }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.label.localeCompare(b.label));\nconst rtDiagList = [...rtDiagnostics.values()]\n  .map((d) => ({ name: d.name, developerName: d.developerName, occurrences: d.occurrences, seenAs: d.old && d.new ? 'both' : d.old ? 'old' : 'new', confirmedOpportunityType: d.confirmedOpportunityType }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name));\nreturn [{ json: {\n  executedAt: new Date().toISOString(),\n  dry_run: true,\n  writes_attempted: 0,\n  scope,\n  countsByRecordTypeDeveloperName: byDev,\n  countsByNormalizedCurrentStage: byStage,\n  history: { rowsDiscovered: hist.length, recordTypeRows: rtRows, stageRows, otherFieldRows: hist.length - rtRows - stageRows, exactDuplicates, conflictingDuplicateHistoryIds: conflicting.size, invalidTimestamps, recordTypeValues: rtValueCounts, recordTypeDiagnostics: rtDiagList, stageValues: { ...stageValueCounts, unknownLabels: stageLabelDiagnostics } },\n  movement: { forwardMoves: fwd, backwardMoves: back, forwardSkips: fskip, backwardSkips: bskip, sameTimestamp: { candidateGroups, harmlessCrossLedgerGroups: harmless, uniquelyProvableOrOrderIndependent: provable, remainingForAuthoritativeEvaluation: remaining } },\n  industryVertical: { candidates: IV_CANDIDATES, nonblankCoverage: ivCoverage },\n  note: 'Mirror aggregates; remainingForAuthoritativeEvaluation groups REQUIRE the authoritative Bite 5A evaluation (buildDryRunSummary) and are not review issues yet. The mirror never creates ambiguous_same_timestamp issues.'\n} }];"
       }
     },
     {
@@ -338,7 +376,7 @@ and no embedded secrets.
       },
       "parameters": {
         "resource": "search",
-        "query": "SELECT Id, Name, DeveloperName, SobjectType FROM RecordType WHERE SobjectType = 'Opportunity'"
+        "query": "SELECT Id, Name, DeveloperName, SobjectType FROM RecordType"
       }
     }
   ],

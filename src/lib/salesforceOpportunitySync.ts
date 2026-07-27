@@ -84,18 +84,97 @@ export const INCLUDED_DEVELOPER_NAMES: Record<string, OpportunityFunnelStage> = 
   Licensing: 'pursuit',
 };
 
+// Legacy Stage aliases confirmed from the second live dry run's label
+// diagnostics. Explicit exact matches only (after whitespace and zero-width
+// normalization); nothing is ever fuzzy-matched.
+export const LEGACY_TERMINAL_STAGE_ALIASES: Record<
+  string,
+  'won' | 'lost' | 'disqualified' | 'nurture'
+> = {
+  '0. Recycle/Nurture': 'nurture',
+  'Recycle / Nurture': 'nurture',
+  '0) Recycle / Nurture': 'nurture',
+  'Close-Lost-No Decision': 'lost',
+  'Close-No Decision': 'lost',
+  'Closed-Won': 'won',
+  '9) Closed-Won': 'won',
+  'CP DQ - Project Cancelled': 'disqualified',
+};
+
+export const LEGACY_OPEN_STAGE_ALIASES: string[] = [
+  'Suspect',
+  '1. Suspect',
+  'Opportunity Assessment',
+  '2. Opportunity Assessment',
+  'Qualification',
+  '1) Qualification',
+  'Demo / Oral Presentations',
+  'Pitching',
+  '3) Pitching',
+  'Proposal',
+  'Discovery',
+  '2) Discovery',
+  'Initial Proposal / Term Sheet',
+  'Proof of Concept',
+  'Negotiation',
+  'Risk Assessment',
+  '4.1) Pursuit Evaluation',
+  '9) Contract Agreement',
+  'Contract Agreement / Awaiting Execution',
+  'Awaiting Execution',
+  'Contract Creation',
+  'Contract Agreement',
+  '7) Contract Agreement',
+];
+
+// Zero-width characters and surrounding whitespace are normalized away
+// before EXACT matching; this is normalization, not fuzzy matching.
+const ZERO_WIDTH = /\u200B|\u200C|\u200D|\uFEFF/g;
+
+export function normalizeSourceValue(value: string | null): string | null {
+  if (value === null) return null;
+  const cleaned = value.replace(ZERO_WIDTH, '').trim();
+  return cleaned === '' ? null : cleaned;
+}
+
 // Dry-run configuration: the Bite 5A confirmed alias map (labels, legacy
-// labels, developer names) plus the API-side history field tokens. The
-// record-type history Field token is expected to be 'RecordType' via the
-// API (the report export showed the LABEL 'Opportunity Record Type'); the
-// dry run's field distribution verifies this on first execution.
+// labels, developer names) plus the API-side history field tokens, which
+// the first live run confirmed ('RecordType' and 'StageName'), extended
+// with the legacy Stage aliases above. Current aliases are preserved.
 export const DRY_RUN_STAGE_CONFIG: OpportunityStageConfig = {
   recordTypeFieldName: 'RecordType',
   recordTypeMap: DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP,
   stageFieldName: 'StageName',
-  terminalStageMap: DEFAULT_OPPORTUNITY_TERMINAL_STAGE_MAP,
-  openStageValues: DEFAULT_OPPORTUNITY_OPEN_STAGE_VALUES,
+  terminalStageMap: { ...DEFAULT_OPPORTUNITY_TERMINAL_STAGE_MAP, ...LEGACY_TERMINAL_STAGE_ALIASES },
+  openStageValues: [...DEFAULT_OPPORTUNITY_OPEN_STAGE_VALUES, ...LEGACY_OPEN_STAGE_ALIASES],
 };
+
+// Custom-field API names confirmed via the runtime describe/FieldDefinition
+// step (second live run). Labels map to exact API names; nothing is guessed.
+export const CONFIRMED_CUSTOM_FIELDS: Record<string, string> = {
+  'Commercial Region': 'Commercial_Region__c',
+  'HPP Date': 'HPP_Date__c',
+  'Opportunity Date': 'Opportunity_Date__c',
+  'Pursuit Date': 'Pursuit_Date__c',
+  'Sales Development Rep / BDR': 'Sales_Development_Rep__c',
+  'SaaS Revenue': 'SaaS_Revenue__c',
+  'SaaS Revenue USD': 'SaaS_Revenue_USD__c',
+  Currency: 'CurrencyIsoCode',
+  'GTM - Cube': 'GTM_Cube__c',
+  'Customer Expansion': 'Existing_Customer_or_New_Business__c',
+  'Line of Business (LOB)': 'Business_Units__c',
+  'Primary Campaign Source': 'CampaignId',
+};
+
+// Industry Vertical stays intentionally unresolved: Salesforce carries
+// several candidates and the business has not chosen one. The dry run
+// reports nonblank coverage for the two directly-named candidates so the
+// choice is made from data, never silently. Insurance_vertical__c is the
+// third known candidate, documented but not pulled by default.
+export const INDUSTRY_VERTICAL_CANDIDATES: string[] = [
+  'Industry_Vertical__c',
+  'Pursuit_Industry_Vertical__c',
+];
 
 // ---------------------------------------------------------------------------
 // Mapping into the Bite 5A contract
@@ -145,14 +224,32 @@ export interface SalesforceRecordTypeRef {
   SobjectType?: string | null;
 }
 
-export function buildRecordTypeIdMap(refs: SalesforceRecordTypeRef[]): Record<string, string> {
-  const map: Record<string, string> = {};
+export interface RecordTypeRefEntry {
+  developerName: string;
+  name: string;
+  // Whether Salesforce runtime metadata confirms this record type belongs
+  // to the Opportunity object.
+  isOpportunityType: boolean;
+}
+
+// The workflow now queries ALL record types (no SobjectType filter) so a
+// history value pointing at a non-Opportunity or retired record type can
+// still be NAMED in diagnostics instead of remaining an anonymous id.
+export function buildRecordTypeIdMap(
+  refs: SalesforceRecordTypeRef[],
+): Record<string, RecordTypeRefEntry> {
+  const map: Record<string, RecordTypeRefEntry> = {};
   for (const ref of refs) {
     if (!ref.Id?.trim() || !ref.DeveloperName?.trim()) continue;
-    map[ref.Id.trim()] = ref.DeveloperName.trim();
+    const entry: RecordTypeRefEntry = {
+      developerName: ref.DeveloperName.trim(),
+      name: (ref.Name ?? ref.DeveloperName).trim(),
+      isOpportunityType: (ref.SobjectType ?? '').trim() === 'Opportunity',
+    };
+    map[ref.Id.trim()] = entry;
     // Salesforce IDs appear in both 15- and 18-character forms; index the
     // 15-character prefix of an 18-character id too.
-    if (ref.Id.trim().length === 18) map[ref.Id.trim().slice(0, 15)] = ref.DeveloperName.trim();
+    if (ref.Id.trim().length === 18) map[ref.Id.trim().slice(0, 15)] = entry;
   }
   return map;
 }
@@ -161,22 +258,24 @@ const SFDC_ID_SHAPE = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
 
 export type RecordTypeResolution =
   | { kind: 'blank' }
-  | { kind: 'resolved_via_id_map'; value: string }
+  | { kind: 'resolved_via_id_map'; value: string; ref: RecordTypeRefEntry }
   | { kind: 'resolved_known_value'; value: string }
   | { kind: 'unresolved_id_shaped'; value: string }
   | { kind: 'unmapped_label'; value: string };
 
-// Resolve one raw record-type history value. Unresolved values keep their
-// raw form so the Bite 5A adapter classifies them unknown and routes them
-// to review; nothing is fuzzy-matched or guessed.
+// Resolve one raw record-type history value (normalized first). Unresolved
+// values keep their raw form so the Bite 5A adapter classifies them unknown
+// and routes them to review; nothing is fuzzy-matched or guessed.
 export function resolveRecordTypeValue(
   raw: string | null,
-  idMap: Record<string, string>,
+  idMap: Record<string, RecordTypeRefEntry>,
 ): RecordTypeResolution {
-  if (raw === null || raw.trim() === '') return { kind: 'blank' };
-  const v = raw.trim();
+  const v = normalizeSourceValue(raw);
+  if (v === null) return { kind: 'blank' };
   const viaId = idMap[v];
-  if (viaId !== undefined) return { kind: 'resolved_via_id_map', value: viaId };
+  if (viaId !== undefined) {
+    return { kind: 'resolved_via_id_map', value: viaId.developerName, ref: viaId };
+  }
   if (DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[v] !== undefined) {
     // Historical labels and DeveloperNames keep working directly.
     return { kind: 'resolved_known_value', value: v };
@@ -281,17 +380,34 @@ export interface UnknownStageLabelDiagnostic {
   seenAs: 'old' | 'new' | 'both';
 }
 
+// A nonblank record-type value that resolved to runtime metadata outside
+// the funnel mapping (or to no metadata at all). Named for a business
+// decision; never auto-classified, and RecordType ids never appear.
+export interface UnmappedRecordTypeDiagnostic {
+  name: string;
+  developerName: string | null;
+  occurrences: number;
+  seenAs: 'old' | 'new' | 'both';
+  // True when Salesforce runtime metadata confirms the record type belongs
+  // to the Opportunity object.
+  confirmedOpportunityType: boolean;
+}
+
+// MUTUALLY EXCLUSIVE categories satisfying:
+// candidateGroups = harmlessCrossLedgerGroups
+//   + uniquelyProvableOrOrderIndependent + materiallyAmbiguous.
 export interface SameTimestampClassification {
-  // Groups of two or more record-type rows sharing one exact timestamp for
-  // one Opportunity: candidates, not errors.
+  // Every (opportunity, timestamp) group with two or more funnel-relevant
+  // history rows: candidates, not errors.
   candidateGroups: number;
-  // Same-instant events living in separate ledgers (a record-type move plus
-  // a Stage change): independently interpretable, harmless.
+  // Groups without competing record-type rows (cross-ledger co-timing or
+  // stage-only multiples): independently interpretable.
   harmlessCrossLedgerGroups: number;
-  // Candidates whose order is proven by old-value chaining or whose outcome
-  // is order-independent (Bite 5A semantics).
+  // Record-type-conflicting groups Bite 5A accepted: order proven by
+  // old-value chaining or outcome order-independent.
   uniquelyProvableOrOrderIndependent: number;
-  // Only these create ambiguous_same_timestamp review issues.
+  // Only these create ambiguous_same_timestamp review issues, decided by
+  // the authoritative Bite 5A calculation.
   materiallyAmbiguous: number;
 }
 
@@ -311,6 +427,7 @@ export interface DryRunSummary {
     conflictingDuplicateHistoryIds: number;
     invalidTimestamps: number;
     recordTypeValues: ValueResolutionCounts;
+    recordTypeDiagnostics: UnmappedRecordTypeDiagnostic[];
     stageValues: {
       resolved: number;
       blankBaseline: number;
@@ -331,6 +448,12 @@ export interface DryRunSummary {
   review: {
     opportunitiesRequiringReview: number;
     countsByIssue: Record<string, number>;
+  };
+  // Nonblank coverage per Industry Vertical candidate so the field choice
+  // is a data-informed business decision, never a silent default.
+  industryVertical: {
+    candidates: string[];
+    nonblankCoverage: Record<string, number>;
   };
 }
 
@@ -356,7 +479,21 @@ export function buildDryRunSummary(
     unmappedNonblankLabel: 0,
     affectedRows: 0,
   };
-  const resolveSide = (raw: string | null): string | null => {
+  const unmappedRecordTypes = new Map<
+    string,
+    { name: string; developerName: string | null; occurrences: number; old: boolean; new: boolean; confirmedOpportunityType: boolean }
+  >();
+  const noteUnmapped = (
+    key: string,
+    entry: { name: string; developerName: string | null; confirmedOpportunityType: boolean },
+    side: 'old' | 'new',
+  ): void => {
+    const d = unmappedRecordTypes.get(key) ?? { ...entry, occurrences: 0, old: false, new: false };
+    d.occurrences += 1;
+    d[side] = true;
+    unmappedRecordTypes.set(key, d);
+  };
+  const resolveSide = (raw: string | null, side: 'old' | 'new'): string | null => {
     const r = resolveRecordTypeValue(raw, idMap);
     switch (r.kind) {
       case 'blank':
@@ -364,6 +501,16 @@ export function buildDryRunSummary(
         return null;
       case 'resolved_via_id_map':
         rtValueCounts.resolvedViaIdMap += 1;
+        // Resolved to real runtime metadata, but OUTSIDE the funnel mapping:
+        // name it for a business decision instead of leaving an anonymous
+        // unknown. The id itself never leaves this function.
+        if (DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[r.value] === undefined) {
+          noteUnmapped(
+            r.ref.developerName,
+            { name: r.ref.name, developerName: r.ref.developerName, confirmedOpportunityType: r.ref.isOpportunityType },
+            side,
+          );
+        }
         return r.value;
       case 'resolved_known_value':
         rtValueCounts.resolvedAsKnownValue += 1;
@@ -373,15 +520,25 @@ export function buildDryRunSummary(
         return r.value;
       case 'unmapped_label':
         rtValueCounts.unmappedNonblankLabel += 1;
+        noteUnmapped(r.value, { name: r.value, developerName: null, confirmedOpportunityType: false }, side);
         return r.value;
     }
   };
   const rows = historyRecords.map((rec) => {
     const mapped = mapHistoryRecord(rec);
+    if (mapped.field === DRY_RUN_STAGE_CONFIG.stageFieldName) {
+      // Normalization only (whitespace, zero-width characters); exact
+      // matching happens against the alias sets downstream.
+      return {
+        ...mapped,
+        oldValue: normalizeSourceValue(mapped.oldValue),
+        newValue: normalizeSourceValue(mapped.newValue),
+      };
+    }
     if (mapped.field !== DRY_RUN_STAGE_CONFIG.recordTypeFieldName) return mapped;
     const before = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;
-    const oldValue = resolveSide(mapped.oldValue);
-    const newValue = resolveSide(mapped.newValue);
+    const oldValue = resolveSide(mapped.oldValue, 'old');
+    const newValue = resolveSide(mapped.newValue, 'new');
     const after = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;
     if (after > before) rtValueCounts.affectedRows += 1;
     return { ...mapped, oldValue, newValue };
@@ -401,7 +558,7 @@ export function buildDryRunSummary(
     let rowAffected = false;
     for (const side of ['old', 'new'] as const) {
       const raw = side === 'old' ? rec.OldValue : rec.NewValue;
-      const v = (raw ?? '').trim();
+      const v = normalizeSourceValue(raw ?? null) ?? '';
       if (!v) {
         stageValueCounts.blankBaseline += 1;
         continue;
@@ -428,22 +585,34 @@ export function buildDryRunSummary(
 
   const result = adaptOpportunityHistory(rows, DRY_RUN_STAGE_CONFIG, baselines);
 
-  // Same-timestamp classification. Candidates are record-type groups of two
-  // or more rows at one instant; Bite 5A decides which are materially
-  // ambiguous, and everything else it accepted is provable or
-  // order-independent. Cross-ledger co-timing is harmless by construction.
-  const rtStamps = new Map<string, number>();
-  const stageStampKeys = new Set<string>();
+  // Same-timestamp classification with MUTUALLY EXCLUSIVE categories:
+  // candidateGroups = harmless + provable + materiallyAmbiguous. A group is
+  // every (opportunity, timestamp) instant carrying two or more
+  // funnel-relevant rows; only record-type-conflicting groups can be
+  // material, and Bite 5A alone decides which of those actually are.
+  const stampCounts = new Map<string, { rt: number; stage: number }>();
   for (const rec of historyRecords) {
-    const key = `${rec.OpportunityId}|${rec.CreatedDate}`;
-    if (rec.Field === DRY_RUN_STAGE_CONFIG.recordTypeFieldName) {
-      rtStamps.set(key, (rtStamps.get(key) ?? 0) + 1);
-    } else if (rec.Field === DRY_RUN_STAGE_CONFIG.stageFieldName) {
-      stageStampKeys.add(key);
+    if (
+      rec.Field !== DRY_RUN_STAGE_CONFIG.recordTypeFieldName &&
+      rec.Field !== DRY_RUN_STAGE_CONFIG.stageFieldName
+    ) {
+      continue;
     }
+    const key = `${rec.OpportunityId}|${rec.CreatedDate}`;
+    const c = stampCounts.get(key) ?? { rt: 0, stage: 0 };
+    if (rec.Field === DRY_RUN_STAGE_CONFIG.recordTypeFieldName) c.rt += 1;
+    else c.stage += 1;
+    stampCounts.set(key, c);
   }
-  const candidateGroups = [...rtStamps.values()].filter((n) => n > 1).length;
-  const harmlessCrossLedgerGroups = [...rtStamps.keys()].filter((k) => stageStampKeys.has(k)).length;
+  let candidateGroups = 0;
+  let harmlessCrossLedgerGroups = 0;
+  let rtConflictGroups = 0;
+  for (const c of stampCounts.values()) {
+    if (c.rt + c.stage < 2) continue;
+    candidateGroups += 1;
+    if (c.rt < 2) harmlessCrossLedgerGroups += 1;
+    else rtConflictGroups += 1;
+  }
   const materiallyAmbiguous = result.review.filter((x) => x.reason === 'ambiguous_same_timestamp').length;
 
   const byDeveloperName: Record<string, number> = {};
@@ -510,6 +679,15 @@ export function buildDryRunSummary(
       conflictingDuplicateHistoryIds: issueCount('conflicting_duplicate_history_id'),
       invalidTimestamps: issueCount('invalid_history_timestamp'),
       recordTypeValues: rtValueCounts,
+      recordTypeDiagnostics: [...unmappedRecordTypes.values()]
+        .map((d) => ({
+          name: d.name,
+          developerName: d.developerName,
+          occurrences: d.occurrences,
+          seenAs: (d.old && d.new ? 'both' : d.old ? 'old' : 'new') as 'old' | 'new' | 'both',
+          confirmedOpportunityType: d.confirmedOpportunityType,
+        }))
+        .sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name)),
       stageValues: {
         ...stageValueCounts,
         unknownLabels: [...unknownStageLabels.entries()]
@@ -529,13 +707,22 @@ export function buildDryRunSummary(
       sameTimestamp: {
         candidateGroups,
         harmlessCrossLedgerGroups,
-        uniquelyProvableOrOrderIndependent: Math.max(0, candidateGroups - materiallyAmbiguous),
+        uniquelyProvableOrOrderIndependent: Math.max(0, rtConflictGroups - materiallyAmbiguous),
         materiallyAmbiguous,
       },
     },
     review: {
       opportunitiesRequiringReview: requiringReview,
       countsByIssue: reviewIssueCounts,
+    },
+    industryVertical: {
+      candidates: INDUSTRY_VERTICAL_CANDIDATES,
+      nonblankCoverage: Object.fromEntries(
+        INDUSTRY_VERTICAL_CANDIDATES.map((field) => [
+          field,
+          records.filter((r) => typeof r[field] === 'string' && (r[field] as string).trim() !== '').length,
+        ]),
+      ),
     },
   };
 }

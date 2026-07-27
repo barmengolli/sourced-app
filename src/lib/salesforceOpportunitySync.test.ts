@@ -9,6 +9,11 @@ import { resolve } from 'node:path';
 import {
   INCLUDED_DEVELOPER_NAMES,
   DRY_RUN_STAGE_CONFIG,
+  LEGACY_TERMINAL_STAGE_ALIASES,
+  LEGACY_OPEN_STAGE_ALIASES,
+  CONFIRMED_CUSTOM_FIELDS,
+  INDUSTRY_VERTICAL_CANDIDATES,
+  normalizeSourceValue,
   mapHistoryRecord,
   mapBaselineObservation,
   chunkOpportunityIds,
@@ -318,15 +323,182 @@ describe('same-timestamp classification (hardening)', () => {
     expect(summary.review.countsByIssue.ambiguous_same_timestamp).toBeUndefined();
   });
 
-  it('cross-ledger co-timing is harmless and not a candidate', () => {
+  it('cross-ledger co-timing is a harmless candidate, never material', () => {
     const rows = [
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
       hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '1) Suspect', NewValue: '3) Qualification', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
     ];
     const summary = buildDryRunSummary([record], rows, [], RUN);
-    expect(summary.movement.sameTimestamp.candidateGroups).toBe(0);
+    expect(summary.movement.sameTimestamp.candidateGroups).toBe(1);
     expect(summary.movement.sameTimestamp.harmlessCrossLedgerGroups).toBe(1);
+    expect(summary.movement.sameTimestamp.uniquelyProvableOrOrderIndependent).toBe(0);
     expect(summary.movement.sameTimestamp.materiallyAmbiguous).toBe(0);
+  });
+
+  it('the categories are mutually exclusive and satisfy the equation', () => {
+    const rows = [
+      // Group 1: cross-ledger (one RT row + one stage row): harmless.
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'Opportunity', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '1) Suspect', NewValue: '3) Qualification', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      // Group 2: chained RT pair: provable.
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'High Potential Prospect', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'High Potential Prospect', NewValue: 'Opportunity', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      // Group 3: conflicting RT pair (both leave Opportunity): material.
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'High Potential Prospect', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'Pursuit', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
+    ];
+    const s = buildDryRunSummary([record], rows, [], RUN).movement.sameTimestamp;
+    expect(s.candidateGroups).toBe(3);
+    expect(s.harmlessCrossLedgerGroups).toBe(1);
+    expect(s.uniquelyProvableOrOrderIndependent).toBe(1);
+    expect(s.materiallyAmbiguous).toBe(1);
+    expect(s.candidateGroups).toBe(
+      s.harmlessCrossLedgerGroups + s.uniquelyProvableOrOrderIndependent + s.materiallyAmbiguous,
+    );
+  });
+});
+
+describe('legacy stage aliases and normalization (final hardening)', () => {
+  const record = opp({ Id: 'SYNTH-OPP-A' });
+
+  it('normalizes zero-width characters and surrounding whitespace before exact matching', () => {
+    expect(normalizeSourceValue('​ 4) Discovery ﻿')).toBe('4) Discovery');
+    expect(normalizeSourceValue('‌‍')).toBeNull();
+    expect(normalizeSourceValue(null)).toBeNull();
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: ' ​1) Suspect', NewValue: '﻿Closed-Won ', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.stageValues.unknownNonblank).toBe(0);
+    expect(summary.history.stageValues.resolved).toBe(2);
+  });
+
+  it('maps every legacy terminal alias to its status', () => {
+    for (const [label, status] of Object.entries(LEGACY_TERMINAL_STAGE_ALIASES)) {
+      const result = adaptOpportunityHistory(
+        [
+          {
+            historyId: `SYNTH-T-${label}`,
+            opportunityId: 'SYNTH-OPP-A',
+            field: 'StageName',
+            oldValue: '1) Suspect',
+            newValue: label,
+            changedAt: '2026-02-01T09:00:00.000+0000',
+          },
+        ],
+        DRY_RUN_STAGE_CONFIG,
+      );
+      expect(result.opportunities[0].terminalStatus).toBe(status);
+      expect(result.review).toEqual([]);
+    }
+  });
+
+  it('treats every legacy open alias as open, reopening a prior closure', () => {
+    for (const label of LEGACY_OPEN_STAGE_ALIASES) {
+      const result = adaptOpportunityHistory(
+        [
+          {
+            historyId: 'SYNTH-O-1',
+            opportunityId: 'SYNTH-OPP-A',
+            field: 'StageName',
+            oldValue: '1) Suspect',
+            newValue: '100) Closed-Won',
+            changedAt: '2026-02-01T09:00:00.000+0000',
+          },
+          {
+            historyId: 'SYNTH-O-2',
+            opportunityId: 'SYNTH-OPP-A',
+            field: 'StageName',
+            oldValue: '100) Closed-Won',
+            newValue: label,
+            changedAt: '2026-03-01T09:00:00.000+0000',
+          },
+        ],
+        DRY_RUN_STAGE_CONFIG,
+      );
+      expect(result.opportunities[0].terminalStatus).toBe('open');
+      expect(result.review).toEqual([]);
+    }
+  });
+
+  it('preserves genuinely unknown Stage labels after alias mapping', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: 'Recycle / Nurture', NewValue: 'Totally Unknown Synthetic Stage', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.stageValues.unknownNonblank).toBe(1);
+    expect(summary.history.stageValues.unknownLabels).toEqual([
+      { label: 'Totally Unknown Synthetic Stage', occurrences: 1, seenAs: 'new' },
+    ]);
+  });
+});
+
+describe('record-type diagnostics and custom fields (final hardening)', () => {
+  const record = opp({ Id: 'SYNTH-OPP-A' });
+
+  it('names an id-resolved record type outside the funnel mapping, without the id', () => {
+    const LEGACY_RT_ID = '012AAAA0000SYN7XYZ';
+    const refs = [
+      { Id: LEGACY_RT_ID, Name: 'Synthetic Legacy Type', DeveloperName: 'Synthetic_Legacy_Type', SobjectType: 'Opportunity' },
+    ];
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: LEGACY_RT_ID, NewValue: 'High Potential Prospect', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    expect(summary.history.recordTypeDiagnostics).toEqual([
+      {
+        name: 'Synthetic Legacy Type',
+        developerName: 'Synthetic_Legacy_Type',
+        occurrences: 1,
+        seenAs: 'old',
+        confirmedOpportunityType: true,
+      },
+    ]);
+    // The id itself never appears anywhere in the summary.
+    expect(JSON.stringify(summary)).not.toContain(LEGACY_RT_ID);
+  });
+
+  it('marks a non-Opportunity record type as unconfirmed for Opportunity', () => {
+    const OTHER_RT_ID = '012AAAA0000SYN8XYZ';
+    const refs = [
+      { Id: OTHER_RT_ID, Name: 'Synthetic Case Type', DeveloperName: 'Synthetic_Case_Type', SobjectType: 'Case' },
+    ];
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: OTHER_RT_ID, CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    expect(summary.history.recordTypeDiagnostics[0].confirmedOpportunityType).toBe(false);
+    expect(summary.history.recordTypeDiagnostics[0].seenAs).toBe('new');
+  });
+
+  it('records the confirmed custom-field API names exactly', () => {
+    expect(CONFIRMED_CUSTOM_FIELDS['Commercial Region']).toBe('Commercial_Region__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['HPP Date']).toBe('HPP_Date__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['Opportunity Date']).toBe('Opportunity_Date__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['Pursuit Date']).toBe('Pursuit_Date__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['Sales Development Rep / BDR']).toBe('Sales_Development_Rep__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['SaaS Revenue']).toBe('SaaS_Revenue__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['SaaS Revenue USD']).toBe('SaaS_Revenue_USD__c');
+    expect(CONFIRMED_CUSTOM_FIELDS.Currency).toBe('CurrencyIsoCode');
+    expect(CONFIRMED_CUSTOM_FIELDS['GTM - Cube']).toBe('GTM_Cube__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['Customer Expansion']).toBe('Existing_Customer_or_New_Business__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['Line of Business (LOB)']).toBe('Business_Units__c');
+    expect(CONFIRMED_CUSTOM_FIELDS['Primary Campaign Source']).toBe('CampaignId');
+  });
+
+  it('keeps Industry Vertical unresolved and reports candidate coverage', () => {
+    expect(Object.keys(CONFIRMED_CUSTOM_FIELDS)).not.toContain('Industry Vertical');
+    expect(INDUSTRY_VERTICAL_CANDIDATES).toEqual(['Industry_Vertical__c', 'Pursuit_Industry_Vertical__c']);
+    const records = [
+      opp({ Id: 'SYNTH-OPP-V1', Industry_Vertical__c: 'Synthetic Vertical' }),
+      opp({ Id: 'SYNTH-OPP-V2', Pursuit_Industry_Vertical__c: 'Synthetic Vertical' }),
+      opp({ Id: 'SYNTH-OPP-V3' }),
+    ];
+    const summary = buildDryRunSummary(records, [], [], RUN);
+    expect(summary.industryVertical.nonblankCoverage).toEqual({
+      Industry_Vertical__c: 1,
+      Pursuit_Industry_Vertical__c: 1,
+    });
   });
 });
 
