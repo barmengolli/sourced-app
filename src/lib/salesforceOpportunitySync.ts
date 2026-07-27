@@ -705,6 +705,26 @@ export function buildDryRunSummary(
   input: { executedAt: string; year: number },
   scopeInput: { approvedBdrNames?: string[]; users?: SalesforceUserRef[] } = {},
 ): DryRunSummary {
+  // Amplification guards: a duplicate Id in a global query's output means
+  // the query executed more than once per run (n8n runs a node once per
+  // input item unless Execute Once is set). Fail loudly; silently
+  // deduplicating would hide the defect and corrupt API budgets.
+  const assertUniqueIds = (ids: Array<string | undefined>, label: string): void => {
+    const seen = new Set<string>();
+    for (const raw of ids) {
+      const id = (raw ?? '').trim();
+      if (!id) continue;
+      if (seen.has(id)) {
+        throw new Error(
+          `query amplification: duplicate ${label} Id in query output; a global query executed more than once per run`,
+        );
+      }
+      seen.add(id);
+    }
+  };
+  assertUniqueIds(records.map((r) => r.Id), 'Opportunity');
+  assertUniqueIds(recordTypeRefs.map((r) => r.Id), 'RecordType');
+
   const idMap = buildRecordTypeIdMap(recordTypeRefs);
 
   // Resolve record-type history values through the runtime map BEFORE the

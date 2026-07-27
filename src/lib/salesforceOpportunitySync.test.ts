@@ -819,6 +819,27 @@ describe('n8n workflow template safety (static)', () => {
     }
   });
 
+  it('global queries execute once; the per-batch history query does not', () => {
+    const byName = (name: string) =>
+      template.nodes.find((n) => n.name.includes(name)) as { executeOnce?: boolean } & (typeof template.nodes)[0];
+    // 341 Describe items cannot cause repeated RecordType queries, and many
+    // RecordType items cannot cause repeated Opportunity queries: both are
+    // global queries pinned to exactly one execution per run.
+    expect(byName('Fetch Opportunity RecordTypes').executeOnce).toBe(true);
+    expect(byName('Fetch included Opportunities').executeOnce).toBe(true);
+    // FieldHistory intentionally executes once per 200-id batch item.
+    expect(byName('Fetch OpportunityFieldHistory').executeOnce).not.toBe(true);
+    // Runtime guards FAIL on duplicate ids instead of silently deduplicating:
+    // the batch node for Opportunities, the Aggregate for both globals.
+    const batch = byName('Batch Opportunity IDs');
+    expect(String(batch.parameters.jsCode)).toContain('QUERY AMPLIFICATION: duplicate Opportunity Id');
+    const aggregate = byName('Aggregate summary');
+    expect(String(aggregate.parameters.jsCode)).toContain("dupCheck(rts, 'RecordType')");
+    expect(String(aggregate.parameters.jsCode)).toContain("dupCheck(opps, 'Opportunity')");
+    // Batching itself remains complete and unique (200 per IN clause).
+    expect(String(batch.parameters.jsCode)).toContain('i += 200');
+  });
+
   it('no critical read node can silently terminate the workflow', () => {
     // Every Salesforce read node always outputs data, so a zero-item result
     // can never end the run as a false success before GUARD.
@@ -883,6 +904,27 @@ describe('n8n workflow template safety (static)', () => {
     expect(code).toContain("dry_run !== true");
     expect(code).toContain('writes_attempted !== 0');
     expect(code).toContain('throw new Error');
+  });
+});
+
+describe('query amplification guards (pure layer)', () => {
+  it('duplicate Opportunity Ids fail instead of being silently deduplicated', () => {
+    const dup = opp({ Id: 'SYNTH-OPP-DUP' });
+    expect(() => buildDryRunSummary([dup, { ...dup }], [], [], RUN)).toThrow(/amplification.*Opportunity/);
+  });
+
+  it('duplicate RecordType Ids fail instead of being silently deduplicated', () => {
+    const refs = [
+      { Id: '012AAAA0000SYN1', Name: 'A', DeveloperName: 'High_Potential_Prospect', SobjectType: 'Opportunity' },
+      { Id: '012AAAA0000SYN1', Name: 'A', DeveloperName: 'High_Potential_Prospect', SobjectType: 'Opportunity' },
+    ];
+    expect(() => buildDryRunSummary([opp()], [], refs, RUN)).toThrow(/amplification.*RecordType/);
+  });
+
+  it('unique inputs continue to a full summary', () => {
+    const summary = buildDryRunSummary([opp(), opp()], [], [], RUN);
+    expect(summary.dry_run).toBe(true);
+    expect(summary.scope.discovered).toBe(2);
   });
 });
 
