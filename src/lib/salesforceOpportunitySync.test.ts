@@ -607,6 +607,14 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
     expect(Object.keys(ambiguous.userIdByName)).toHaveLength(0);
     const unknown = resolveApprovedBdrUsers(['Synthetic Nobody'], users);
     expect(unknown.errors[0]).toContain('0 active users');
+    // One valid and one missing name still errors (the run must not proceed
+    // half-configured); two unique matches produce no errors.
+    const mixed = resolveApprovedBdrUsers(['Synthetic Bdr One', 'Synthetic Nobody'], users);
+    expect(mixed.errors).toHaveLength(1);
+    expect(Object.keys(mixed.userIdByName)).toEqual(['Synthetic Bdr One']);
+    const both = resolveApprovedBdrUsers(['Synthetic Bdr One', 'Synthetic Bdr Two'], users);
+    expect(both.errors).toEqual([]);
+    expect(Object.keys(both.userIdByName)).toHaveLength(2);
     // Inactive users never match.
     const inactive = resolveApprovedBdrUsers(['Synthetic Bdr One'], [
       { Id: 'SYNTH-USER-BDR1', Name: 'Synthetic Bdr One', IsActive: false },
@@ -754,9 +762,10 @@ describe('n8n workflow template safety (static)', () => {
     const userQuery = template.nodes.find((n) => n.name.includes('Resolve approved BDR users'));
     expect(userQuery).toBeTruthy();
     expect(String(userQuery!.parameters.query)).toContain('FROM User WHERE IsActive = true');
-    // The summary fails safely on ambiguous or unknown configured names.
-    const summary = template.nodes.find((n) => n.name.startsWith('DRY RUN: Aggregate summary'));
-    expect(String(summary!.parameters.jsCode)).toContain('expected exactly 1');
+    // The dedicated validator fails safely on ambiguous or unknown names.
+    const validator = template.nodes.find((n) => n.name === 'VALIDATE: approved BDR resolution');
+    expect(validator).toBeTruthy();
+    expect(String(validator!.parameters.jsCode)).toContain('verify the exact Salesforce User display name');
     // The private creator diagnostic is clearly labeled and never feeds the guard.
     const privateNode = template.nodes.find((n) => n.name.startsWith('PRIVATE (n8n only)'));
     expect(privateNode).toBeTruthy();
@@ -808,6 +817,63 @@ describe('n8n workflow template safety (static)', () => {
     ]) {
       expect(ancestors.has(name)).toBe(true);
     }
+  });
+
+  it('no critical read node can silently terminate the workflow', () => {
+    // Every Salesforce read node always outputs data, so a zero-item result
+    // can never end the run as a false success before GUARD.
+    const sfNodes = template.nodes.filter((n) => n.type === 'n8n-nodes-base.salesforce');
+    expect(sfNodes).toHaveLength(5);
+    for (const node of sfNodes) {
+      expect((node as { alwaysOutputData?: boolean }).alwaysOutputData).toBe(true);
+    }
+    // The Aggregate filters the always-output sentinel before counting and
+    // fails fast on empty or broken source data; only zero HISTORY rows may
+    // legitimately continue.
+    const aggregate = template.nodes.find((n) => n.name.startsWith('DRY RUN: Aggregate summary'))!;
+    const js = String(aggregate.parameters.jsCode);
+    expect(js).toContain('never counted as records');
+    expect(js).toContain('required Opportunity fields absent');
+    expect(js).toContain('included DeveloperName absent');
+    expect(js).toContain('refusing to report an empty dry run as success');
+    // The validator's approved ids are consumed, never re-derived and never
+    // emitted in the shared output.
+    expect(js).toContain("$('VALIDATE: approved BDR resolution')");
+    expect(js).not.toContain('approvedUserIds:');
+  });
+
+  it('the validator sits between Resolve and Describe on the serial chain', () => {
+    const connections = (
+      JSON.parse(match![1]) as { connections: Record<string, { main: Array<Array<{ node: string }>> }> }
+    ).connections;
+    expect(connections['READ ONLY: Resolve approved BDR users'].main[0]).toEqual([
+      { node: 'VALIDATE: approved BDR resolution', type: 'main', index: 0 },
+    ]);
+    expect(connections['VALIDATE: approved BDR resolution'].main[0]).toEqual([
+      { node: 'READ ONLY: Describe Opportunity fields', type: 'main', index: 0 },
+    ]);
+  });
+
+  it('every successful shared workflow path terminates at GUARD', () => {
+    const connections = (
+      JSON.parse(match![1]) as { connections: Record<string, { main: Array<Array<{ node: string }>> }> }
+    ).connections;
+    const PRIVATE = 'PRIVATE (n8n only): creators by name - DO NOT SHARE';
+    // Walk the shared path from the trigger; every shared node must have a
+    // successor until GUARD, which must be terminal.
+    let current = 'Manual Trigger - DRY RUN ONLY';
+    const visited = new Set<string>();
+    while (current !== 'GUARD: fail unless dry run with zero writes') {
+      expect(visited.has(current)).toBe(false);
+      visited.add(current);
+      const successors = (connections[current]?.main[0] ?? [])
+        .map((t) => t.node)
+        .filter((n) => n !== PRIVATE);
+      // Exactly one shared successor: a serial chain with no dead ends.
+      expect(successors).toHaveLength(1);
+      current = successors[0];
+    }
+    expect(connections['GUARD: fail unless dry run with zero writes']).toBeUndefined();
   });
 
   it('ends in a guard that fails unless the run proves dry_run with zero writes', () => {
