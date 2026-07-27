@@ -11,6 +11,12 @@
 // an attribution operation, or any write outside the protected tables (the
 // operation type system does not contain such an operation).
 //
+// Staging is RESTRICTED: a newly discovered, unlinked record is staged only
+// when it is queue-eligible. Excluded records (current Service/out_of_scope,
+// unknown record types, older closed outside the cohort) appear ONLY in
+// aggregate diagnostics without identifiers. Existing links and existing
+// reviews keep staging so protected history is preserved.
+//
 // Pure: no Supabase, no network, no clock (run timestamps are injected).
 // Idempotent: the same input against the same existing state plans zero
 // duplicate operations. Calculation semantics stay in Bite 5A; review
@@ -44,12 +50,14 @@ import {
   assertUniqueSourceIds,
   mapBaselineObservation,
   normalizeSourceValue,
+  INDUSTRY_VERTICAL_CANDIDATES,
 } from './salesforceOpportunitySync';
 import type {
   SalesforceOpportunityRecord,
   SalesforceOpportunityHistoryRecord,
   SalesforceRecordTypeRef,
 } from './salesforceOpportunitySync';
+import { sha256Hex } from './sha256';
 
 // ---------------------------------------------------------------------------
 // The allowlist: the ONLY tables any planned operation may target
@@ -79,6 +87,8 @@ export const PROTECTED_STAGING_TABLES: ReadonlySet<ProtectedStagingTable> = new 
 export interface ExistingSnapshotState {
   contentHash: string | null;
   recordTypeDeveloperName: string | null;
+  // The staged SystemModstamp: the stale-write guard.
+  sfLastModifiedAt: string | null;
 }
 
 export interface ExistingLinkState {
@@ -111,6 +121,132 @@ export interface IngestionConfig {
 }
 
 // ---------------------------------------------------------------------------
+// The full staged snapshot payload (apply-ready review evidence)
+// ---------------------------------------------------------------------------
+// Enough evidence to review a candidate WITHOUT querying raw Salesforce
+// again. Classification evidence is raw values and source USER IDS only:
+// configured employee names never enter storage. No canonical Industry
+// Vertical field is chosen and no Customer Expansion rule is applied; the
+// raw values are evidence.
+
+export interface SnapshotPayload {
+  sf_opportunity_id: string;
+  record_type_developer_name: string | null;
+  record_type_label: string | null;
+  normalized_record_type_state: OpportunityRecordTypeState | 'unknown';
+  stage_name: string | null;
+  is_closed: boolean | null;
+  is_won: boolean | null;
+  opportunity_name: string | null;
+  account_name: string | null;
+  amount: number | null;
+  amount_currency: string | null;
+  saas_revenue: number | null;
+  saas_revenue_usd: number | null;
+  close_date: string | null;
+  commercial_region: string | null;
+  opportunity_owner: string | null;
+  primary_campaign_source: string | null;
+  customer_expansion_raw: string | null;
+  sales_development_rep_user_id: string | null;
+  created_by_user_id: string | null;
+  insurance_vertical_raw: string | null;
+  industry_vertical_raw: string | null;
+  pursuit_industry_vertical_raw: string | null;
+  gtm_cube: string | null;
+  business_units: string | null;
+  sf_created_at: string | null;
+  sf_last_modified_at: string;
+  content_hash: string;
+}
+
+const str = (v: unknown): string | null => normalizeSourceValue(typeof v === 'string' ? v : null);
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+export function normalizedRecordTypeState(
+  rec: SalesforceOpportunityRecord,
+): OpportunityRecordTypeState | 'unknown' {
+  const dev = normalizeSourceValue(rec.RecordType?.DeveloperName ?? null);
+  if (dev === null) return 'unknown';
+  return DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[dev] ?? 'unknown';
+}
+
+export function buildSnapshotPayload(rec: SalesforceOpportunityRecord): SnapshotPayload {
+  const modstamp = str(rec.SystemModstamp) ?? str(rec.LastModifiedDate);
+  if (modstamp === null) {
+    // A staged snapshot without a source modification timestamp cannot
+    // participate in stale-write protection: fail validation, never guess.
+    throw new Error('snapshot validation: missing source SystemModstamp/LastModifiedDate');
+  }
+  const withoutHash: Omit<SnapshotPayload, 'content_hash'> = {
+    sf_opportunity_id: rec.Id,
+    record_type_developer_name: str(rec.RecordType?.DeveloperName),
+    record_type_label: str(rec.RecordType?.Name),
+    normalized_record_type_state: normalizedRecordTypeState(rec),
+    stage_name: str(rec.StageName),
+    is_closed: typeof rec.IsClosed === 'boolean' ? rec.IsClosed : null,
+    is_won: typeof rec.IsWon === 'boolean' ? rec.IsWon : null,
+    opportunity_name: str(rec.Name),
+    account_name: str(rec.Account?.Name),
+    amount: num(rec.Amount),
+    amount_currency: str(rec.CurrencyIsoCode),
+    saas_revenue: num(rec.SaaS_Revenue__c),
+    saas_revenue_usd: num(rec.SaaS_Revenue_USD__c),
+    close_date: str(rec.CloseDate),
+    commercial_region: str(rec.Commercial_Region__c),
+    opportunity_owner: str(rec.OwnerId),
+    primary_campaign_source: str(rec.CampaignId),
+    customer_expansion_raw: str(rec.Existing_Customer_or_New_Business__c),
+    sales_development_rep_user_id: str(rec.Sales_Development_Rep__c),
+    created_by_user_id: str(rec.CreatedById),
+    insurance_vertical_raw: str(rec[INDUSTRY_VERTICAL_CANDIDATES_FULL[0]]),
+    industry_vertical_raw: str(rec[INDUSTRY_VERTICAL_CANDIDATES_FULL[1]]),
+    pursuit_industry_vertical_raw: str(rec[INDUSTRY_VERTICAL_CANDIDATES_FULL[2]]),
+    gtm_cube: str(rec.GTM_Cube__c),
+    business_units: str(rec.Business_Units__c),
+    sf_created_at: str(rec.CreatedDate),
+    sf_last_modified_at: modstamp,
+  };
+  return { ...withoutHash, content_hash: snapshotFingerprint(withoutHash) };
+}
+
+// All three unresolved Industry Vertical candidates ride along as separate
+// raw evidence fields.
+const INDUSTRY_VERTICAL_CANDIDATES_FULL = [
+  'Insurance_vertical__c',
+  ...INDUSTRY_VERTICAL_CANDIDATES.filter((f) => f !== 'Insurance_vertical__c'),
+];
+
+// Collision-resistant deterministic fingerprint: SHA-256 over an explicitly
+// ORDERED canonical [field, value] list covering every staged snapshot
+// field. Key order of the source object is irrelevant by construction.
+export function snapshotFingerprint(payload: Omit<SnapshotPayload, 'content_hash'>): string {
+  const orderedFields = Object.keys(payload).sort();
+  const canonical = JSON.stringify(
+    orderedFields.map((field) => [field, (payload as Record<string, unknown>)[field] ?? null]),
+  );
+  return `sha256:${sha256Hex(canonical)}`;
+}
+
+// Canonical event fingerprint for the database-boundary conflict check.
+export function eventContentFingerprint(event: EventInsert): string {
+  const canonical = JSON.stringify([
+    event.sf_opportunity_id,
+    event.sf_history_id,
+    event.source_field,
+    event.old_value,
+    event.new_value,
+    event.event_kind,
+    event.from_record_type_state,
+    event.to_record_type_state,
+    event.from_terminal_state,
+    event.to_terminal_state,
+    event.changed_at,
+  ]);
+  return `sha256:${sha256Hex(canonical)}`;
+}
+
+// ---------------------------------------------------------------------------
 // Planned operations (discriminated, table-typed, allowlisted)
 // ---------------------------------------------------------------------------
 
@@ -119,12 +255,13 @@ export type PlannedOperation =
       op: 'upsert_snapshot';
       table: 'sf_opportunities';
       sfOpportunityId: string;
-      contentHash: string;
-      recordTypeDeveloperName: string | null;
+      payload: SnapshotPayload;
       changed: boolean; // false = brand new insert
     }
   | { op: 'noop_snapshot'; table: 'sf_opportunities'; sfOpportunityId: string }
-  | { op: 'insert_event'; table: 'sf_opportunity_events'; event: EventInsert }
+  | { op: 'noop_stale_snapshot'; table: 'sf_opportunities'; sfOpportunityId: string }
+  | { op: 'block_snapshot_conflict'; table: 'sf_opportunities'; sfOpportunityId: string }
+  | { op: 'insert_event'; table: 'sf_opportunity_events'; event: EventInsert; contentHash: string }
   | { op: 'noop_duplicate_event'; table: 'sf_opportunity_events'; sfHistoryId: string }
   | {
       op: 'block_conflicting_event';
@@ -159,11 +296,16 @@ export interface SyncRunDiagnostics {
   proposedWatermarkSystemModstamp: string | null;
   proposedWatermarkHistoryCreatedAt: string | null;
   rowsDiscovered: number;
+  // Discovered records excluded from staging entirely (aggregate only; no
+  // identifiers are retained for them anywhere).
+  excludedNotStaged: number;
   eventsPlanned: number;
   exactDuplicateEvents: number;
   conflictingEvents: number;
   snapshotsPlanned: number;
   snapshotNoops: number;
+  staleSnapshotsSkipped: number;
+  snapshotConflicts: number;
   reviewsCreated: number;
   reviewIssueUpdates: number;
   eligibility: Record<EligibilityOutcome, number>;
@@ -192,52 +334,10 @@ export interface IngestionPlan {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// Deterministic FNV-1a content hash over the snapshot-relevant fields. Pure
-// and dependency-free; collisions only cause a harmless extra update.
-export function snapshotContentHash(rec: SalesforceOpportunityRecord): string {
-  const material = JSON.stringify([
-    rec.Id,
-    rec.RecordType?.DeveloperName ?? null,
-    rec.RecordType?.Name ?? null,
-    rec.StageName ?? null,
-    rec.IsClosed ?? null,
-    rec.IsWon ?? null,
-    rec.Name ?? null,
-    rec.AccountId ?? null,
-    rec.Account?.Name ?? null,
-    rec.Amount ?? null,
-    rec.CurrencyIsoCode ?? null,
-    rec.CloseDate ?? null,
-    rec.OwnerId ?? null,
-    rec.CampaignId ?? null,
-    rec.CreatedDate ?? null,
-    rec.SystemModstamp ?? rec.LastModifiedDate ?? null,
-    rec.Commercial_Region__c ?? null,
-    rec.Sales_Development_Rep__c ?? null,
-    rec.Existing_Customer_or_New_Business__c ?? null,
-  ]);
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < material.length; i += 1) {
-    hash ^= material.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `fnv1a:${hash.toString(16).padStart(8, '0')}:${material.length}`;
-}
-
-function normalizedRecordTypeState(rec: SalesforceOpportunityRecord): OpportunityRecordTypeState | 'unknown' {
-  const dev = normalizeSourceValue(rec.RecordType?.DeveloperName ?? null);
-  if (dev === null) return 'unknown';
-  return DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[dev] ?? 'unknown';
-}
-
-const FUNNEL_STATES: ReadonlySet<string> = new Set(['hpp', 'opp', 'pursuit']);
-
-// ---------------------------------------------------------------------------
 // Eligibility (evidence fields never include, exclude, attribute, or assign)
 // ---------------------------------------------------------------------------
+
+const FUNNEL_STATES: ReadonlySet<string> = new Set(['hpp', 'opp', 'pursuit']);
 
 export function classifyCandidateEligibility(
   rec: SalesforceOpportunityRecord,
@@ -266,6 +366,25 @@ export function classifyCandidateEligibility(
   return 'eligible_new_candidate';
 }
 
+// A record is STAGED (snapshot + history) only when queue-eligible, already
+// under review (protected history is retained even while temporarily out of
+// scope), or linked (active or retired: preserved, never reactivated).
+// Everything else stays out of protected storage entirely.
+function isStaged(outcome: EligibilityOutcome, hasExistingReview: boolean): boolean {
+  switch (outcome) {
+    case 'eligible_new_candidate':
+    case 'already_pending_review':
+    case 'blocked_by_review_state':
+    case 'linked_active':
+    case 'linked_retired':
+      return true;
+    case 'excluded_out_of_scope':
+    case 'excluded_unknown_record_type':
+    case 'excluded_older_closed':
+      return hasExistingReview;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The planner
 // ---------------------------------------------------------------------------
@@ -280,14 +399,6 @@ export function planStagingIngestion(
   assertUniqueSourceIds(records.map((r) => r.Id), 'Opportunity');
   const prepared = prepareHistoryRows(historyRecords, recordTypeRefs);
 
-  // Bite 5A derivation over the prepared rows: issue detection (unknown
-  // values, ambiguity, conflicts) feeds review seeding exactly as in the
-  // dry run. Baselines are supplied for every record; the adapter applies
-  // them only where no accepted history exists.
-  const baselines = records.map((r) => mapBaselineObservation(r, config.runStartedAt));
-  const derived = adaptOpportunityHistory(prepared.rows, DRY_RUN_STAGE_CONFIG, baselines);
-  const derivedById = new Map(derived.opportunities.map((o) => [o.opportunityId, o]));
-
   const operations: PlannedOperation[] = [];
   const eligibility: Record<EligibilityOutcome, number> = {
     eligible_new_candidate: 0,
@@ -300,42 +411,82 @@ export function planStagingIngestion(
     linked_retired: 0,
   };
   const linked = { activeSynced: 0, nowUnavailableService: 0, restoredToFunnel: 0, retiredNoAction: 0 };
+  let excludedNotStaged = 0;
   let reviewsCreated = 0;
   let reviewIssueUpdates = 0;
   let snapshotsPlanned = 0;
   let snapshotNoops = 0;
+  let staleSnapshotsSkipped = 0;
+  let snapshotConflicts = 0;
 
-  // --- Snapshots: staged for EVERY discovered record. Staging never affects
-  // reporting, so mirroring source truth (including out-of-scope and
-  // older-closed records) is safe and preserves history; only REVIEW
-  // operations are eligibility-gated.
+  // Classify first: staging is restricted to eligible, reviewed, or linked
+  // records. Excluded records appear only in the aggregate counters.
+  const outcomes = new Map<string, EligibilityOutcome>();
+  const stagedRecords: SalesforceOpportunityRecord[] = [];
   for (const rec of records) {
-    const hash = snapshotContentHash(rec);
-    const prior = existing.snapshots[rec.Id];
-    if (prior && prior.contentHash === hash) {
-      operations.push({ op: 'noop_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
-      snapshotNoops += 1;
+    const outcome = classifyCandidateEligibility(rec, existing, config);
+    outcomes.set(rec.Id, outcome);
+    eligibility[outcome] += 1;
+    if (isStaged(outcome, existing.reviews[rec.Id] !== undefined)) {
+      stagedRecords.push(rec);
     } else {
-      operations.push({
-        op: 'upsert_snapshot',
-        table: 'sf_opportunities',
-        sfOpportunityId: rec.Id,
-        contentHash: hash,
-        recordTypeDeveloperName: normalizeSourceValue(rec.RecordType?.DeveloperName ?? null),
-        changed: prior !== undefined,
-      });
-      snapshotsPlanned += 1;
+      excludedNotStaged += 1;
     }
   }
+  const stagedIds = new Set(stagedRecords.map((r) => r.Id));
 
-  // --- Append-only history events: insert only what is new; exact repeats
-  // are informational no-ops; a same-Id conflict blocks (no version chosen)
-  // and routes the opportunity to review.
+  // Bite 5A derivation over the prepared rows of STAGED opportunities:
+  // issue detection feeds review seeding exactly as in the dry run.
+  const stagedRows = prepared.rows.filter((row) => stagedIds.has(row.opportunityId));
+  const baselines = stagedRecords.map((r) => mapBaselineObservation(r, config.runStartedAt));
+  const derived = adaptOpportunityHistory(stagedRows, DRY_RUN_STAGE_CONFIG, baselines);
+  const derivedById = new Map(derived.opportunities.map((o) => [o.opportunityId, o]));
+
+  // --- Snapshots with stale-write and same-timestamp-conflict protection.
+  for (const rec of stagedRecords) {
+    const payload = buildSnapshotPayload(rec);
+    const prior = existing.snapshots[rec.Id];
+    if (prior) {
+      const priorStamp = prior.sfLastModifiedAt;
+      if (priorStamp !== null && payload.sf_last_modified_at < priorStamp) {
+        // Older source data can never overwrite newer staged data.
+        operations.push({ op: 'noop_stale_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
+        staleSnapshotsSkipped += 1;
+        continue;
+      }
+      if (priorStamp !== null && payload.sf_last_modified_at === priorStamp) {
+        if (prior.contentHash === payload.content_hash) {
+          operations.push({ op: 'noop_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
+          snapshotNoops += 1;
+          continue;
+        }
+        // Same source timestamp, different content: never silently choose.
+        operations.push({ op: 'block_snapshot_conflict', table: 'sf_opportunities', sfOpportunityId: rec.Id });
+        snapshotConflicts += 1;
+        continue;
+      }
+      if (prior.contentHash === payload.content_hash) {
+        operations.push({ op: 'noop_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
+        snapshotNoops += 1;
+        continue;
+      }
+    }
+    operations.push({
+      op: 'upsert_snapshot',
+      table: 'sf_opportunities',
+      sfOpportunityId: rec.Id,
+      payload,
+      changed: prior !== undefined,
+    });
+    snapshotsPlanned += 1;
+  }
+
+  // --- Append-only history events for staged opportunities only.
   const conflictedByOpportunity = new Map<string, string[]>();
   let exactDuplicateEvents = 0;
   const recordTypeField = DRY_RUN_STAGE_CONFIG.recordTypeFieldName;
   const stageField = DRY_RUN_STAGE_CONFIG.stageFieldName ?? 'StageName';
-  for (const row of prepared.rows) {
+  for (const row of stagedRows) {
     if (row.field !== recordTypeField && row.field !== stageField) continue;
     const incoming: EventRowContent = {
       sfOpportunityId: row.opportunityId,
@@ -363,38 +514,32 @@ export function planStagingIngestion(
       conflictedByOpportunity.set(row.opportunityId, list);
       continue;
     }
-    // New event. The ledger event is derived from the Bite 5A ledger so the
-    // normalized states travel with the raw values.
     const ledgerEvent = derived.ledger.find((e) => e.sourceHistoryId === row.historyId);
     const terminalEvent = derived.terminalLedger.find((e) => e.sourceHistoryId === row.historyId);
     if (terminalEvent) {
+      const event = buildTerminalEventInsert(terminalEvent, row.field);
       operations.push({
         op: 'insert_event',
         table: 'sf_opportunity_events',
-        event: buildTerminalEventInsert(terminalEvent, row.field),
+        event,
+        contentHash: eventContentFingerprint(event),
       });
     } else if (ledgerEvent && !ledgerEvent.baselineObservation) {
+      const event = buildRecordTypeEventInsert(ledgerEvent, row.field);
       operations.push({
         op: 'insert_event',
         table: 'sf_opportunity_events',
-        event: buildRecordTypeEventInsert(ledgerEvent, row.field),
+        event,
+        contentHash: eventContentFingerprint(event),
       });
     }
-    // Rows the derivation rejected (invalid/unknown) produce no event insert;
-    // their issues surface through review seeding below.
   }
 
-  // --- Per-opportunity review planning.
-  for (const rec of records) {
-    const outcome = classifyCandidateEligibility(rec, existing, config);
-    eligibility[outcome] += 1;
+  // --- Per-opportunity review planning (staged records only).
+  for (const rec of stagedRecords) {
+    const outcome = outcomes.get(rec.Id)!;
 
     if (outcome === 'linked_active') {
-      // Snapshot and history sync only: an active exact link never reopens
-      // approval. Service transitions are represented by the snapshot's
-      // normalized state; the future application layer derives active-funnel
-      // availability from it, and a return to hpp/opp/pursuit restores
-      // availability with no new review.
       linked.activeSynced += 1;
       const nowState = normalizedRecordTypeState(rec);
       const priorDev = existing.snapshots[rec.Id]?.recordTypeDeveloperName;
@@ -407,8 +552,6 @@ export function planStagingIngestion(
       continue;
     }
     if (outcome === 'linked_retired') {
-      // A retired link is never silently reactivated and never becomes an
-      // automatic candidate again; human review owns it.
       linked.retiredNoAction += 1;
       continue;
     }
@@ -433,8 +576,6 @@ export function planStagingIngestion(
 
     const existingReview = existing.reviews[rec.Id];
     if (outcome === 'eligible_new_candidate' && !existingReview) {
-      // Coupled by construction: the mutation carries the projection and its
-      // review_created audit event together.
       const mutation = createReviewMutation(seed, {
         actorType: 'ingestion',
         occurredAt: config.runStartedAt,
@@ -449,8 +590,15 @@ export function planStagingIngestion(
       continue;
     }
     if (outcome === 'already_pending_review' && existingReview) {
+      // Reviewer-controlled state is inviolable: channel, lead, notes, and
+      // human decisions are never touched, and a populated channel means
+      // missing_channel is RESOLVED by a human; ingestion never re-adds it.
+      let nextIssueCodes = seed.issue_codes;
+      if (existingReview.channelId !== null) {
+        nextIssueCodes = nextIssueCodes.filter((c) => c !== 'missing_channel');
+      }
       const currentCodes = [...existingReview.issueCodes].sort().join('|');
-      const nextCodes = [...seed.issue_codes].sort().join('|');
+      const nextCodes = [...nextIssueCodes].sort().join('|');
       if (currentCodes !== nextCodes) {
         operations.push({
           op: 'update_review_issues',
@@ -458,7 +606,7 @@ export function planStagingIngestion(
           sfOpportunityId: rec.Id,
           projection: {
             reviewState: existingReview.reviewState,
-            issueCodes: seed.issue_codes,
+            issueCodes: nextIssueCodes,
             channelId: existingReview.channelId,
             leadId: existingReview.leadId ?? null,
           },
@@ -466,7 +614,7 @@ export function planStagingIngestion(
             event_type: 'issues_updated',
             previous_state: null,
             new_state: null,
-            issue_codes_snapshot: [...seed.issue_codes].sort(),
+            issue_codes_snapshot: [...nextIssueCodes].sort(),
             actor_type: 'ingestion',
             actor_id: null,
             note: null,
@@ -482,8 +630,7 @@ export function planStagingIngestion(
     }
   }
 
-  // --- Watermarks: proposed only; the executor persists them exclusively on
-  // full-batch success.
+  // --- Watermarks: proposed only; persisted exclusively on full success.
   let maxModstamp: string | null = null;
   for (const rec of records) {
     const stamp = rec.SystemModstamp ?? rec.LastModifiedDate ?? null;
@@ -499,11 +646,14 @@ export function planStagingIngestion(
     proposedWatermarkSystemModstamp: maxModstamp,
     proposedWatermarkHistoryCreatedAt: maxHistory,
     rowsDiscovered: records.length,
+    excludedNotStaged,
     eventsPlanned: operations.filter((o) => o.op === 'insert_event').length,
     exactDuplicateEvents,
     conflictingEvents: [...conflictedByOpportunity.values()].reduce((a, b) => a + b.length, 0),
     snapshotsPlanned,
     snapshotNoops,
+    staleSnapshotsSkipped,
+    snapshotConflicts,
     reviewsCreated,
     reviewIssueUpdates,
     eligibility,
@@ -512,4 +662,109 @@ export function planStagingIngestion(
   operations.push({ op: 'record_sync_run', table: 'sf_opportunity_sync_runs', diagnostics });
 
   return { dryRunCompatible: true, operations, diagnostics };
+}
+
+// ---------------------------------------------------------------------------
+// Serialization boundary: IngestionPlan -> sf_apply_opportunity_ingestion
+// parameters. Typed and fail-closed: an unknown operation kind throws, and
+// nothing outside the allowlisted parameters can be produced.
+// ---------------------------------------------------------------------------
+
+export interface ApplyPayload {
+  p_snapshots: SnapshotPayload[];
+  p_events: Array<EventInsert & { content_hash: string }>;
+  // Reviews carry their audit event INSIDE the item so the SQL function can
+  // enforce projection/audit coupling atomically.
+  p_reviews: Array<
+    | { kind: 'create'; sf_opportunity_id: string; issue_codes: ReviewIssueCode[]; audit: ReviewEventInsert }
+    | { kind: 'update_issues'; sf_opportunity_id: string; issue_codes: ReviewIssueCode[]; audit: ReviewEventInsert }
+  >;
+  p_run: {
+    started_at: string;
+    watermark_system_modstamp: string | null;
+    watermark_history_created_at: string | null;
+    rows_discovered: number;
+    conflicts: number;
+  };
+}
+
+export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
+  // Any blocked conflict makes the batch non-appliable: the executor must
+  // resolve conflicts through review first. Fail closed.
+  if (plan.diagnostics.snapshotConflicts > 0) {
+    throw new Error('serialize: snapshot conflicts present; the batch is not appliable until reviewed');
+  }
+  const payload: ApplyPayload = {
+    p_snapshots: [],
+    p_events: [],
+    p_reviews: [],
+    p_run: {
+      started_at: plan.diagnostics.runStartedAt,
+      watermark_system_modstamp: plan.diagnostics.proposedWatermarkSystemModstamp,
+      watermark_history_created_at: plan.diagnostics.proposedWatermarkHistoryCreatedAt,
+      rows_discovered: plan.diagnostics.rowsDiscovered,
+      conflicts: plan.diagnostics.conflictingEvents,
+    },
+  };
+  for (const operation of plan.operations) {
+    switch (operation.op) {
+      case 'upsert_snapshot':
+        payload.p_snapshots.push(operation.payload);
+        break;
+      case 'insert_event':
+        payload.p_events.push({ ...operation.event, content_hash: operation.contentHash });
+        break;
+      case 'create_review':
+        payload.p_reviews.push({
+          kind: 'create',
+          sf_opportunity_id: operation.seed.sf_opportunity_id,
+          issue_codes: operation.seed.issue_codes,
+          audit: operation.auditEvent,
+        });
+        break;
+      case 'update_review_issues':
+        payload.p_reviews.push({
+          kind: 'update_issues',
+          sf_opportunity_id: operation.sfOpportunityId,
+          issue_codes: operation.projection.issueCodes,
+          audit: operation.auditEvent,
+        });
+        break;
+      case 'noop_snapshot':
+      case 'noop_stale_snapshot':
+      case 'noop_duplicate_event':
+      case 'block_snapshot_conflict':
+      case 'block_conflicting_event':
+      case 'record_sync_run':
+        // No-ops carry nothing; blocked conflicts stay out of the payload
+        // (they are review work); the run row is written by the function.
+        break;
+      default: {
+        // Fail closed on anything the serializer does not explicitly know.
+        const exhaustive: never = operation;
+        throw new Error(`serialize: unknown operation kind ${JSON.stringify(exhaustive)}`);
+      }
+    }
+  }
+  return payload;
+}
+
+// Dry-run serialization: aggregate counts only, zero writes attempted.
+export function summarizeDryRunPlan(plan: IngestionPlan): {
+  dry_run: true;
+  writes_attempted: 0;
+  wouldApply: { snapshots: number; events: number; reviewCreates: number; reviewIssueUpdates: number };
+  diagnostics: SyncRunDiagnostics;
+} {
+  return {
+    dry_run: true,
+    writes_attempted: 0,
+    wouldApply: {
+      snapshots: plan.diagnostics.snapshotsPlanned,
+      events: plan.diagnostics.eventsPlanned,
+      reviewCreates: plan.diagnostics.reviewsCreated,
+      reviewIssueUpdates: plan.diagnostics.reviewIssueUpdates,
+    },
+    diagnostics: plan.diagnostics,
+  };
 }

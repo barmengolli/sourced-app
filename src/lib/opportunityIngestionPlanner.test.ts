@@ -9,7 +9,10 @@ import { resolve } from 'node:path';
 import {
   planStagingIngestion,
   classifyCandidateEligibility,
-  snapshotContentHash,
+  buildSnapshotPayload,
+  snapshotFingerprint,
+  serializeApplyPayload,
+  summarizeDryRunPlan,
   PROTECTED_STAGING_TABLES,
 } from './opportunityIngestionPlanner';
 import type { ExistingStagingState, IngestionConfig } from './opportunityIngestionPlanner';
@@ -86,12 +89,18 @@ describe('candidate eligibility', () => {
     expect(p.diagnostics.eligibility.eligible_new_candidate).toBe(1);
   });
 
-  it('an older closed record not created in the cohort year is excluded from the queue but still staged', () => {
-    const p = plan([opp({ IsClosed: true, CreatedDate: '2024-03-01T09:00:00.000+0000' })]);
+  it('an older closed unlinked record is excluded and NOT staged: no snapshot, event, or review', () => {
+    const p = plan(
+      [opp({ Id: 'SYNTH-OPP-OLD', IsClosed: true, CreatedDate: '2024-03-01T09:00:00.000+0000' })],
+      [hist({ OpportunityId: 'SYNTH-OPP-OLD' })],
+    );
     expect(p.diagnostics.eligibility.excluded_older_closed).toBe(1);
     expect(p.diagnostics.reviewsCreated).toBe(0);
-    // The snapshot is still mirrored into protected staging.
-    expect(p.diagnostics.snapshotsPlanned).toBe(1);
+    expect(p.diagnostics.snapshotsPlanned).toBe(0);
+    expect(p.diagnostics.eventsPlanned).toBe(0);
+    expect(p.diagnostics.excludedNotStaged).toBe(1);
+    // Only aggregate diagnostics remain; no identifier survives anywhere.
+    expect(JSON.stringify(p.operations)).not.toContain('SYNTH-OPP-OLD');
   });
 
   it('the cohort year is configuration, not a hardcoded 2026', () => {
@@ -101,16 +110,40 @@ describe('candidate eligibility', () => {
     expect(classifyCandidateEligibility(rec, EMPTY, CONFIG)).toBe('excluded_older_closed');
   });
 
-  it('a current Service opportunity never enters the review queue', () => {
-    const p = plan([opp({ RecordType: { DeveloperName: 'Service', Name: 'Service' }, IsClosed: false })]);
+  it('an unlinked current Service opportunity is excluded and NOT staged at all', () => {
+    const p = plan(
+      [opp({ Id: 'SYNTH-OPP-SVC', RecordType: { DeveloperName: 'Service', Name: 'Service' }, IsClosed: false })],
+      [hist({ OpportunityId: 'SYNTH-OPP-SVC', OldValue: null, NewValue: 'Service' })],
+    );
     expect(p.diagnostics.eligibility.excluded_out_of_scope).toBe(1);
     expect(p.diagnostics.reviewsCreated).toBe(0);
+    expect(p.diagnostics.snapshotsPlanned).toBe(0);
+    expect(p.diagnostics.eventsPlanned).toBe(0);
+    expect(p.diagnostics.excludedNotStaged).toBe(1);
+  });
+
+  it('an out-of-scope record WITH an existing review keeps its protected history without queueing', () => {
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: { 'SYNTH-OPP-SVC2': { contentHash: 'stale', recordTypeDeveloperName: 'Licensing', sfLastModifiedAt: '2026-05-01T09:00:00.000+0000' } },
+      reviews: { 'SYNTH-OPP-SVC2': { reviewState: 'pending', issueCodes: ['missing_channel'], channelId: null } },
+    };
+    const p = plan(
+      [opp({ Id: 'SYNTH-OPP-SVC2', RecordType: { DeveloperName: 'Service', Name: 'Service' } })],
+      [],
+      existing,
+    );
+    // Staged (snapshot syncs, history preserved) but never a queue candidate.
+    expect(p.diagnostics.snapshotsPlanned).toBe(1);
+    expect(p.diagnostics.reviewsCreated).toBe(0);
+    expect(p.diagnostics.eligibility.excluded_out_of_scope).toBe(1);
   });
 
   it('an unknown record type is excluded from the queue, never an approvable candidate', () => {
     const p = plan([opp({ RecordType: { DeveloperName: 'Synthetic_Mystery', Name: 'Mystery' } })]);
     expect(p.diagnostics.eligibility.excluded_unknown_record_type).toBe(1);
     expect(p.diagnostics.reviewsCreated).toBe(0);
+    expect(p.diagnostics.snapshotsPlanned).toBe(0);
   });
 
   it('a historical Service visit is preserved for a currently eligible record', () => {
@@ -145,7 +178,7 @@ describe('candidate eligibility', () => {
 describe('linked opportunities', () => {
   const linkedState = (priorDev: string | null = 'Licensing'): ExistingStagingState => ({
     ...EMPTY,
-    snapshots: { 'SYNTH-OPP-L': { contentHash: 'stale', recordTypeDeveloperName: priorDev } },
+    snapshots: { 'SYNTH-OPP-L': { contentHash: 'stale', recordTypeDeveloperName: priorDev, sfLastModifiedAt: '2026-05-01T09:00:00.000+0000' } },
     links: { 'SYNTH-OPP-L': { dealId: 'deal-1', linkState: 'active' } },
     reviews: { 'SYNTH-OPP-L': { reviewState: 'linked', issueCodes: [], channelId: 'syn-channel-1' } },
   });
@@ -211,8 +244,9 @@ describe('idempotency and duplicates', () => {
     const afterApply: ExistingStagingState = {
       snapshots: {
         'SYNTH-OPP-A': {
-          contentHash: snapshotContentHash(records[0]),
+          contentHash: buildSnapshotPayload(records[0]).content_hash,
           recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000+0000',
         },
       },
       eventContentByHistoryId: {
@@ -363,14 +397,179 @@ describe('plan safety invariants', () => {
   });
 });
 
+describe('fingerprints and stale protection (hardening)', () => {
+  it('SHA-256 fingerprint covers every staged field and ignores key order', () => {
+    const a = buildSnapshotPayload(opp({ Id: 'SYNTH-OPP-F1' }));
+    expect(a.content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // A single field change alters the fingerprint.
+    const b = buildSnapshotPayload(opp({ Id: 'SYNTH-OPP-F1', StageName: '4) Discovery' }));
+    expect(b.content_hash).not.toBe(a.content_hash);
+    // Reordered object keys do not: the canonical form is field-sorted.
+    const { content_hash, ...fields } = a;
+    void content_hash;
+    const reversed = Object.fromEntries(Object.entries(fields).reverse()) as typeof fields;
+    expect(snapshotFingerprint(reversed)).toBe(snapshotFingerprint(fields));
+  });
+
+  it('a missing source modification timestamp fails validation', () => {
+    expect(() =>
+      buildSnapshotPayload(opp({ SystemModstamp: null, LastModifiedDate: null })),
+    ).toThrow(/missing source SystemModstamp/);
+  });
+
+  it('an older source timestamp is a stale no-op and cannot overwrite', () => {
+    const rec = opp({ Id: 'SYNTH-OPP-S1', SystemModstamp: '2026-05-01T09:00:00.000+0000' });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-S1': {
+          contentHash: 'sha256:newerhash',
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000+0000',
+        },
+      },
+      reviews: { 'SYNTH-OPP-S1': { reviewState: 'pending', issueCodes: [], channelId: null } },
+    };
+    const p = plan([rec], [], existing);
+    expect(p.diagnostics.staleSnapshotsSkipped).toBe(1);
+    expect(p.diagnostics.snapshotsPlanned).toBe(0);
+  });
+
+  it('an identical timestamp with different content is a blocked conflict, never chosen', () => {
+    const rec = opp({ Id: 'SYNTH-OPP-S2', SystemModstamp: '2026-06-01T09:00:00.000+0000' });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-S2': {
+          contentHash: 'sha256:differenthash',
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000+0000',
+        },
+      },
+      reviews: { 'SYNTH-OPP-S2': { reviewState: 'pending', issueCodes: [], channelId: null } },
+    };
+    const p = plan([rec], [], existing);
+    expect(p.diagnostics.snapshotConflicts).toBe(1);
+    expect(p.diagnostics.snapshotsPlanned).toBe(0);
+    // A conflicted batch is not appliable: serialization fails closed.
+    expect(() => serializeApplyPayload(p)).toThrow(/not appliable/);
+  });
+});
+
+describe('review preservation (hardening)', () => {
+  it('a populated channel means ingestion never re-adds missing_channel', () => {
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      reviews: {
+        'SYNTH-OPP-C1': {
+          reviewState: 'pending',
+          issueCodes: ['missing_region', 'incomplete_history'],
+          channelId: 'syn-channel-uuid-1',
+        },
+      },
+    };
+    const p = plan([opp({ Id: 'SYNTH-OPP-C1' })], [], existing);
+    const update = p.operations.find((o) => o.op === 'update_review_issues');
+    if (update && update.op === 'update_review_issues') {
+      expect(update.projection.issueCodes).not.toContain('missing_channel');
+      // Reviewer-controlled fields survive untouched.
+      expect(update.projection.channelId).toBe('syn-channel-uuid-1');
+    }
+    // Every planned code set excludes missing_channel for this review.
+    for (const o of p.operations) {
+      if (o.op === 'update_review_issues') {
+        expect(o.projection.issueCodes).not.toContain('missing_channel');
+      }
+    }
+  });
+});
+
+describe('serialization boundary (hardening)', () => {
+  it('round-trips a synthetic record into the full RPC payload without loss or leakage of excluded records', () => {
+    const included = opp({
+      Id: 'SYNTH-OPP-RT1',
+      Existing_Customer_or_New_Business__c: 'Synthetic Segment',
+      Sales_Development_Rep__c: 'SYNTH-USER-SDR1',
+      CreatedById: 'SYNTH-USER-CREATOR',
+      Commercial_Region__c: 'NA',
+      Industry_Vertical__c: 'Synthetic Vertical A',
+      Pursuit_Industry_Vertical__c: 'Synthetic Vertical B',
+      Insurance_vertical__c: 'Synthetic Vertical C',
+      GTM_Cube__c: 'Synthetic Cube',
+      Business_Units__c: 'Synthetic LOB',
+      SaaS_Revenue__c: 111,
+      SaaS_Revenue_USD__c: 222,
+    });
+    const excluded = opp({ Id: 'SYNTH-OPP-RT2', IsClosed: true, CreatedDate: '2023-01-01T09:00:00.000+0000' });
+    const rows = [hist({ OpportunityId: 'SYNTH-OPP-RT1', OldValue: null, NewValue: 'High Potential Prospect' })];
+    const p = plan([included, excluded], rows);
+    const payload = serializeApplyPayload(p);
+    // The staged snapshot carries every approved evidence field.
+    expect(payload.p_snapshots).toHaveLength(1);
+    const snap = payload.p_snapshots[0];
+    expect(snap.sf_opportunity_id).toBe('SYNTH-OPP-RT1');
+    expect(snap.normalized_record_type_state).toBe('hpp');
+    expect(snap.is_closed).toBe(false);
+    expect(snap.is_won).toBe(false);
+    expect(snap.customer_expansion_raw).toBe('Synthetic Segment');
+    expect(snap.sales_development_rep_user_id).toBe('SYNTH-USER-SDR1');
+    expect(snap.created_by_user_id).toBe('SYNTH-USER-CREATOR');
+    expect(snap.commercial_region).toBe('NA');
+    expect(snap.industry_vertical_raw).toBe('Synthetic Vertical A');
+    expect(snap.pursuit_industry_vertical_raw).toBe('Synthetic Vertical B');
+    expect(snap.insurance_vertical_raw).toBe('Synthetic Vertical C');
+    expect(snap.gtm_cube).toBe('Synthetic Cube');
+    expect(snap.business_units).toBe('Synthetic LOB');
+    expect(snap.saas_revenue).toBe(111);
+    expect(snap.saas_revenue_usd).toBe(222);
+    expect(snap.sf_last_modified_at).toBe('2026-06-01T09:00:00.000+0000');
+    expect(snap.content_hash).toMatch(/^sha256:/);
+    // Events carry their canonical content hash; reviews carry their audit.
+    expect(payload.p_events).toHaveLength(1);
+    expect(payload.p_events[0].content_hash).toMatch(/^sha256:/);
+    expect(payload.p_reviews).toHaveLength(1);
+    expect(payload.p_reviews[0].kind).toBe('create');
+    expect(payload.p_reviews[0].audit.event_type).toBe('review_created');
+    // The excluded record enters NOTHING.
+    expect(JSON.stringify(payload)).not.toContain('SYNTH-OPP-RT2');
+    // Watermarks ride in p_run.
+    expect(payload.p_run.watermark_system_modstamp).toBe('2026-06-01T09:00:00.000+0000');
+  });
+
+  it('dry-run serialization reports counts and attempts zero writes', () => {
+    const p = plan([opp()], []);
+    const dry = summarizeDryRunPlan(p);
+    expect(dry.dry_run).toBe(true);
+    expect(dry.writes_attempted).toBe(0);
+    expect(dry.wouldApply.snapshots).toBe(1);
+    expect(dry.wouldApply.reviewCreates).toBe(1);
+  });
+
+  it('unknown operation kinds fail closed', () => {
+    const p = plan([opp()], []);
+    const forged = {
+      ...p,
+      operations: [...p.operations, { op: 'update_deal', table: 'sf_opportunities' } as never],
+    };
+    expect(() => serializeApplyPayload(forged)).toThrow(/unknown operation kind/);
+  });
+});
+
 describe('apply-function migration safety (static SQL)', () => {
   const MIGRATION = readFileSync(
     resolve(process.cwd(), 'migrations/2026-07-27_opportunity_ingestion_apply_fn.sql'),
     'utf8',
   );
 
-  it('is a restricted SECURITY DEFINER function revoked from public roles', () => {
+  it('is a hardened SECURITY DEFINER function revoked from public roles', () => {
     expect(MIGRATION).toContain('SECURITY DEFINER');
+    expect(MIGRATION).toContain('SET search_path = pg_catalog');
+    // Every table reference is schema-qualified.
+    expect(MIGRATION).toContain('public.sf_opportunities');
+    expect(MIGRATION).toContain('public.sf_opportunity_events');
+    expect(MIGRATION).toContain('public.sf_opportunity_reviews');
+    expect(MIGRATION).toContain('public.sf_opportunity_review_events');
+    expect(MIGRATION).toContain('public.sf_opportunity_sync_runs');
     expect(MIGRATION).toMatch(/REVOKE ALL ON FUNCTION .* FROM PUBLIC/);
     expect(MIGRATION).toMatch(/REVOKE ALL ON FUNCTION .* FROM anon/);
     expect(MIGRATION).toMatch(/REVOKE ALL ON FUNCTION .* FROM authenticated/);
@@ -378,20 +577,71 @@ describe('apply-function migration safety (static SQL)', () => {
     expect(MIGRATION).toContain('NOT YET APPLIED');
   });
 
-  it('uses conflict-safe inserts and never updates append-only events', () => {
-    expect(MIGRATION).toContain('ON CONFLICT (sf_history_id) DO NOTHING');
-    expect(MIGRATION).toMatch(/ON CONFLICT \(dedupe_key\)[\s\S]{0,40}DO NOTHING/);
-    // No UPDATE statement may target either append-only table.
-    expect(MIGRATION).not.toMatch(/UPDATE\s+sf_opportunity_events/i);
-    expect(MIGRATION).not.toMatch(/UPDATE\s+sf_opportunity_review_events/i);
+  it('verifies event content instead of silently ignoring same-id conflicts', () => {
+    // The weak ON CONFLICT DO NOTHING on the History Id is gone: an
+    // existing id with identical content no-ops, different content FAILS.
+    expect(MIGRATION).not.toContain('ON CONFLICT (sf_history_id) DO NOTHING');
+    expect(MIGRATION).toContain("ERRCODE = 'SF003'");
+    expect(MIGRATION).toContain('history event content differs for an existing history id');
+    // Audit dedupe collisions with different content also fail.
+    expect(MIGRATION).toContain("ERRCODE = 'SF004'");
+    // Never an UPDATE against either append-only table.
+    expect(MIGRATION).not.toMatch(/UPDATE\s+(public\.)?sf_opportunity_events/i);
+    expect(MIGRATION).not.toMatch(/UPDATE\s+(public\.)?sf_opportunity_review_events/i);
     // No writes outside the six protected tables.
-    expect(MIGRATION).not.toMatch(/INSERT INTO\s+(?!sf_opportunit)/i);
+    expect(MIGRATION).not.toMatch(/INSERT INTO\s+(?!public\.sf_opportunit)/i);
     expect(MIGRATION).not.toMatch(/\b(attributions|leads|channels|funnel_actuals|campaign_)/i);
   });
 
-  it('binds the watermark to full-batch success', () => {
+  it('guards snapshots against stale and same-timestamp-conflicting writes', () => {
+    expect(MIGRATION).toContain("ERRCODE = 'SF002'");
+    expect(MIGRATION).toContain('snapshot content differs at an identical source timestamp');
+    expect(MIGRATION).toContain("ERRCODE = 'SF006'");
+    expect(MIGRATION).toContain('stale data can never overwrite newer staged data');
+  });
+
+  it('couples reviews with their audit events and preserves human state', () => {
+    // Raced creates skip both the insert and the review_created event.
+    expect(MIGRATION).toContain('a false');
+    expect(MIGRATION).toContain("ERRCODE = 'SF005'");
+    expect(MIGRATION).toContain('issues update expected a pending review');
+    // Only issue_codes is ever touched on the review projection.
+    const updateBlock = /UPDATE public\.sf_opportunity_reviews SET\s+issue_codes =/.exec(MIGRATION);
+    expect(updateBlock).toBeTruthy();
+    expect(MIGRATION).not.toMatch(/UPDATE public\.sf_opportunity_reviews SET[\s\S]{0,200}channel_id/);
+  });
+
+  it('creates the run row first, tags events with it, and sanitizes failures', () => {
+    expect(MIGRATION).toContain("'running'");
+    expect(MIGRATION).toContain('RETURNING id INTO v_run_id');
+    expect(MIGRATION).toContain('sync_run_id');
     expect(MIGRATION).toContain("status: completed only when every operation succeeded");
-    expect(MIGRATION).toMatch(/EXCEPTION/);
+    expect(MIGRATION).toContain('GET STACKED DIAGNOSTICS v_sqlstate = RETURNED_SQLSTATE');
+    // SQLERRM is never persisted or returned (comments may explain the ban).
+    const codeOnly = MIGRATION.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+    expect(codeOnly).not.toMatch(/SQLERRM/);
+    expect(MIGRATION).toContain("'sqlstate=' || v_sqlstate || ' category=' || v_category");
+  });
+
+  it('adds the review-evidence columns without names or rules', () => {
+    for (const col of [
+      'normalized_record_type_state',
+      'is_closed',
+      'is_won',
+      'customer_expansion_raw',
+      'sales_development_rep_user_id',
+      'created_by_user_id',
+      'insurance_vertical_raw',
+      'industry_vertical_raw',
+      'pursuit_industry_vertical_raw',
+      'gtm_cube',
+      'business_units',
+      'saas_revenue',
+    ]) {
+      expect(MIGRATION).toContain(col);
+    }
+    // Names never enter storage; only user ids as evidence.
+    expect(MIGRATION.toLowerCase()).not.toContain('bdr_name');
   });
 });
 
