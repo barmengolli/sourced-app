@@ -714,37 +714,40 @@ export interface DryRunSummary {
   businessScope: BusinessScopeDiagnostic;
 }
 
-// Build the authoritative dry-run summary: RecordType-Id resolution, then
-// mapping, then the REAL Bite 5A derivation and Bite 5B review seeding,
-// then aggregation. The output holds aggregates only; no identifier, name,
-// account, owner, campaign, or RecordType Id from the input can appear.
-export function buildDryRunSummary(
-  records: SalesforceOpportunityRecord[],
+// Amplification guard: a duplicate Id in a global query's output means the
+// query executed more than once per run (n8n runs a node once per input
+// item unless Execute Once is set). Fail loudly; silently deduplicating
+// would hide the defect and corrupt API budgets.
+export function assertUniqueSourceIds(ids: Array<string | undefined>, label: string): void {
+  const seen = new Set<string>();
+  for (const raw of ids) {
+    const id = (raw ?? '').trim();
+    if (!id) continue;
+    if (seen.has(id)) {
+      throw new Error(
+        `query amplification: duplicate ${label} Id in query output; a global query executed more than once per run`,
+      );
+    }
+    seen.add(id);
+  }
+}
+
+// The prepared, planner-ready view of the raw history: RecordType-Id
+// resolution through the runtime map, then the paired-representation
+// collapse, with all value diagnostics. Shared by the dry-run summary and
+// the Bite 5C2A ingestion planner so there is exactly one pipeline.
+export interface PreparedHistory {
+  rows: OpportunityHistoryRow[];
+  rtValueCounts: ValueResolutionCounts;
+  unmappedRecordTypes: UnmappedRecordTypeDiagnostic[];
+  pairedRecordTypeRepresentationRows: number;
+}
+
+export function prepareHistoryRows(
   historyRecords: SalesforceOpportunityHistoryRecord[],
   recordTypeRefs: SalesforceRecordTypeRef[],
-  input: { executedAt: string; year: number },
-  scopeInput: { approvedBdrNames?: string[]; users?: SalesforceUserRef[] } = {},
-): DryRunSummary {
-  // Amplification guards: a duplicate Id in a global query's output means
-  // the query executed more than once per run (n8n runs a node once per
-  // input item unless Execute Once is set). Fail loudly; silently
-  // deduplicating would hide the defect and corrupt API budgets.
-  const assertUniqueIds = (ids: Array<string | undefined>, label: string): void => {
-    const seen = new Set<string>();
-    for (const raw of ids) {
-      const id = (raw ?? '').trim();
-      if (!id) continue;
-      if (seen.has(id)) {
-        throw new Error(
-          `query amplification: duplicate ${label} Id in query output; a global query executed more than once per run`,
-        );
-      }
-      seen.add(id);
-    }
-  };
-  assertUniqueIds(records.map((r) => r.Id), 'Opportunity');
-  assertUniqueIds(recordTypeRefs.map((r) => r.Id), 'RecordType');
-
+): PreparedHistory {
+  assertUniqueSourceIds(recordTypeRefs.map((r) => r.Id), 'RecordType');
   const idMap = buildRecordTypeIdMap(recordTypeRefs);
 
   // Resolve record-type history values through the runtime map BEFORE the
@@ -848,6 +851,37 @@ export function buildDryRunSummary(
     seenTransitions.add(key);
     return true;
   });
+
+  return {
+    rows,
+    rtValueCounts,
+    unmappedRecordTypes: [...unmappedRecordTypes.values()]
+      .map((d) => ({
+        name: d.name,
+        developerName: d.developerName,
+        occurrences: d.occurrences,
+        seenAs: (d.old && d.new ? 'both' : d.old ? 'old' : 'new') as 'old' | 'new' | 'both',
+        confirmedOpportunityType: d.confirmedOpportunityType,
+      }))
+      .sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name)),
+    pairedRecordTypeRepresentationRows,
+  };
+}
+
+// Build the authoritative dry-run summary: RecordType-Id resolution, then
+// mapping, then the REAL Bite 5A derivation and Bite 5B review seeding,
+// then aggregation. The output holds aggregates only; no identifier, name,
+// account, owner, campaign, or RecordType Id from the input can appear.
+export function buildDryRunSummary(
+  records: SalesforceOpportunityRecord[],
+  historyRecords: SalesforceOpportunityHistoryRecord[],
+  recordTypeRefs: SalesforceRecordTypeRef[],
+  input: { executedAt: string; year: number },
+  scopeInput: { approvedBdrNames?: string[]; users?: SalesforceUserRef[] } = {},
+): DryRunSummary {
+  assertUniqueSourceIds(records.map((r) => r.Id), 'Opportunity');
+  const prepared = prepareHistoryRows(historyRecords, recordTypeRefs);
+  const { rows, rtValueCounts, pairedRecordTypeRepresentationRows } = prepared;
 
   // Stage-value diagnostics: blank baselines are normal; only nonblank
   // labels outside both closed sets are unknown, tracked per label with
@@ -988,15 +1022,7 @@ export function buildDryRunSummary(
       recordTypeValues: rtValueCounts,
       pairedRecordTypeRepresentationRows,
       recordTypeMovementRows: recordTypeRows - pairedRecordTypeRepresentationRows,
-      recordTypeDiagnostics: [...unmappedRecordTypes.values()]
-        .map((d) => ({
-          name: d.name,
-          developerName: d.developerName,
-          occurrences: d.occurrences,
-          seenAs: (d.old && d.new ? 'both' : d.old ? 'old' : 'new') as 'old' | 'new' | 'both',
-          confirmedOpportunityType: d.confirmedOpportunityType,
-        }))
-        .sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name)),
+      recordTypeDiagnostics: prepared.unmappedRecordTypes,
       stageValues: {
         ...stageValueCounts,
         unknownLabels: [...unknownStageLabels.entries()]
