@@ -23,12 +23,33 @@ Boundary module: `src/lib/opportunityImportStorage.ts`.
   Salesforce Opportunity and one existing Sourced deal (`deal_id`, the TEXT
   key `attributions` already uses). At most one active link in each
   direction.
-- Review inbox (`sf_opportunity_reviews`): one row per Salesforce
-  Opportunity that needs a human decision before it may enter the funnel,
-  with constrained issue codes, the reviewer's channel/lead/BDR selections,
-  and an auditable resolution trail.
+- Review inbox projection (`sf_opportunity_reviews`): one CURRENT row per
+  Salesforce Opportunity that needs a human decision before it may enter
+  the funnel, with constrained issue codes and the reviewer's
+  channel/lead/BDR selections. This row is mutable: it always shows the
+  latest state, nothing more.
+- Review audit trail (`sf_opportunity_review_events`): the permanent,
+  append-only record of every meaningful review action: creation, each
+  state transition, approvals, link decisions, observed ingestion
+  conflicts, and notes, with who acted (system, reviewer, or ingestion, and
+  a future SSO identity placeholder), when, which issue codes were in
+  force, and what evidence supported it. A record can move
+  pending, blocked, pending, approved, linked, resolved and every step
+  stays on record even after later transitions.
 - Sync runs (`sf_opportunity_sync_runs`): diagnostics and watermarks per
   import run, following the spirit of the existing import-audit pattern.
+
+The projection and the audit trail always move together: the pure helpers
+in `opportunityImportStorage.ts` return the projection update and its audit
+event as ONE result (or neither, when a transition is invalid or an
+approval lacks a channel), so a caller cannot easily update the inbox
+without producing the audit entry. A future authenticated review API must
+write the pair transactionally. Conflict evidence is carried as content
+hashes plus the Salesforce History ID involved, never raw payloads or
+unnecessary PII, and a deterministic dedupe key (unique when present)
+stops the same ingestion conflict from generating a duplicate audit event
+on every nightly sync while keeping a genuinely different conflicting hash
+separately reviewable.
 
 ## 2. Why the event history is append-only
 

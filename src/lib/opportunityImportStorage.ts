@@ -264,6 +264,193 @@ export interface ReviewSeed {
   lead_id: null;
 }
 
+// ---------------------------------------------------------------------------
+// Coupled projection + audit mutations
+// ---------------------------------------------------------------------------
+// sf_opportunity_reviews is the mutable CURRENT projection;
+// sf_opportunity_review_events is the append-only audit trail. Every helper
+// below returns BOTH operations as one result (or neither), so a caller
+// cannot easily update the inbox without producing the audit entry. A future
+// authenticated review API must write the pair transactionally.
+
+export type ReviewActorType = 'system' | 'reviewer' | 'ingestion';
+
+export type ReviewEventType =
+  | 'review_created'
+  | 'issues_updated'
+  | 'state_transition'
+  | 'approval_recorded'
+  | 'link_recorded'
+  | 'conflict_observed'
+  | 'note_added'
+  | 'reopened';
+
+// The projection values a mutation reads and writes.
+export interface ReviewProjection {
+  reviewState: ReviewState;
+  issueCodes: ReviewIssueCode[];
+  channelId: string | null;
+  leadId?: string | null;
+}
+
+// Insert-ready shape for sf_opportunity_review_events. Evidence is hashes
+// and the History ID, never raw payloads or customer records.
+export interface ReviewEventInsert {
+  event_type: ReviewEventType;
+  previous_state: ReviewState | null;
+  new_state: ReviewState | null;
+  issue_codes_snapshot: ReviewIssueCode[];
+  actor_type: ReviewActorType;
+  actor_id: string | null;
+  note: string | null;
+  sf_history_id: string | null;
+  accepted_content_hash: string | null;
+  conflicting_content_hash: string | null;
+  dedupe_key: string | null;
+  occurred_at: string;
+}
+
+export interface ReviewMutation {
+  projection: ReviewProjection;
+  auditEvent: ReviewEventInsert;
+}
+
+export type ReviewMutationResult =
+  | { ok: true; mutation: ReviewMutation }
+  | { ok: false; reasons: string[] };
+
+export interface ReviewActionContext {
+  actorType: ReviewActorType;
+  actorId?: string | null;
+  note?: string | null;
+  // Explicit timestamp from the caller; this module never reads the clock.
+  occurredAt: string;
+}
+
+function auditEvent(
+  type: ReviewEventType,
+  previous: ReviewState | null,
+  next: ReviewState | null,
+  codes: ReviewIssueCode[],
+  ctx: ReviewActionContext,
+  evidence: Partial<Pick<ReviewEventInsert, 'sf_history_id' | 'accepted_content_hash' | 'conflicting_content_hash' | 'dedupe_key'>> = {},
+): ReviewEventInsert {
+  return {
+    event_type: type,
+    previous_state: previous,
+    new_state: next,
+    issue_codes_snapshot: [...codes].sort(),
+    actor_type: ctx.actorType,
+    actor_id: ctx.actorId ?? null,
+    note: ctx.note ?? null,
+    sf_history_id: evidence.sf_history_id ?? null,
+    accepted_content_hash: evidence.accepted_content_hash ?? null,
+    conflicting_content_hash: evidence.conflicting_content_hash ?? null,
+    dedupe_key: evidence.dedupe_key ?? null,
+    occurred_at: ctx.occurredAt,
+  };
+}
+
+// Creating a review produces the pending projection AND its birth event.
+export function createReviewMutation(seed: ReviewSeed, ctx: ReviewActionContext): ReviewMutation {
+  const projection: ReviewProjection = {
+    reviewState: seed.review_state,
+    issueCodes: seed.issue_codes,
+    channelId: seed.channel_id,
+    leadId: seed.lead_id,
+  };
+  return {
+    projection,
+    auditEvent: auditEvent('review_created', null, 'pending', seed.issue_codes, ctx),
+  };
+}
+
+// A state transition produces both operations, or neither. An invalid
+// transition yields nothing; an approval additionally requires the channel
+// and no blocking issues BEFORE anything is produced. Reopening an ignored
+// or blocked review is a normal transition back to pending: earlier events
+// are never touched, so the prior decision history is retained.
+export function applyReviewTransition(
+  current: ReviewProjection,
+  to: ReviewState,
+  ctx: ReviewActionContext,
+): ReviewMutationResult {
+  if (!canTransitionReviewState(current.reviewState, to)) {
+    return { ok: false, reasons: [`invalid transition ${current.reviewState} -> ${to}`] };
+  }
+  if (to === 'approved') {
+    const approval = assessApprovalReadiness({
+      reviewState: current.reviewState,
+      issueCodes: current.issueCodes,
+      channelId: current.channelId,
+      leadId: current.leadId,
+    });
+    if (!approval.ready) return { ok: false, reasons: approval.reasons };
+  }
+  const reopened =
+    to === 'pending' && (current.reviewState === 'ignored' || current.reviewState === 'blocked');
+  const type: ReviewEventType = reopened
+    ? 'reopened'
+    : to === 'approved'
+      ? 'approval_recorded'
+      : 'state_transition';
+  return {
+    ok: true,
+    mutation: {
+      projection: { ...current, reviewState: to },
+      auditEvent: auditEvent(type, current.reviewState, to, current.issueCodes, ctx),
+    },
+  };
+}
+
+// An exact-link decision: only a safe exact-ID proposal can move the review
+// to linked, and doing so records an auditable link event carrying the
+// matched Salesforce Opportunity ID as its note-free evidence.
+export function applyLinkDecision(
+  current: ReviewProjection,
+  proposal: LinkProposal,
+  ctx: ReviewActionContext,
+): ReviewMutationResult {
+  const safety = assessLinkProposal(proposal);
+  if (!safety.allowed) return { ok: false, reasons: [safety.reason] };
+  if (!canTransitionReviewState(current.reviewState, 'linked')) {
+    return { ok: false, reasons: [`invalid transition ${current.reviewState} -> linked`] };
+  }
+  return {
+    ok: true,
+    mutation: {
+      projection: { ...current, reviewState: 'linked' },
+      auditEvent: auditEvent('link_recorded', current.reviewState, 'linked', current.issueCodes, ctx, {
+        dedupe_key: `link:${proposal.sfOpportunityId.trim()}`,
+      }),
+    },
+  };
+}
+
+// An ingestion conflict adds the conflicting_history_id code to the
+// projection and records evidence as hashes plus the History ID. The
+// deterministic dedupe key means the SAME conflict re-observed on every
+// nightly sync produces the same key (the partial unique index ignores the
+// repeat), while a DIFFERENT conflicting hash stays separately reviewable.
+export function recordIngestionConflict(
+  current: ReviewProjection,
+  evidence: { sfHistoryId: string; acceptedContentHash: string; conflictingContentHash: string },
+  ctx: ReviewActionContext,
+): ReviewMutation {
+  const codes = current.issueCodes.includes('conflicting_history_id')
+    ? current.issueCodes
+    : [...current.issueCodes, 'conflicting_history_id' as ReviewIssueCode];
+  return {
+    projection: { ...current, issueCodes: codes },
+    auditEvent: auditEvent('conflict_observed', null, null, codes, ctx, {
+      sf_history_id: evidence.sfHistoryId,
+      accepted_content_hash: evidence.acceptedContentHash,
+      conflicting_content_hash: evidence.conflictingContentHash,
+      dedupe_key: `conflict:${evidence.sfHistoryId}:${evidence.conflictingContentHash}`,
+    }),
+  };
+}
+
 // Seed one pending review row for a derived Opportunity. Every imported
 // record starts with missing_channel because no source field is a verified
 // Sourced channel; the reviewer supplies one.

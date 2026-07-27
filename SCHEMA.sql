@@ -554,14 +554,14 @@ ALTER PUBLICATION supabase_realtime ADD TABLE linkedin_ads_snapshots;
 
 -- Done.
 
-
 -- =============================================================
 -- Bite 5B: Salesforce Opportunity ledger storage
 -- (docs/opportunity-ledger-storage.md). Added by
 -- migrations/2026-07-24_opportunity_ledger_storage.sql. RLS is enabled
 -- with NO policies on purpose: the anon key has no access, these tables
 -- are not in the permissive anon-policy loop above and not in the
--- realtime publication. sf_opportunity_events is append-only by trigger.
+-- realtime publication. sf_opportunity_events and
+-- sf_opportunity_review_events are append-only by trigger.
 -- =============================================================
 
 -- =============================================================
@@ -675,18 +675,19 @@ CREATE INDEX IF NOT EXISTS idx_sf_opportunity_events_kind
   ON sf_opportunity_events (event_kind);
 
 -- Append-only enforcement: UPDATE and DELETE are rejected at the database
--- level, matching the schema's existing trigger convention.
-CREATE OR REPLACE FUNCTION sf_opportunity_events_append_only()
+-- level, matching the schema's existing trigger convention. Shared by the
+-- history ledger and the review audit trail below.
+CREATE OR REPLACE FUNCTION sf_opportunity_append_only()
 RETURNS TRIGGER AS $$
 BEGIN
-  RAISE EXCEPTION 'sf_opportunity_events is append-only: % is not allowed', TG_OP;
+  RAISE EXCEPTION '% is append-only: % is not allowed', TG_TABLE_NAME, TG_OP;
 END;
 $$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS append_only_sf_opportunity_events ON sf_opportunity_events;
 CREATE TRIGGER append_only_sf_opportunity_events
   BEFORE UPDATE OR DELETE ON sf_opportunity_events
-  FOR EACH ROW EXECUTE FUNCTION sf_opportunity_events_append_only();
+  FOR EACH ROW EXECUTE FUNCTION sf_opportunity_append_only();
 
 -- =============================================================
 -- 4. Salesforce-to-Sourced deal link
@@ -767,6 +768,79 @@ CREATE INDEX IF NOT EXISTS idx_sf_opportunity_reviews_state
   ON sf_opportunity_reviews (review_state);
 
 -- =============================================================
+-- 6. Append-only review audit trail
+-- =============================================================
+-- sf_opportunity_reviews above is the mutable CURRENT projection; this
+-- table is the permanent record of every meaningful review action. A
+-- future authenticated review API must write the projection update and its
+-- audit event together transactionally; the pure helpers in
+-- src/lib/opportunityImportStorage.ts construct both as one result.
+
+CREATE TABLE IF NOT EXISTS sf_opportunity_review_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  review_id UUID NOT NULL
+    REFERENCES sf_opportunity_reviews(id) ON DELETE RESTRICT,
+  sf_opportunity_uuid UUID NOT NULL
+    REFERENCES sf_opportunities(id) ON DELETE RESTRICT,
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'review_created', 'issues_updated', 'state_transition',
+    'approval_recorded', 'link_recorded', 'conflict_observed',
+    'note_added', 'reopened'
+  )),
+  previous_state TEXT
+    CHECK (previous_state IN ('pending', 'approved', 'linked', 'ignored', 'blocked', 'resolved')),
+  new_state TEXT
+    CHECK (new_state IN ('pending', 'approved', 'linked', 'ignored', 'blocked', 'resolved')),
+  -- The issue codes in force when the action happened, same constrained set
+  -- as the projection.
+  issue_codes_snapshot TEXT[] NOT NULL DEFAULT '{}',
+  CONSTRAINT sf_review_events_issue_codes_valid CHECK (
+    issue_codes_snapshot <@ ARRAY[
+      'missing_channel',
+      'missing_region',
+      'missing_required_field',
+      'unknown_record_type',
+      'unknown_stage_value',
+      'conflicting_history_id',
+      'ambiguous_same_timestamp',
+      'incomplete_history',
+      'possible_existing_deal',
+      'invalid_source_row'
+    ]::TEXT[]
+  ),
+  actor_type TEXT NOT NULL CHECK (actor_type IN ('system', 'reviewer', 'ingestion')),
+  -- Future SSO identity placeholder; free text until real auth exists.
+  actor_id TEXT,
+  -- Non-sensitive context only; never raw payloads or customer records.
+  note TEXT,
+  -- Evidence references: the Salesforce History ID involved and content
+  -- hashes of the accepted versus conflicting versions. Hashes, not
+  -- payloads, so audit rows carry no unnecessary PII.
+  sf_history_id TEXT,
+  accepted_content_hash TEXT,
+  conflicting_content_hash TEXT,
+  -- Optional idempotency key so the SAME ingestion conflict does not create
+  -- a duplicate audit event on every nightly sync. Unique when present.
+  dedupe_key TEXT,
+  occurred_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sf_review_events_dedupe
+  ON sf_opportunity_review_events (dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sf_review_events_review_time
+  ON sf_opportunity_review_events (review_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_sf_review_events_opp_time
+  ON sf_opportunity_review_events (sf_opportunity_uuid, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_sf_review_events_type
+  ON sf_opportunity_review_events (event_type);
+
+DROP TRIGGER IF EXISTS append_only_sf_opportunity_review_events ON sf_opportunity_review_events;
+CREATE TRIGGER append_only_sf_opportunity_review_events
+  BEFORE UPDATE OR DELETE ON sf_opportunity_review_events
+  FOR EACH ROW EXECUTE FUNCTION sf_opportunity_append_only();
+
+-- =============================================================
 -- updated_at triggers (existing schema convention)
 -- =============================================================
 
@@ -791,10 +865,11 @@ CREATE TRIGGER set_timestamp_sf_opportunity_reviews BEFORE UPDATE ON sf_opportun
 -- separate reviewed migration. Deliberately NOT added to the permissive
 -- anon-policy loop and NOT added to the realtime publication.
 
-ALTER TABLE sf_opportunity_sync_runs  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sf_opportunities          ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sf_opportunity_events     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sf_opportunity_deal_links ENABLE ROW LEVEL SECURITY;
-ALTER TABLE sf_opportunity_reviews    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sf_opportunity_sync_runs     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sf_opportunities             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sf_opportunity_events        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sf_opportunity_deal_links    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sf_opportunity_reviews       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sf_opportunity_review_events ENABLE ROW LEVEL SECURITY;
 
 -- Done. Nothing above touches existing tables, rows, or policies.
