@@ -551,8 +551,8 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
 
   it('classifies approved, other, and missing SDR plus creator categories', () => {
     const scope = scoped([
-      opp({ Sales_Development_Rep__c: 'Synthetic Bdr One', CreatedById: 'SYNTH-USER-BDR1' }),
-      opp({ Sales_Development_Rep__c: 'Synthetic Outsider', CreatedById: 'SYNTH-USER-SELLER' }),
+      opp({ Sales_Development_Rep__c: 'SYNTH-USER-BDR1', CreatedById: 'SYNTH-USER-BDR1' }),
+      opp({ Sales_Development_Rep__c: 'SYNTH-USER-SELLER', CreatedById: 'SYNTH-USER-SELLER' }),
       opp({ Sales_Development_Rep__c: null, CreatedById: null }),
     ]);
     expect(scope.sdr).toEqual({ approved_bdr: 1, other_sdr: 1, missing: 1 });
@@ -565,7 +565,7 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
     const scope = scoped([
       opp({
         Existing_Customer_or_New_Business__c: 'New Logo',
-        Sales_Development_Rep__c: 'Synthetic Bdr One',
+        Sales_Development_Rep__c: 'SYNTH-USER-BDR1',
         CreatedById: 'SYNTH-USER-BDR1',
         CampaignId: 'SYNTH-CAMP-1',
         RecordType: { DeveloperName: 'High_Potential_Prospect', Name: 'High Potential Prospect' },
@@ -579,7 +579,7 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
       }),
       opp({
         Existing_Customer_or_New_Business__c: 'Existing Customer',
-        Sales_Development_Rep__c: 'Synthetic Outsider',
+        Sales_Development_Rep__c: 'SYNTH-USER-SELLER',
         CreatedById: null,
         CampaignId: null,
         RecordType: { DeveloperName: 'Leads', Name: 'Opportunity' },
@@ -616,10 +616,29 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
     expect(resolveApprovedBdrUsers(['REPLACE_WITH_BDR_NAME_1'], users).errors).toEqual([]);
   });
 
+  it('classifies the SDR lookup by USER ID, and a name string can never match', () => {
+    // 18-character resolved id: the 15-character lookup form still matches.
+    const longUsers = [{ Id: 'SYNTHUSERBDR100XYZ', Name: 'Synthetic Bdr Long', IsActive: true }];
+    const scope18 = buildDryRunSummary(
+      [
+        opp({ Sales_Development_Rep__c: 'SYNTHUSERBDR100XYZ' }),
+        opp({ Sales_Development_Rep__c: 'SYNTHUSERBDR100' }),
+        // The BDR's NAME in the lookup field is not an id: other_sdr.
+        opp({ Sales_Development_Rep__c: 'Synthetic Bdr Long' }),
+        opp({ Sales_Development_Rep__c: null }),
+      ],
+      [],
+      [],
+      RUN,
+      { approvedBdrNames: ['Synthetic Bdr Long'], users: longUsers },
+    ).businessScope;
+    expect(scope18.sdr).toEqual({ approved_bdr: 2, other_sdr: 1, missing: 1 });
+  });
+
   it('emits no employee identifiers in the committed aggregate output', () => {
     const serialized = JSON.stringify(
       buildDryRunSummary(
-        [opp({ Sales_Development_Rep__c: 'Synthetic Bdr One', CreatedById: 'SYNTH-USER-BDR1', CreatedBy: { Name: 'Synthetic Bdr One' } })],
+        [opp({ Sales_Development_Rep__c: 'SYNTH-USER-BDR1', CreatedById: 'SYNTH-USER-BDR1', CreatedBy: { Name: 'Synthetic Bdr One' } })],
         [],
         [],
         RUN,
@@ -742,6 +761,53 @@ describe('n8n workflow template safety (static)', () => {
     const privateNode = template.nodes.find((n) => n.name.startsWith('PRIVATE (n8n only)'));
     expect(privateNode).toBeTruthy();
     expect(privateNode!.name).toContain('DO NOT SHARE');
+  });
+
+  it('every node the Aggregate references is an executed ancestor (serial graph)', () => {
+    // Build the reverse graph: node -> its direct predecessors.
+    const predecessors = new Map<string, string[]>();
+    const connections = (
+      JSON.parse(match![1]) as { connections: Record<string, { main: Array<Array<{ node: string }>> }> }
+    ).connections;
+    for (const [from, out] of Object.entries(connections)) {
+      for (const branch of out.main) {
+        for (const target of branch) {
+          const list = predecessors.get(target.node) ?? [];
+          list.push(from);
+          predecessors.set(target.node, list);
+        }
+      }
+    }
+    const ancestorsOf = (node: string): Set<string> => {
+      const seen = new Set<string>();
+      const stack = [...(predecessors.get(node) ?? [])];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        stack.push(...(predecessors.get(cur) ?? []));
+      }
+      return seen;
+    };
+    const aggregate = template.nodes.find((n) => n.name.startsWith('DRY RUN: Aggregate summary'))!;
+    const ancestors = ancestorsOf(aggregate.name);
+    // Every cross-node reference in the Aggregate code must be an ancestor,
+    // so no dependency relies on parallel execution timing.
+    const referenced = [...String(aggregate.parameters.jsCode).matchAll(/\$\('([^']+)'\)/g)].map((x) => x[1]);
+    expect(referenced.length).toBeGreaterThanOrEqual(5);
+    for (const name of referenced) {
+      expect(ancestors.has(name)).toBe(true);
+    }
+    // The specific required ancestry.
+    for (const name of [
+      'CONFIG (PRIVATE): approved BDR names',
+      'READ ONLY: Resolve approved BDR users',
+      'READ ONLY: Fetch Opportunity RecordTypes',
+      'READ ONLY: Fetch included Opportunities',
+      'READ ONLY: Fetch OpportunityFieldHistory',
+    ]) {
+      expect(ancestors.has(name)).toBe(true);
+    }
   });
 
   it('ends in a guard that fails unless the run proves dry_run with zero writes', () => {

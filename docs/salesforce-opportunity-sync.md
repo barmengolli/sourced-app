@@ -209,8 +209,11 @@ applied. These are DIAGNOSTIC GROUPS for a business decision:
 - Customer Expansion (`Existing_Customer_or_New_Business__c`): new_logo,
   existing_customer_or_expansion, other (nonblank but unrecognized, kept
   visible so the value map is extended deliberately), missing.
-- Sales Development Rep (`Sales_Development_Rep__c`): approved_bdr,
-  other_sdr, missing.
+- Sales Development Rep (`Sales_Development_Rep__c`, a Lookup(User) whose
+  value is a Salesforce USER ID): approved_bdr when the id matches a
+  resolved approved User Id (15- and 18-character forms), other_sdr for
+  any other id, missing when blank. The field is never compared to names;
+  a BDR name string cannot match an id.
 - Creator (`CreatedById` with safe related User metadata): approved_bdr,
   other_creator, missing. Diagnostics only; no channel, including Sales
   Generated, is ever inferred from CreatedBy.
@@ -220,6 +223,14 @@ applied. These are DIAGNOSTIC GROUPS for a business decision:
 Aggregate outputs: totals for each dimension plus the cross-tabs New Logo
 by SDR category, New Logo by campaign presence, SDR by creator category,
 record type by Customer Expansion, and record type by SDR category.
+
+The workflow executes as one DETERMINISTIC SERIAL CHAIN (Manual Trigger,
+BDR config, User resolution, describe, RecordTypes, Opportunities, batch,
+FieldHistory, Aggregate, GUARD), so every node the Aggregate references
+through a cross-node expression is a guaranteed executed ancestor; no
+dependency relies on parallel-branch timing. Only the private creator
+diagnostic branches off (from Opportunities), because the Aggregate does
+not depend on it. A static graph test enforces this ancestry.
 
 The approved BDR list is PRIVATE RUNTIME CONFIGURATION: the committed
 template carries `REPLACE_WITH_BDR_NAME_1/2` placeholders, and the real
@@ -299,8 +310,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.salesforce",
       "typeVersion": 1,
       "position": [
-        220,
-        -120
+        600,
+        0
       ],
       "credentials": {
         "salesforceOAuth2Api": {
@@ -319,8 +330,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.salesforce",
       "typeVersion": 1,
       "position": [
-        220,
-        120
+        1000,
+        0
       ],
       "credentials": {
         "salesforceOAuth2Api": {
@@ -339,8 +350,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        440,
-        120
+        1200,
+        0
       ],
       "parameters": {
         "jsCode": "// READ ONLY. Deduplicate ids in first-seen order and emit one item per\n// batch of 200 for the history IN clause. Mirrors chunkOpportunityIds in\n// src/lib/salesforceOpportunitySync.ts.\nconst seen = new Set();\nconst ids = [];\nfor (const item of $input.all()) {\n  const id = String(item.json.Id || '').trim();\n  if (!id || seen.has(id)) continue;\n  seen.add(id);\n  ids.push(id);\n}\nconst batches = [];\nfor (let i = 0; i < ids.length; i += 200) {\n  const batch = ids.slice(i, i + 200);\n  batches.push({ json: { inClause: batch.map((x) => `'${x}'`).join(',') } });\n}\nreturn batches.length ? batches : [{ json: { inClause: \"''\" } }];"
@@ -352,8 +363,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.salesforce",
       "typeVersion": 1,
       "position": [
-        660,
-        120
+        1400,
+        0
       ],
       "credentials": {
         "salesforceOAuth2Api": {
@@ -372,11 +383,11 @@ and no embedded secrets.
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        880,
+        1600,
         0
       ],
       "parameters": {
-        "jsCode": "// READ ONLY / DRY RUN. Transport-level aggregates only; this mirror NEVER\n// creates ambiguous_same_timestamp review issues. Only the authoritative\n// Bite 5A calculation (buildDryRunSummary in\n// src/lib/salesforceOpportunitySync.ts) may do that. NO identifier, name of\n// a deal/account/owner/campaign, or RecordType Id leaves this node; record\n// type NAMES and Stage LABELS are configuration metadata and may appear.\nconst opps = $('READ ONLY: Fetch included Opportunities').all().map((i) => i.json);\nconst hist = $('READ ONLY: Fetch OpportunityFieldHistory').all().map((i) => i.json);\nconst rts = $('READ ONLY: Fetch Opportunity RecordTypes').all().map((i) => i.json);\nconst YEAR_START = '2026-01-01';\nconst INCLUDED = { High_Potential_Prospect: 'hpp', Leads: 'opp', Licensing: 'pursuit' };\nconst RT_MAP = { 'High Potential Prospect': 'hpp', High_Potential_Prospect: 'hpp', Opportunity: 'opp', Leads: 'opp', 'Sales Accepted Opportunity': 'opp', Pursuit: 'pursuit', Licensing: 'pursuit', 'Sales Qualified Opportunity': 'pursuit', Nurture: 'out_of_scope' };\nconst RANK = { hpp: 1, opp: 2, pursuit: 3 };\nconst TERMINAL = ['100) Closed-Won', 'Closed-Lost-Competitor', 'Closed-Lost-InHouse', 'Closed-Disqualified', 'Closed-Nurture', '0. Recycle/Nurture', 'Recycle / Nurture', '0) Recycle / Nurture', 'Close-Lost-No Decision', 'Close-No Decision', 'Closed-Won', '9) Closed-Won', 'CP DQ - Project Cancelled'];\nconst OPEN = ['1) Suspect', '2) Opportunity Assesment', '3) Qualification', '4) Discovery', '5) Pitching', '6) POC', '7) Proposal', '8) Negotiation', '10) Awaiting Execution', 'Suspect', '1. Suspect', 'Opportunity Assessment', '2. Opportunity Assessment', 'Qualification', '1) Qualification', 'Demo / Oral Presentations', 'Pitching', '3) Pitching', 'Proposal', 'Discovery', '2) Discovery', 'Initial Proposal / Term Sheet', 'Proof of Concept', 'Negotiation', 'Risk Assessment', '4.1) Pursuit Evaluation', '9) Contract Agreement', 'Contract Agreement / Awaiting Execution', 'Awaiting Execution', 'Contract Creation', 'Contract Agreement', '7) Contract Agreement'];\nconst IV_CANDIDATES = ['Industry_Vertical__c', 'Pursuit_Industry_Vertical__c'];\nconst ID_SHAPE = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;\nconst norm = (v) => String(v == null ? '' : v).replace(/[\u200b\u200c\u200d\ufeff]/g, '').trim();\nconst validTs = (v) => /^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d/.test(String(v || ''));\n// Runtime RecordType map over ALL objects so non-Opportunity or retired\n// types can be NAMED in diagnostics. Ids never leave this node.\nconst idMap = {};\nfor (const rt of rts) {\n  const id = norm(rt.Id); const dev = norm(rt.DeveloperName);\n  if (!id || !dev) continue;\n  const entry = { dev, name: norm(rt.Name) || dev, isOpp: norm(rt.SobjectType) === 'Opportunity' };\n  idMap[id] = entry;\n  if (id.length === 18) idMap[id.slice(0, 15)] = entry;\n}\nconst rtValueCounts = { resolvedViaIdMap: 0, resolvedAsKnownValue: 0, blankBaseline: 0, unresolvedIdShaped: 0, unmappedNonblankLabel: 0, affectedRows: 0 };\nconst rtDiagnostics = new Map();\nconst noteRt = (key, name, dev, isOpp, side) => {\n  const d = rtDiagnostics.get(key) || { name, developerName: dev, occurrences: 0, old: false, new: false, confirmedOpportunityType: isOpp };\n  d.occurrences += 1; d[side] = true; rtDiagnostics.set(key, d);\n};\nconst resolveRt = (raw, side) => {\n  const v = norm(raw);\n  if (!v) { rtValueCounts.blankBaseline += 1; return null; }\n  const ref = idMap[v];\n  if (ref !== undefined) {\n    rtValueCounts.resolvedViaIdMap += 1;\n    if (RT_MAP[ref.dev] === undefined) noteRt(ref.dev, ref.name, ref.dev, ref.isOpp, side);\n    return ref.dev;\n  }\n  if (RT_MAP[v] !== undefined) { rtValueCounts.resolvedAsKnownValue += 1; return v; }\n  if (ID_SHAPE.test(v)) { rtValueCounts.unresolvedIdShaped += 1; return v; }\n  rtValueCounts.unmappedNonblankLabel += 1;\n  noteRt(v, v, null, false, side);\n  return v;\n};\nconst scope = { discovered: opps.length, openNow: 0, closedNow: 0, createdInYear: 0, modifiedInYear: 0, closedWithCloseDateInYear: 0, olderOpen: 0 };\nconst byDev = {}; const byStage = { hpp: 0, opp: 0, pursuit: 0, out_of_scope: 0, unknown: 0 };\nconst ivCoverage = {};\nfor (const f of IV_CANDIDATES) ivCoverage[f] = 0;\nfor (const o of opps) {\n  const dn = (o.RecordType && o.RecordType.DeveloperName) || 'missing';\n  byDev[dn] = (byDev[dn] || 0) + 1;\n  const st = INCLUDED[dn] || 'unknown';\n  byStage[st] = (byStage[st] || 0) + 1;\n  for (const f of IV_CANDIDATES) { if (norm(o[f])) ivCoverage[f] += 1; }\n  const created = String(o.CreatedDate || '').slice(0, 10);\n  const modified = String(o.SystemModstamp || o.LastModifiedDate || '').slice(0, 10);\n  if (o.IsClosed === false) scope.openNow += 1;\n  if (o.IsClosed === true) scope.closedNow += 1;\n  if (created >= YEAR_START) scope.createdInYear += 1;\n  if (modified >= YEAR_START) scope.modifiedInYear += 1;\n  if (o.IsClosed === true && String(o.CloseDate || '') >= YEAR_START) scope.closedWithCloseDateInYear += 1;\n  if (o.IsClosed === false && created && created < YEAR_START) scope.olderOpen += 1;\n}\nconst byId = new Map();\nlet exactDuplicates = 0; const conflicting = new Set();\nlet invalidTimestamps = 0; let rtRows = 0; let stageRows = 0;\nlet fwd = 0; let back = 0; let fskip = 0; let bskip = 0;\nconst stageValueCounts = { resolved: 0, blankBaseline: 0, unknownNonblank: 0, affectedRows: 0 };\nconst unknownStageLabels = new Map();\nconst stamps = new Map();\nfor (const h of hist) {\n  const key = String(h.Id || '');\n  const content = [h.OpportunityId, h.Field, h.OldValue, h.NewValue, h.CreatedDate].join(' ');\n  if (byId.has(key)) {\n    if (byId.get(key) === content) exactDuplicates += 1; else conflicting.add(key);\n    continue;\n  }\n  byId.set(key, content);\n  if (!validTs(h.CreatedDate)) { invalidTimestamps += 1; continue; }\n  const tsKey = h.OpportunityId + '|' + h.CreatedDate;\n  if (h.Field === 'RecordType') {\n    rtRows += 1;\n    const before = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;\n    const from = RT_MAP[resolveRt(h.OldValue, 'old')];\n    const to = RT_MAP[resolveRt(h.NewValue, 'new')];\n    if (rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel > before) rtValueCounts.affectedRows += 1;\n    if (RANK[from] && RANK[to]) {\n      const d = RANK[to] - RANK[from];\n      if (d > 0) { fwd += 1; if (d === 2) fskip += 1; }\n      if (d < 0) { back += 1; if (d === -2) bskip += 1; }\n    }\n    const c = stamps.get(tsKey) || { rt: [], stage: 0 };\n    c.rt.push({ from, to }); stamps.set(tsKey, c);\n  } else if (h.Field === 'StageName') {\n    stageRows += 1;\n    const c = stamps.get(tsKey) || { rt: [], stage: 0 };\n    c.stage += 1; stamps.set(tsKey, c);\n    let rowAffected = false;\n    for (const side of ['old', 'new']) {\n      const s = norm(side === 'old' ? h.OldValue : h.NewValue);\n      if (!s) { stageValueCounts.blankBaseline += 1; continue; }\n      if (TERMINAL.includes(s) || OPEN.includes(s)) { stageValueCounts.resolved += 1; continue; }\n      stageValueCounts.unknownNonblank += 1; rowAffected = true;\n      const e = unknownStageLabels.get(s) || { occurrences: 0, old: false, new: false };\n      e.occurrences += 1; e[side] = true; unknownStageLabels.set(s, e);\n    }\n    if (rowAffected) stageValueCounts.affectedRows += 1;\n  }\n}\n// MUTUALLY EXCLUSIVE same-timestamp categories:\n// candidateGroups = harmlessCrossLedgerGroups\n//   + uniquelyProvableOrOrderIndependent + remainingForAuthoritativeEvaluation.\nlet candidateGroups = 0; let harmless = 0; let provable = 0; let remaining = 0;\nfor (const c of stamps.values()) {\n  if (c.rt.length + c.stage < 2) continue;\n  candidateGroups += 1;\n  if (c.rt.length < 2) { harmless += 1; continue; }\n  if (c.rt.length === 2 && (c.rt[0].to === c.rt[1].from || c.rt[1].to === c.rt[0].from)) provable += 1;\n  else remaining += 1;\n}\nconst stageLabelDiagnostics = [...unknownStageLabels.entries()]\n  .map(([label, x]) => ({ label, occurrences: x.occurrences, seenAs: x.old && x.new ? 'both' : x.old ? 'old' : 'new' }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.label.localeCompare(b.label));\nconst rtDiagList = [...rtDiagnostics.values()]\n  .map((d) => ({ name: d.name, developerName: d.developerName, occurrences: d.occurrences, seenAs: d.old && d.new ? 'both' : d.old ? 'old' : 'new', confirmedOpportunityType: d.confirmedOpportunityType }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name));\n\n// ---- Business-scope diagnostic (DIAGNOSTIC GROUPS ONLY; no inclusion or\n// exclusion decision is made or applied) ----\nconst bdrConfig = $('CONFIG (PRIVATE): approved BDR names').first().json.approvedBdrNames || [];\nconst bdrUsers = $('READ ONLY: Resolve approved BDR users').all().map((i) => i.json);\nconst configuredReal = bdrConfig.map((n) => norm(n)).filter((n) => n && !n.startsWith('REPLACE_WITH_'));\nconst approvedIdByName = {};\nfor (const name of configuredReal) {\n  const matches = bdrUsers.filter((u) => u.IsActive !== false && norm(u.Name) === name);\n  if (matches.length !== 1) {\n    // FAIL SAFELY: a configured name resolving to zero or multiple active\n    // users must stop the run, never guess.\n    throw new Error('BDR CONFIG: a configured name resolved to ' + matches.length + ' active users; expected exactly 1');\n  }\n  approvedIdByName[name] = matches[0].Id;\n}\nconst approvedNames = new Set(Object.keys(approvedIdByName));\nconst approvedIds = new Set(Object.values(approvedIdByName));\nconst EXPANSION_MAP = { 'New Logo': 'new_logo', 'New Business': 'new_logo', 'Existing Customer': 'existing_customer_or_expansion', 'Expansion': 'existing_customer_or_expansion', 'Existing Customer or Expansion': 'existing_customer_or_expansion', 'Customer Expansion': 'existing_customer_or_expansion' };\nconst scopeDiag = {\n  note: 'Diagnostic groups only. No inclusion or exclusion decision is made or applied here.',\n  bdrConfigured: approvedNames.size > 0,\n  customerExpansion: { new_logo: 0, existing_customer_or_expansion: 0, other: 0, missing: 0 },\n  sdr: { approved_bdr: 0, other_sdr: 0, missing: 0 },\n  creator: { approved_bdr: 0, other_creator: 0, missing: 0 },\n  campaign: { primary_campaign_present: 0, primary_campaign_missing: 0 },\n  crossTabs: {\n    newLogoBySdr: { approved_bdr: 0, other_sdr: 0, missing: 0 },\n    newLogoByCampaign: { primary_campaign_present: 0, primary_campaign_missing: 0 },\n    sdrByCreator: { approved_bdr: { approved_bdr: 0, other_creator: 0, missing: 0 }, other_sdr: { approved_bdr: 0, other_creator: 0, missing: 0 }, missing: { approved_bdr: 0, other_creator: 0, missing: 0 } },\n    recordTypeByExpansion: {},\n    recordTypeBySdr: {}\n  }\n};\nconst IV_ALL = ['Insurance_vertical__c', 'Industry_Vertical__c', 'Pursuit_Industry_Vertical__c'];\nconst ivValues = {}; const ivNonblank = {};\nfor (const f of IV_ALL) { ivValues[f] = new Set(); ivNonblank[f] = 0; }\nconst ivPairCounters = [];\nfor (let i = 0; i < IV_ALL.length; i += 1) for (let j = i + 1; j < IV_ALL.length; j += 1) ivPairCounters.push({ fields: [IV_ALL[i], IV_ALL[j]], bothPopulated: 0, disagreements: 0 });\nfor (const o of opps) {\n  const expRaw = norm(o.Existing_Customer_or_New_Business__c);\n  const expCat = !expRaw ? 'missing' : (EXPANSION_MAP[expRaw] || 'other');\n  const sdrName = norm(o.Sales_Development_Rep__c);\n  const sdrCat = !sdrName ? 'missing' : (approvedNames.has(sdrName) ? 'approved_bdr' : 'other_sdr');\n  // Diagnostic only: no channel (including Sales Generated) is inferred\n  // from the creator.\n  const creatorId = norm(o.CreatedById);\n  const creatorCat = !creatorId ? 'missing' : (approvedIds.has(creatorId) ? 'approved_bdr' : 'other_creator');\n  const campCat = norm(o.CampaignId) ? 'primary_campaign_present' : 'primary_campaign_missing';\n  const rt = INCLUDED[(o.RecordType && o.RecordType.DeveloperName) || ''] || 'unknown';\n  scopeDiag.customerExpansion[expCat] += 1;\n  scopeDiag.sdr[sdrCat] += 1;\n  scopeDiag.creator[creatorCat] += 1;\n  scopeDiag.campaign[campCat] += 1;\n  if (expCat === 'new_logo') { scopeDiag.crossTabs.newLogoBySdr[sdrCat] += 1; scopeDiag.crossTabs.newLogoByCampaign[campCat] += 1; }\n  scopeDiag.crossTabs.sdrByCreator[sdrCat][creatorCat] += 1;\n  if (!scopeDiag.crossTabs.recordTypeByExpansion[rt]) scopeDiag.crossTabs.recordTypeByExpansion[rt] = { new_logo: 0, existing_customer_or_expansion: 0, other: 0, missing: 0 };\n  scopeDiag.crossTabs.recordTypeByExpansion[rt][expCat] += 1;\n  if (!scopeDiag.crossTabs.recordTypeBySdr[rt]) scopeDiag.crossTabs.recordTypeBySdr[rt] = { approved_bdr: 0, other_sdr: 0, missing: 0 };\n  scopeDiag.crossTabs.recordTypeBySdr[rt][sdrCat] += 1;\n  for (const f of IV_ALL) { const v = norm(o[f]); if (v) { ivNonblank[f] += 1; ivValues[f].add(v); } }\n  for (const pc of ivPairCounters) {\n    const va = norm(o[pc.fields[0]]); const vb = norm(o[pc.fields[1]]);\n    if (va && vb) { pc.bothPopulated += 1; if (va !== vb) pc.disagreements += 1; }\n  }\n}\nconst ivDiag = {\n  candidates: IV_ALL,\n  perField: Object.fromEntries(IV_ALL.map((f) => [f, { nonblank: ivNonblank[f], distinctValues: ivValues[f].size }])),\n  pairwise: ivPairCounters\n};\n\nreturn [{ json: {\n  executedAt: new Date().toISOString(),\n  dry_run: true,\n  writes_attempted: 0,\n  scope,\n  countsByRecordTypeDeveloperName: byDev,\n  countsByNormalizedCurrentStage: byStage,\n  history: { rowsDiscovered: hist.length, recordTypeRows: rtRows, stageRows, otherFieldRows: hist.length - rtRows - stageRows, exactDuplicates, conflictingDuplicateHistoryIds: conflicting.size, invalidTimestamps, recordTypeValues: rtValueCounts, recordTypeDiagnostics: rtDiagList, stageValues: { ...stageValueCounts, unknownLabels: stageLabelDiagnostics } },\n  movement: { forwardMoves: fwd, backwardMoves: back, forwardSkips: fskip, backwardSkips: bskip, sameTimestamp: { candidateGroups, harmlessCrossLedgerGroups: harmless, uniquelyProvableOrOrderIndependent: provable, remainingForAuthoritativeEvaluation: remaining } },\n  industryVertical: ivDiag,\n  businessScope: scopeDiag,\n  note: 'Mirror aggregates; remainingForAuthoritativeEvaluation groups REQUIRE the authoritative Bite 5A evaluation (buildDryRunSummary) and are not review issues yet. The mirror never creates ambiguous_same_timestamp issues.'\n} }];"
+        "jsCode": "// READ ONLY / DRY RUN. Transport-level aggregates only; this mirror NEVER\n// creates ambiguous_same_timestamp review issues. Only the authoritative\n// Bite 5A calculation (buildDryRunSummary in\n// src/lib/salesforceOpportunitySync.ts) may do that. NO identifier, name of\n// a deal/account/owner/campaign, or RecordType Id leaves this node; record\n// type NAMES and Stage LABELS are configuration metadata and may appear.\nconst opps = $('READ ONLY: Fetch included Opportunities').all().map((i) => i.json);\nconst hist = $('READ ONLY: Fetch OpportunityFieldHistory').all().map((i) => i.json);\nconst rts = $('READ ONLY: Fetch Opportunity RecordTypes').all().map((i) => i.json);\nconst YEAR_START = '2026-01-01';\nconst INCLUDED = { High_Potential_Prospect: 'hpp', Leads: 'opp', Licensing: 'pursuit' };\nconst RT_MAP = { 'High Potential Prospect': 'hpp', High_Potential_Prospect: 'hpp', Opportunity: 'opp', Leads: 'opp', 'Sales Accepted Opportunity': 'opp', Pursuit: 'pursuit', Licensing: 'pursuit', 'Sales Qualified Opportunity': 'pursuit', Nurture: 'out_of_scope' };\nconst RANK = { hpp: 1, opp: 2, pursuit: 3 };\nconst TERMINAL = ['100) Closed-Won', 'Closed-Lost-Competitor', 'Closed-Lost-InHouse', 'Closed-Disqualified', 'Closed-Nurture', '0. Recycle/Nurture', 'Recycle / Nurture', '0) Recycle / Nurture', 'Close-Lost-No Decision', 'Close-No Decision', 'Closed-Won', '9) Closed-Won', 'CP DQ - Project Cancelled'];\nconst OPEN = ['1) Suspect', '2) Opportunity Assesment', '3) Qualification', '4) Discovery', '5) Pitching', '6) POC', '7) Proposal', '8) Negotiation', '10) Awaiting Execution', 'Suspect', '1. Suspect', 'Opportunity Assessment', '2. Opportunity Assessment', 'Qualification', '1) Qualification', 'Demo / Oral Presentations', 'Pitching', '3) Pitching', 'Proposal', 'Discovery', '2) Discovery', 'Initial Proposal / Term Sheet', 'Proof of Concept', 'Negotiation', 'Risk Assessment', '4.1) Pursuit Evaluation', '9) Contract Agreement', 'Contract Agreement / Awaiting Execution', 'Awaiting Execution', 'Contract Creation', 'Contract Agreement', '7) Contract Agreement'];\nconst IV_CANDIDATES = ['Industry_Vertical__c', 'Pursuit_Industry_Vertical__c'];\nconst ID_SHAPE = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;\nconst norm = (v) => String(v == null ? '' : v).replace(/[\u200b\u200c\u200d\ufeff]/g, '').trim();\nconst validTs = (v) => /^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d/.test(String(v || ''));\n// Runtime RecordType map over ALL objects so non-Opportunity or retired\n// types can be NAMED in diagnostics. Ids never leave this node.\nconst idMap = {};\nfor (const rt of rts) {\n  const id = norm(rt.Id); const dev = norm(rt.DeveloperName);\n  if (!id || !dev) continue;\n  const entry = { dev, name: norm(rt.Name) || dev, isOpp: norm(rt.SobjectType) === 'Opportunity' };\n  idMap[id] = entry;\n  if (id.length === 18) idMap[id.slice(0, 15)] = entry;\n}\nconst rtValueCounts = { resolvedViaIdMap: 0, resolvedAsKnownValue: 0, blankBaseline: 0, unresolvedIdShaped: 0, unmappedNonblankLabel: 0, affectedRows: 0 };\nconst rtDiagnostics = new Map();\nconst noteRt = (key, name, dev, isOpp, side) => {\n  const d = rtDiagnostics.get(key) || { name, developerName: dev, occurrences: 0, old: false, new: false, confirmedOpportunityType: isOpp };\n  d.occurrences += 1; d[side] = true; rtDiagnostics.set(key, d);\n};\nconst resolveRt = (raw, side) => {\n  const v = norm(raw);\n  if (!v) { rtValueCounts.blankBaseline += 1; return null; }\n  const ref = idMap[v];\n  if (ref !== undefined) {\n    rtValueCounts.resolvedViaIdMap += 1;\n    if (RT_MAP[ref.dev] === undefined) noteRt(ref.dev, ref.name, ref.dev, ref.isOpp, side);\n    return ref.dev;\n  }\n  if (RT_MAP[v] !== undefined) { rtValueCounts.resolvedAsKnownValue += 1; return v; }\n  if (ID_SHAPE.test(v)) { rtValueCounts.unresolvedIdShaped += 1; return v; }\n  rtValueCounts.unmappedNonblankLabel += 1;\n  noteRt(v, v, null, false, side);\n  return v;\n};\nconst scope = { discovered: opps.length, openNow: 0, closedNow: 0, createdInYear: 0, modifiedInYear: 0, closedWithCloseDateInYear: 0, olderOpen: 0 };\nconst byDev = {}; const byStage = { hpp: 0, opp: 0, pursuit: 0, out_of_scope: 0, unknown: 0 };\nconst ivCoverage = {};\nfor (const f of IV_CANDIDATES) ivCoverage[f] = 0;\nfor (const o of opps) {\n  const dn = (o.RecordType && o.RecordType.DeveloperName) || 'missing';\n  byDev[dn] = (byDev[dn] || 0) + 1;\n  const st = INCLUDED[dn] || 'unknown';\n  byStage[st] = (byStage[st] || 0) + 1;\n  for (const f of IV_CANDIDATES) { if (norm(o[f])) ivCoverage[f] += 1; }\n  const created = String(o.CreatedDate || '').slice(0, 10);\n  const modified = String(o.SystemModstamp || o.LastModifiedDate || '').slice(0, 10);\n  if (o.IsClosed === false) scope.openNow += 1;\n  if (o.IsClosed === true) scope.closedNow += 1;\n  if (created >= YEAR_START) scope.createdInYear += 1;\n  if (modified >= YEAR_START) scope.modifiedInYear += 1;\n  if (o.IsClosed === true && String(o.CloseDate || '') >= YEAR_START) scope.closedWithCloseDateInYear += 1;\n  if (o.IsClosed === false && created && created < YEAR_START) scope.olderOpen += 1;\n}\nconst byId = new Map();\nlet exactDuplicates = 0; const conflicting = new Set();\nlet invalidTimestamps = 0; let rtRows = 0; let stageRows = 0;\nlet fwd = 0; let back = 0; let fskip = 0; let bskip = 0;\nconst stageValueCounts = { resolved: 0, blankBaseline: 0, unknownNonblank: 0, affectedRows: 0 };\nconst unknownStageLabels = new Map();\nconst stamps = new Map();\nfor (const h of hist) {\n  const key = String(h.Id || '');\n  const content = [h.OpportunityId, h.Field, h.OldValue, h.NewValue, h.CreatedDate].join(' ');\n  if (byId.has(key)) {\n    if (byId.get(key) === content) exactDuplicates += 1; else conflicting.add(key);\n    continue;\n  }\n  byId.set(key, content);\n  if (!validTs(h.CreatedDate)) { invalidTimestamps += 1; continue; }\n  const tsKey = h.OpportunityId + '|' + h.CreatedDate;\n  if (h.Field === 'RecordType') {\n    rtRows += 1;\n    const before = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;\n    const from = RT_MAP[resolveRt(h.OldValue, 'old')];\n    const to = RT_MAP[resolveRt(h.NewValue, 'new')];\n    if (rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel > before) rtValueCounts.affectedRows += 1;\n    if (RANK[from] && RANK[to]) {\n      const d = RANK[to] - RANK[from];\n      if (d > 0) { fwd += 1; if (d === 2) fskip += 1; }\n      if (d < 0) { back += 1; if (d === -2) bskip += 1; }\n    }\n    const c = stamps.get(tsKey) || { rt: [], stage: 0 };\n    c.rt.push({ from, to }); stamps.set(tsKey, c);\n  } else if (h.Field === 'StageName') {\n    stageRows += 1;\n    const c = stamps.get(tsKey) || { rt: [], stage: 0 };\n    c.stage += 1; stamps.set(tsKey, c);\n    let rowAffected = false;\n    for (const side of ['old', 'new']) {\n      const s = norm(side === 'old' ? h.OldValue : h.NewValue);\n      if (!s) { stageValueCounts.blankBaseline += 1; continue; }\n      if (TERMINAL.includes(s) || OPEN.includes(s)) { stageValueCounts.resolved += 1; continue; }\n      stageValueCounts.unknownNonblank += 1; rowAffected = true;\n      const e = unknownStageLabels.get(s) || { occurrences: 0, old: false, new: false };\n      e.occurrences += 1; e[side] = true; unknownStageLabels.set(s, e);\n    }\n    if (rowAffected) stageValueCounts.affectedRows += 1;\n  }\n}\n// MUTUALLY EXCLUSIVE same-timestamp categories:\n// candidateGroups = harmlessCrossLedgerGroups\n//   + uniquelyProvableOrOrderIndependent + remainingForAuthoritativeEvaluation.\nlet candidateGroups = 0; let harmless = 0; let provable = 0; let remaining = 0;\nfor (const c of stamps.values()) {\n  if (c.rt.length + c.stage < 2) continue;\n  candidateGroups += 1;\n  if (c.rt.length < 2) { harmless += 1; continue; }\n  if (c.rt.length === 2 && (c.rt[0].to === c.rt[1].from || c.rt[1].to === c.rt[0].from)) provable += 1;\n  else remaining += 1;\n}\nconst stageLabelDiagnostics = [...unknownStageLabels.entries()]\n  .map(([label, x]) => ({ label, occurrences: x.occurrences, seenAs: x.old && x.new ? 'both' : x.old ? 'old' : 'new' }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.label.localeCompare(b.label));\nconst rtDiagList = [...rtDiagnostics.values()]\n  .map((d) => ({ name: d.name, developerName: d.developerName, occurrences: d.occurrences, seenAs: d.old && d.new ? 'both' : d.old ? 'old' : 'new', confirmedOpportunityType: d.confirmedOpportunityType }))\n  .sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name));\n\n// ---- Business-scope diagnostic (DIAGNOSTIC GROUPS ONLY; no inclusion or\n// exclusion decision is made or applied) ----\nconst bdrConfig = $('CONFIG (PRIVATE): approved BDR names').first().json.approvedBdrNames || [];\nconst bdrUsers = $('READ ONLY: Resolve approved BDR users').all().map((i) => i.json);\nconst configuredReal = bdrConfig.map((n) => norm(n)).filter((n) => n && !n.startsWith('REPLACE_WITH_'));\nconst approvedIdByName = {};\nfor (const name of configuredReal) {\n  const matches = bdrUsers.filter((u) => u.IsActive !== false && norm(u.Name) === name);\n  if (matches.length !== 1) {\n    // FAIL SAFELY: a configured name resolving to zero or multiple active\n    // users must stop the run, never guess.\n    throw new Error('BDR CONFIG: a configured name resolved to ' + matches.length + ' active users; expected exactly 1');\n  }\n  approvedIdByName[name] = matches[0].Id;\n}\n// Approved USER IDS are the only classification key (15- and 18-char\n// forms). Names were used solely to resolve them.\nconst approvedIds = new Set();\nfor (const id of Object.values(approvedIdByName)) {\n  approvedIds.add(id);\n  if (String(id).length === 18) approvedIds.add(String(id).slice(0, 15));\n}\nconst EXPANSION_MAP = { 'New Logo': 'new_logo', 'New Business': 'new_logo', 'Existing Customer': 'existing_customer_or_expansion', 'Expansion': 'existing_customer_or_expansion', 'Existing Customer or Expansion': 'existing_customer_or_expansion', 'Customer Expansion': 'existing_customer_or_expansion' };\nconst scopeDiag = {\n  note: 'Diagnostic groups only. No inclusion or exclusion decision is made or applied here.',\n  bdrConfigured: approvedIds.size > 0,\n  customerExpansion: { new_logo: 0, existing_customer_or_expansion: 0, other: 0, missing: 0 },\n  sdr: { approved_bdr: 0, other_sdr: 0, missing: 0 },\n  creator: { approved_bdr: 0, other_creator: 0, missing: 0 },\n  campaign: { primary_campaign_present: 0, primary_campaign_missing: 0 },\n  crossTabs: {\n    newLogoBySdr: { approved_bdr: 0, other_sdr: 0, missing: 0 },\n    newLogoByCampaign: { primary_campaign_present: 0, primary_campaign_missing: 0 },\n    sdrByCreator: { approved_bdr: { approved_bdr: 0, other_creator: 0, missing: 0 }, other_sdr: { approved_bdr: 0, other_creator: 0, missing: 0 }, missing: { approved_bdr: 0, other_creator: 0, missing: 0 } },\n    recordTypeByExpansion: {},\n    recordTypeBySdr: {}\n  }\n};\nconst IV_ALL = ['Insurance_vertical__c', 'Industry_Vertical__c', 'Pursuit_Industry_Vertical__c'];\nconst ivValues = {}; const ivNonblank = {};\nfor (const f of IV_ALL) { ivValues[f] = new Set(); ivNonblank[f] = 0; }\nconst ivPairCounters = [];\nfor (let i = 0; i < IV_ALL.length; i += 1) for (let j = i + 1; j < IV_ALL.length; j += 1) ivPairCounters.push({ fields: [IV_ALL[i], IV_ALL[j]], bothPopulated: 0, disagreements: 0 });\nfor (const o of opps) {\n  const expRaw = norm(o.Existing_Customer_or_New_Business__c);\n  const expCat = !expRaw ? 'missing' : (EXPANSION_MAP[expRaw] || 'other');\n  // Sales_Development_Rep__c is Lookup(User): the value is a USER ID.\n  const sdrId = norm(o.Sales_Development_Rep__c);\n  const sdrCat = !sdrId ? 'missing' : (approvedIds.has(sdrId) ? 'approved_bdr' : 'other_sdr');\n  // Diagnostic only: no channel (including Sales Generated) is inferred\n  // from the creator.\n  const creatorId = norm(o.CreatedById);\n  const creatorCat = !creatorId ? 'missing' : (approvedIds.has(creatorId) ? 'approved_bdr' : 'other_creator');\n  const campCat = norm(o.CampaignId) ? 'primary_campaign_present' : 'primary_campaign_missing';\n  const rt = INCLUDED[(o.RecordType && o.RecordType.DeveloperName) || ''] || 'unknown';\n  scopeDiag.customerExpansion[expCat] += 1;\n  scopeDiag.sdr[sdrCat] += 1;\n  scopeDiag.creator[creatorCat] += 1;\n  scopeDiag.campaign[campCat] += 1;\n  if (expCat === 'new_logo') { scopeDiag.crossTabs.newLogoBySdr[sdrCat] += 1; scopeDiag.crossTabs.newLogoByCampaign[campCat] += 1; }\n  scopeDiag.crossTabs.sdrByCreator[sdrCat][creatorCat] += 1;\n  if (!scopeDiag.crossTabs.recordTypeByExpansion[rt]) scopeDiag.crossTabs.recordTypeByExpansion[rt] = { new_logo: 0, existing_customer_or_expansion: 0, other: 0, missing: 0 };\n  scopeDiag.crossTabs.recordTypeByExpansion[rt][expCat] += 1;\n  if (!scopeDiag.crossTabs.recordTypeBySdr[rt]) scopeDiag.crossTabs.recordTypeBySdr[rt] = { approved_bdr: 0, other_sdr: 0, missing: 0 };\n  scopeDiag.crossTabs.recordTypeBySdr[rt][sdrCat] += 1;\n  for (const f of IV_ALL) { const v = norm(o[f]); if (v) { ivNonblank[f] += 1; ivValues[f].add(v); } }\n  for (const pc of ivPairCounters) {\n    const va = norm(o[pc.fields[0]]); const vb = norm(o[pc.fields[1]]);\n    if (va && vb) { pc.bothPopulated += 1; if (va !== vb) pc.disagreements += 1; }\n  }\n}\nconst ivDiag = {\n  candidates: IV_ALL,\n  perField: Object.fromEntries(IV_ALL.map((f) => [f, { nonblank: ivNonblank[f], distinctValues: ivValues[f].size }])),\n  pairwise: ivPairCounters\n};\n\nreturn [{ json: {\n  executedAt: new Date().toISOString(),\n  dry_run: true,\n  writes_attempted: 0,\n  scope,\n  countsByRecordTypeDeveloperName: byDev,\n  countsByNormalizedCurrentStage: byStage,\n  history: { rowsDiscovered: hist.length, recordTypeRows: rtRows, stageRows, otherFieldRows: hist.length - rtRows - stageRows, exactDuplicates, conflictingDuplicateHistoryIds: conflicting.size, invalidTimestamps, recordTypeValues: rtValueCounts, recordTypeDiagnostics: rtDiagList, stageValues: { ...stageValueCounts, unknownLabels: stageLabelDiagnostics } },\n  movement: { forwardMoves: fwd, backwardMoves: back, forwardSkips: fskip, backwardSkips: bskip, sameTimestamp: { candidateGroups, harmlessCrossLedgerGroups: harmless, uniquelyProvableOrOrderIndependent: provable, remainingForAuthoritativeEvaluation: remaining } },\n  industryVertical: ivDiag,\n  businessScope: scopeDiag,\n  note: 'Mirror aggregates; remainingForAuthoritativeEvaluation groups REQUIRE the authoritative Bite 5A evaluation (buildDryRunSummary) and are not review issues yet. The mirror never creates ambiguous_same_timestamp issues.'\n} }];"
       }
     },
     {
@@ -385,7 +396,7 @@ and no embedded secrets.
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1100,
+        1800,
         0
       ],
       "parameters": {
@@ -398,8 +409,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.salesforce",
       "typeVersion": 1,
       "position": [
-        220,
-        -260
+        800,
+        0
       ],
       "credentials": {
         "salesforceOAuth2Api": {
@@ -418,8 +429,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        220,
-        260
+        200,
+        0
       ],
       "parameters": {
         "jsCode": "// PRIVATE RUNTIME CONFIGURATION. Enter the two approved BDR full names\n// here, inside your n8n only. NEVER export, commit, or share this\n// workflow with real names filled in; the committed template carries\n// placeholders only.\nreturn [{ json: { approvedBdrNames: ['REPLACE_WITH_BDR_NAME_1', 'REPLACE_WITH_BDR_NAME_2'] } }];"
@@ -431,8 +442,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.salesforce",
       "typeVersion": 1,
       "position": [
-        440,
-        260
+        400,
+        0
       ],
       "credentials": {
         "salesforceOAuth2Api": {
@@ -451,8 +462,8 @@ and no embedded secrets.
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        440,
-        420
+        1200,
+        200
       ],
       "parameters": {
         "jsCode": "// PRIVATE n8n-only diagnostic: who creates Opportunities, by display\n// name, with counts. For the user's eyes inside n8n ONLY. Never commit,\n// paste into tests or docs, or include in the shared GUARD aggregates.\nconst counts = new Map();\nfor (const item of $input.all()) {\n  const name = (item.json.CreatedBy && item.json.CreatedBy.Name) || '(missing creator)';\n  counts.set(name, (counts.get(name) || 0) + 1);\n}\nreturn [...counts.entries()]\n  .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))\n  .map(([creatorName, count]) => ({ json: { PRIVATE_do_not_share: true, creatorName, count } }));"
@@ -464,22 +475,51 @@ and no embedded secrets.
       "main": [
         [
           {
+            "node": "CONFIG (PRIVATE): approved BDR names",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONFIG (PRIVATE): approved BDR names": {
+      "main": [
+        [
+          {
+            "node": "READ ONLY: Resolve approved BDR users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ ONLY: Resolve approved BDR users": {
+      "main": [
+        [
+          {
             "node": "READ ONLY: Describe Opportunity fields",
             "type": "main",
             "index": 0
-          },
-          {
-            "node": "READ ONLY: Fetch included Opportunities",
-            "type": "main",
-            "index": 0
-          },
+          }
+        ]
+      ]
+    },
+    "READ ONLY: Describe Opportunity fields": {
+      "main": [
+        [
           {
             "node": "READ ONLY: Fetch Opportunity RecordTypes",
             "type": "main",
             "index": 0
-          },
+          }
+        ]
+      ]
+    },
+    "READ ONLY: Fetch Opportunity RecordTypes": {
+      "main": [
+        [
           {
-            "node": "CONFIG (PRIVATE): approved BDR names",
+            "node": "READ ONLY: Fetch included Opportunities",
             "type": "main",
             "index": 0
           }
@@ -529,17 +569,6 @@ and no embedded secrets.
         [
           {
             "node": "GUARD: fail unless dry run with zero writes",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "CONFIG (PRIVATE): approved BDR names": {
-      "main": [
-        [
-          {
-            "node": "READ ONLY: Resolve approved BDR users",
             "type": "main",
             "index": 0
           }

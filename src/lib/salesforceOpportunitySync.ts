@@ -308,9 +308,15 @@ export function buildBusinessScopeDiagnostic(
   users: SalesforceUserRef[] = [],
 ): BusinessScopeDiagnostic {
   const resolution = resolveApprovedBdrUsers(approvedBdrNames, users);
-  const approvedNames = new Set(Object.keys(resolution.userIdByName));
-  const approvedIds = new Set(Object.values(resolution.userIdByName));
-  const bdrConfigured = approvedNames.size > 0;
+  // Approved USER IDS are the only classification key. Names exist solely
+  // to resolve these ids privately; they are never compared against record
+  // fields. Both 15- and 18-character id forms are indexed.
+  const approvedIds = new Set<string>();
+  for (const id of Object.values(resolution.userIdByName)) {
+    approvedIds.add(id);
+    if (id.length === 18) approvedIds.add(id.slice(0, 15));
+  }
+  const bdrConfigured = Object.keys(resolution.userIdByName).length > 0;
 
   const customerExpansion = emptyExpansion();
   const sdr = emptySdr();
@@ -328,9 +334,12 @@ export function buildBusinessScopeDiagnostic(
 
   for (const rec of records) {
     const expansionCat = classifyCustomerExpansion(rec.Existing_Customer_or_New_Business__c as string | null);
-    const sdrName = normalizeSourceValue((rec.Sales_Development_Rep__c as string | null) ?? null);
+    // Sales_Development_Rep__c is a Lookup(User): its value is a Salesforce
+    // USER ID. Classification compares that id to the approved id set; a
+    // BDR NAME string can never match an id.
+    const sdrId = normalizeSourceValue((rec.Sales_Development_Rep__c as string | null) ?? null);
     const sdrCat: SdrCategory =
-      sdrName === null ? 'missing' : approvedNames.has(sdrName) ? 'approved_bdr' : 'other_sdr';
+      sdrId === null ? 'missing' : approvedIds.has(sdrId) ? 'approved_bdr' : 'other_sdr';
     // Creator classification is DIAGNOSTIC ONLY; no channel (including
     // Sales Generated) is ever inferred from CreatedBy.
     const createdById = normalizeSourceValue((rec.CreatedById as string | null) ?? null);
