@@ -907,6 +907,80 @@ describe('n8n workflow template safety (static)', () => {
   });
 });
 
+describe('paired record-type representations (one transition, one movement)', () => {
+  const RT_HPP = '012AAAA0000SYN1';
+  const RT_OPP = '012AAAA0000SYN2';
+  const refs = [
+    { Id: RT_HPP, Name: 'High Potential Prospect', DeveloperName: 'High_Potential_Prospect', SobjectType: 'Opportunity' },
+    { Id: RT_OPP, Name: 'Opportunity', DeveloperName: 'Leads', SobjectType: 'Opportunity' },
+  ];
+  const record = opp({ Id: 'SYNTH-OPP-A' });
+
+  it('collapses the label row and the id row of one transition into one movement', () => {
+    const rows = [
+      // Salesforce writes BOTH rows for one change: labels and ids, distinct
+      // History IDs, identical timestamp.
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'High Potential Prospect', NewValue: 'Opportunity', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: RT_HPP, NewValue: RT_OPP, CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    // One movement, not two; the pair is not a same-timestamp candidate.
+    expect(summary.movement.forwardMoves).toBe(1);
+    expect(summary.history.pairedRecordTypeRepresentationRows).toBe(1);
+    expect(summary.history.recordTypeMovementRows).toBe(1);
+    expect(summary.history.recordTypeRows).toBe(2);
+    expect(summary.movement.sameTimestamp.candidateGroups).toBe(0);
+    expect(summary.movement.sameTimestamp.materiallyAmbiguous).toBe(0);
+  });
+
+  it('counts each unpaired history row exactly once', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'High Potential Prospect', NewValue: 'Opportunity', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'Pursuit', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    expect(summary.movement.forwardMoves).toBe(2);
+    expect(summary.history.pairedRecordTypeRepresentationRows).toBe(0);
+    expect(summary.history.recordTypeMovementRows).toBe(3);
+  });
+
+  it('two genuinely different transitions at one instant remain distinct', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'Opportunity', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'High Potential Prospect', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'Pursuit', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.pairedRecordTypeRepresentationRows).toBe(0);
+    expect(summary.movement.sameTimestamp.materiallyAmbiguous).toBe(1);
+  });
+});
+
+describe('customer expansion value diagnostics', () => {
+  it('lists each distinct nonblank normalized value with its count, labels only', () => {
+    const scope = buildDryRunSummary(
+      [
+        opp({ Existing_Customer_or_New_Business__c: 'Synthetic Segment A' }),
+        opp({ Existing_Customer_or_New_Business__c: ' Synthetic Segment A ' }),
+        opp({ Existing_Customer_or_New_Business__c: 'Synthetic Segment B' }),
+        opp({ Existing_Customer_or_New_Business__c: null }),
+      ],
+      [],
+      [],
+      RUN,
+    ).businessScope;
+    expect(scope.customerExpansionValues).toEqual([
+      { value: 'Synthetic Segment A', occurrences: 2 },
+      { value: 'Synthetic Segment B', occurrences: 1 },
+    ]);
+    // The groups and the no-decision statement are unchanged.
+    expect(scope.customerExpansion.other).toBe(3);
+    expect(scope.customerExpansion.missing).toBe(1);
+    expect(scope.note).toContain('No inclusion or exclusion decision');
+  });
+});
+
 describe('query amplification guards (pure layer)', () => {
   it('duplicate Opportunity Ids fail instead of being silently deduplicated', () => {
     const dup = opp({ Id: 'SYNTH-OPP-DUP' });
@@ -925,6 +999,93 @@ describe('query amplification guards (pure layer)', () => {
     const summary = buildDryRunSummary([opp(), opp()], [], [], RUN);
     expect(summary.dry_run).toBe(true);
     expect(summary.scope.discovered).toBe(2);
+  });
+});
+
+describe('template end-to-end execution (stubbed n8n)', () => {
+  const doc2 = readFileSync(resolve(process.cwd(), 'docs/salesforce-opportunity-sync.md'), 'utf8');
+  const tpl = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(doc2)![1]) as {
+    nodes: Array<{ name: string; parameters: Record<string, unknown> }>;
+  };
+  const nodeCode = (name: string): string =>
+    String(tpl.nodes.find((n) => n.name.startsWith(name))!.parameters.jsCode);
+
+  // Execute a Code node's body with stubbed n8n globals and a frozen Date so
+  // the test stays deterministic.
+  class FrozenDate {
+    toISOString(): string {
+      return '2026-07-27T00:00:00.000Z';
+    }
+  }
+  function runNode(js: string, nodes: Record<string, unknown[]>, input: unknown[] = []): Array<{ json: Record<string, unknown> }> {
+    const dollar = (name: string) => ({
+      all: () => (nodes[name] ?? []).map((json) => ({ json })),
+      first: () => ({ json: (nodes[name] ?? [{}])[0] }),
+    });
+    const inputStub = { all: () => input.map((json) => ({ json })), first: () => ({ json: input[0] }) };
+    const fn = new Function('$', '$input', 'Date', js) as (
+      d: typeof dollar,
+      i: typeof inputStub,
+      dateCls: typeof FrozenDate,
+    ) => Array<{ json: Record<string, unknown> }>;
+    return fn(dollar, inputStub, FrozenDate);
+  }
+
+  it('two resolved users flow from validator to Aggregate classification without leaking', () => {
+    const users = [
+      { Id: 'SYNTHUSERBDR100XYZ', Name: 'Synthetic Bdr One', IsActive: true },
+      { Id: 'SYNTHUSERBDR200XYZ', Name: 'Synthetic Bdr Two', IsActive: true },
+    ];
+    const config = [{ approvedBdrNames: ['Synthetic Bdr One', 'Synthetic Bdr Two'] }];
+    const validatorOut = runNode(nodeCode('VALIDATE: approved BDR resolution'), {
+      'CONFIG (PRIVATE): approved BDR names': config,
+    }, users);
+    expect(validatorOut[0].json.bdrConfigured).toBe(true);
+    expect(validatorOut[0].json.approvedUserIds).toContain('SYNTHUSERBDR100XYZ');
+    expect(validatorOut[0].json.approvedUserIds).toContain('SYNTHUSERBDR100XYZ'.slice(0, 15));
+
+    const opps = [
+      { Id: 'SYNTH-OPP-1', RecordType: { DeveloperName: 'High_Potential_Prospect' }, IsClosed: false, CreatedDate: '2026-02-01T09:00:00.000+0000', SystemModstamp: '2026-06-01T09:00:00.000+0000', Sales_Development_Rep__c: 'SYNTHUSERBDR100XYZ', CreatedById: 'SYNTHUSERBDR200XYZ', Existing_Customer_or_New_Business__c: 'Synthetic Segment A' },
+      { Id: 'SYNTH-OPP-2', RecordType: { DeveloperName: 'Leads' }, IsClosed: false, CreatedDate: '2026-02-01T09:00:00.000+0000', SystemModstamp: '2026-06-01T09:00:00.000+0000', Sales_Development_Rep__c: 'SYNTHUSEROTHERXYZ0', CreatedById: null },
+    ];
+    const describeRows = ['StageName', 'IsClosed', 'IsWon', 'CreatedDate', 'SystemModstamp', 'CloseDate', 'CampaignId', 'Sales_Development_Rep__c', 'Existing_Customer_or_New_Business__c', 'Commercial_Region__c'].map((f) => ({ QualifiedApiName: f }));
+    const rts = [
+      { Id: '012AAAA0000SYN1', Name: 'High Potential Prospect', DeveloperName: 'High_Potential_Prospect', SobjectType: 'Opportunity' },
+      { Id: '012AAAA0000SYN2', Name: 'Opportunity', DeveloperName: 'Leads', SobjectType: 'Opportunity' },
+      { Id: '012AAAA0000SYN3', Name: 'Pursuit', DeveloperName: 'Licensing', SobjectType: 'Opportunity' },
+    ];
+    const aggregateOut = runNode(nodeCode('DRY RUN: Aggregate summary'), {
+      'VALIDATE: approved BDR resolution': validatorOut.map((x) => x.json),
+      'READ ONLY: Describe Opportunity fields': describeRows,
+      'READ ONLY: Fetch Opportunity RecordTypes': rts,
+      'READ ONLY: Fetch included Opportunities': opps,
+      'READ ONLY: Fetch OpportunityFieldHistory': [],
+    });
+    const summary = aggregateOut[0].json as {
+      dry_run: boolean;
+      writes_attempted: number;
+      businessScope: { bdrConfigured: boolean; sdr: Record<string, number>; creator: Record<string, number> };
+    };
+    expect(summary.dry_run).toBe(true);
+    expect(summary.writes_attempted).toBe(0);
+    // The validated ids reached classification: bdrConfigured true, the
+    // approved lookup id classified, the other id separated.
+    expect(summary.businessScope.bdrConfigured).toBe(true);
+    expect(summary.businessScope.sdr).toEqual({ approved_bdr: 1, other_sdr: 1, missing: 0 });
+    expect(summary.businessScope.creator.approved_bdr).toBe(1);
+    // No identifier leaks into the shared output.
+    const serialized = JSON.stringify(summary);
+    for (const marker of ['Synthetic Bdr One', 'Synthetic Bdr Two', 'SYNTHUSERBDR100XYZ', 'SYNTHUSERBDR200XYZ', 'SYNTH-OPP-1']) {
+      expect(serialized).not.toContain(marker);
+    }
+  });
+
+  it('the validator throws when placeholders remain instead of passing silently', () => {
+    expect(() =>
+      runNode(nodeCode('VALIDATE: approved BDR resolution'), {
+        'CONFIG (PRIVATE): approved BDR names': [{ approvedBdrNames: ['REPLACE_WITH_BDR_NAME_1', 'REPLACE_WITH_BDR_NAME_2'] }],
+      }, []),
+    ).toThrow(/expected 2 configured BDR names, found 0/);
   });
 });
 

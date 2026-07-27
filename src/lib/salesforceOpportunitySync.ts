@@ -265,6 +265,11 @@ export interface BusinessScopeDiagnostic {
   bdrConfigured: boolean;
   bdrResolutionErrors: string[];
   customerExpansion: Record<CustomerExpansionCategory, number>;
+  // Every distinct nonblank normalized Existing_Customer_or_New_Business__c
+  // value with its count: picklist configuration metadata only, no record
+  // data. These stay diagnostic labels until the user reviews them; nothing
+  // is guessed or fuzzily classified.
+  customerExpansionValues: Array<{ value: string; occurrences: number }>;
   sdr: Record<SdrCategory, number>;
   creator: Record<CreatorCategory, number>;
   campaign: Record<CampaignPresence, number>;
@@ -332,7 +337,12 @@ export function buildBusinessScopeDiagnostic(
   const recordTypeByExpansion: Record<string, Record<CustomerExpansionCategory, number>> = {};
   const recordTypeBySdr: Record<string, Record<SdrCategory, number>> = {};
 
+  const expansionValues = new Map<string, number>();
   for (const rec of records) {
+    const expansionRaw = normalizeSourceValue((rec.Existing_Customer_or_New_Business__c as string | null) ?? null);
+    if (expansionRaw !== null) {
+      expansionValues.set(expansionRaw, (expansionValues.get(expansionRaw) ?? 0) + 1);
+    }
     const expansionCat = classifyCustomerExpansion(rec.Existing_Customer_or_New_Business__c as string | null);
     // Sales_Development_Rep__c is a Lookup(User): its value is a Salesforce
     // USER ID. Classification compares that id to the approved id set; a
@@ -370,6 +380,9 @@ export function buildBusinessScopeDiagnostic(
     bdrConfigured,
     bdrResolutionErrors: resolution.errors,
     customerExpansion,
+    customerExpansionValues: [...expansionValues.entries()]
+      .map(([value, occurrences]) => ({ value, occurrences }))
+      .sort((a, b) => b.occurrences - a.occurrences || a.value.localeCompare(b.value)),
     sdr,
     creator,
     campaign,
@@ -667,6 +680,13 @@ export interface DryRunSummary {
     invalidTimestamps: number;
     recordTypeValues: ValueResolutionCounts;
     recordTypeDiagnostics: UnmappedRecordTypeDiagnostic[];
+    // Salesforce writes PAIRED history rows for one record-type change (one
+    // carrying labels, one carrying RecordTypeIds, distinct History IDs,
+    // same timestamp). Counted here and collapsed before movement and
+    // ambiguity math so one transition contributes at most one movement.
+    pairedRecordTypeRepresentationRows: number;
+    // Record-type rows remaining after the collapse: the real transitions.
+    recordTypeMovementRows: number;
     stageValues: {
       resolved: number;
       blankBaseline: number;
@@ -782,7 +802,7 @@ export function buildDryRunSummary(
         return r.value;
     }
   };
-  const rows = historyRecords.map((rec) => {
+  const resolvedRows = historyRecords.map((rec) => {
     const mapped = mapHistoryRecord(rec);
     if (mapped.field === DRY_RUN_STAGE_CONFIG.stageFieldName) {
       // Normalization only (whitespace, zero-width characters); exact
@@ -800,6 +820,33 @@ export function buildDryRunSummary(
     const after = rtValueCounts.unresolvedIdShaped + rtValueCounts.unmappedNonblankLabel;
     if (after > before) rtValueCounts.affectedRows += 1;
     return { ...mapped, oldValue, newValue };
+  });
+
+  // Collapse PAIRED representations of one record-type transition: the
+  // label row and the RecordTypeId row of the same change share the
+  // opportunity, timestamp, and funnel-normalized endpoints. One transition
+  // must contribute at most one movement; OldValue and NewValue are the two
+  // endpoints of one movement, never two movements. The collapse is counted
+  // and reported, never silent, and applies only to record-type rows.
+  const funnelKey = (v: string | null): string =>
+    v === null ? '' : (DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[v] ?? `raw:${v}`);
+  const seenTransitions = new Set<string>();
+  const seenHistoryIds = new Set<string>();
+  let pairedRecordTypeRepresentationRows = 0;
+  const rows = resolvedRows.filter((row) => {
+    if (row.field !== DRY_RUN_STAGE_CONFIG.recordTypeFieldName) return true;
+    // A repeat of the SAME History Id is not a paired representation: it
+    // passes through to the Bite 5A idempotency handling (exact duplicate
+    // or conflict). Paired representations carry DIFFERENT History Ids.
+    if (seenHistoryIds.has(row.historyId)) return true;
+    seenHistoryIds.add(row.historyId);
+    const key = [row.opportunityId, row.changedAt, funnelKey(row.oldValue), funnelKey(row.newValue)].join('|');
+    if (seenTransitions.has(key)) {
+      pairedRecordTypeRepresentationRows += 1;
+      return false;
+    }
+    seenTransitions.add(key);
+    return true;
   });
 
   // Stage-value diagnostics: blank baselines are normal; only nonblank
@@ -848,17 +895,19 @@ export function buildDryRunSummary(
   // every (opportunity, timestamp) instant carrying two or more
   // funnel-relevant rows; only record-type-conflicting groups can be
   // material, and Bite 5A alone decides which of those actually are.
+  // Computed over the COLLAPSED rows: a paired representation of one
+  // transition is not a same-timestamp conflict.
   const stampCounts = new Map<string, { rt: number; stage: number }>();
-  for (const rec of historyRecords) {
+  for (const row of rows) {
     if (
-      rec.Field !== DRY_RUN_STAGE_CONFIG.recordTypeFieldName &&
-      rec.Field !== DRY_RUN_STAGE_CONFIG.stageFieldName
+      row.field !== DRY_RUN_STAGE_CONFIG.recordTypeFieldName &&
+      row.field !== DRY_RUN_STAGE_CONFIG.stageFieldName
     ) {
       continue;
     }
-    const key = `${rec.OpportunityId}|${rec.CreatedDate}`;
+    const key = `${row.opportunityId}|${row.changedAt}`;
     const c = stampCounts.get(key) ?? { rt: 0, stage: 0 };
-    if (rec.Field === DRY_RUN_STAGE_CONFIG.recordTypeFieldName) c.rt += 1;
+    if (row.field === DRY_RUN_STAGE_CONFIG.recordTypeFieldName) c.rt += 1;
     else c.stage += 1;
     stampCounts.set(key, c);
   }
@@ -937,6 +986,8 @@ export function buildDryRunSummary(
       conflictingDuplicateHistoryIds: issueCount('conflicting_duplicate_history_id'),
       invalidTimestamps: issueCount('invalid_history_timestamp'),
       recordTypeValues: rtValueCounts,
+      pairedRecordTypeRepresentationRows,
+      recordTypeMovementRows: recordTypeRows - pairedRecordTypeRepresentationRows,
       recordTypeDiagnostics: [...unmappedRecordTypes.values()]
         .map((d) => ({
           name: d.name,
