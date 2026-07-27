@@ -60,6 +60,11 @@ export interface SalesforceOpportunityRecord {
   Owner?: { Name?: string | null } | null;
   CampaignId?: string | null;
   Campaign?: { Name?: string | null } | null;
+  // Creator identity is used for DIAGNOSTIC classification only; no channel
+  // is ever inferred from it. CreatedBy.Name exists solely for the private
+  // n8n-only creator diagnostic and never enters the aggregate summary.
+  CreatedById?: string | null;
+  CreatedBy?: { Name?: string | null } | null;
   // Custom fields (Commercial Region, milestone dates, BDR, GTM fields)
   // arrive here once their API names are confirmed by the describe step.
   [customField: string]: unknown;
@@ -167,14 +172,239 @@ export const CONFIRMED_CUSTOM_FIELDS: Record<string, string> = {
 };
 
 // Industry Vertical stays intentionally unresolved: Salesforce carries
-// several candidates and the business has not chosen one. The dry run
-// reports nonblank coverage for the two directly-named candidates so the
-// choice is made from data, never silently. Insurance_vertical__c is the
-// third known candidate, documented but not pulled by default.
+// three candidates and the business has not chosen one. The dry run pulls
+// ALL THREE and reports nonblank counts, distinct values, overlap, and
+// disagreement per pair so the choice is made from data, never silently.
 export const INDUSTRY_VERTICAL_CANDIDATES: string[] = [
+  'Insurance_vertical__c',
   'Industry_Vertical__c',
   'Pursuit_Industry_Vertical__c',
 ];
+
+// ---------------------------------------------------------------------------
+// Business-scope diagnostic (DIAGNOSTIC GROUPS ONLY, not an inclusion
+// decision; no record is excluded by any of this)
+// ---------------------------------------------------------------------------
+
+export type CustomerExpansionCategory =
+  | 'new_logo'
+  | 'existing_customer_or_expansion'
+  | 'other'
+  | 'missing';
+export type SdrCategory = 'approved_bdr' | 'other_sdr' | 'missing';
+export type CreatorCategory = 'approved_bdr' | 'other_creator' | 'missing';
+export type CampaignPresence = 'primary_campaign_present' | 'primary_campaign_missing';
+
+// Expected Existing_Customer_or_New_Business__c label variants, matched
+// exactly after normalization. Anything nonblank and unrecognized lands in
+// 'other' where it stays VISIBLE for a deliberate mapping extension;
+// nothing is fuzzy-matched or silently classified.
+export const CUSTOMER_EXPANSION_VALUE_MAP: Record<
+  string,
+  'new_logo' | 'existing_customer_or_expansion'
+> = {
+  'New Logo': 'new_logo',
+  'New Business': 'new_logo',
+  'Existing Customer': 'existing_customer_or_expansion',
+  Expansion: 'existing_customer_or_expansion',
+  'Existing Customer or Expansion': 'existing_customer_or_expansion',
+  'Customer Expansion': 'existing_customer_or_expansion',
+};
+
+export function classifyCustomerExpansion(raw: string | null | undefined): CustomerExpansionCategory {
+  const v = normalizeSourceValue(raw ?? null);
+  if (v === null) return 'missing';
+  return CUSTOMER_EXPANSION_VALUE_MAP[v] ?? 'other';
+}
+
+export interface SalesforceUserRef {
+  Id: string;
+  Name: string;
+  IsActive?: boolean | null;
+}
+
+export interface BdrResolution {
+  // Normalized configured name -> resolved active Salesforce User Id.
+  userIdByName: Record<string, string>;
+  // A configured name resolving to zero or to multiple ACTIVE users is a
+  // configuration failure; the run must fail safely rather than guess.
+  errors: string[];
+}
+
+// Resolve the privately-configured approved BDR names against a read-only
+// User query result. Names never appear in committed files; the workflow
+// carries placeholders until the user enters real names inside n8n.
+export function resolveApprovedBdrUsers(
+  configuredNames: string[],
+  users: SalesforceUserRef[],
+): BdrResolution {
+  const userIdByName: Record<string, string> = {};
+  const errors: string[] = [];
+  for (const raw of configuredNames) {
+    const name = normalizeSourceValue(raw);
+    if (name === null || name.startsWith('REPLACE_WITH_')) continue;
+    const matches = users.filter(
+      (u) => u.IsActive !== false && normalizeSourceValue(u.Name) === name,
+    );
+    if (matches.length === 1) {
+      userIdByName[name] = matches[0].Id;
+    } else {
+      // The error names the count, never a User Id.
+      errors.push(
+        `configured BDR name resolved to ${matches.length} active users; expected exactly 1`,
+      );
+    }
+  }
+  return { userIdByName, errors };
+}
+
+export interface BusinessScopeDiagnostic {
+  // Explicit: these are diagnostic groups for a business decision. No
+  // inclusion or exclusion is applied by this classification.
+  note: string;
+  bdrConfigured: boolean;
+  bdrResolutionErrors: string[];
+  customerExpansion: Record<CustomerExpansionCategory, number>;
+  sdr: Record<SdrCategory, number>;
+  creator: Record<CreatorCategory, number>;
+  campaign: Record<CampaignPresence, number>;
+  crossTabs: {
+    newLogoBySdr: Record<SdrCategory, number>;
+    newLogoByCampaign: Record<CampaignPresence, number>;
+    sdrByCreator: Record<SdrCategory, Record<CreatorCategory, number>>;
+    recordTypeByExpansion: Record<string, Record<CustomerExpansionCategory, number>>;
+    recordTypeBySdr: Record<string, Record<SdrCategory, number>>;
+  };
+}
+
+export interface IndustryVerticalPairComparison {
+  fields: [string, string];
+  bothPopulated: number;
+  disagreements: number;
+}
+
+export interface IndustryVerticalDiagnostic {
+  candidates: string[];
+  perField: Record<string, { nonblank: number; distinctValues: number }>;
+  pairwise: IndustryVerticalPairComparison[];
+}
+
+function emptyExpansion(): Record<CustomerExpansionCategory, number> {
+  return { new_logo: 0, existing_customer_or_expansion: 0, other: 0, missing: 0 };
+}
+function emptySdr(): Record<SdrCategory, number> {
+  return { approved_bdr: 0, other_sdr: 0, missing: 0 };
+}
+function emptyCreator(): Record<CreatorCategory, number> {
+  return { approved_bdr: 0, other_creator: 0, missing: 0 };
+}
+function emptyCampaign(): Record<CampaignPresence, number> {
+  return { primary_campaign_present: 0, primary_campaign_missing: 0 };
+}
+
+export function buildBusinessScopeDiagnostic(
+  records: SalesforceOpportunityRecord[],
+  approvedBdrNames: string[] = [],
+  users: SalesforceUserRef[] = [],
+): BusinessScopeDiagnostic {
+  const resolution = resolveApprovedBdrUsers(approvedBdrNames, users);
+  const approvedNames = new Set(Object.keys(resolution.userIdByName));
+  const approvedIds = new Set(Object.values(resolution.userIdByName));
+  const bdrConfigured = approvedNames.size > 0;
+
+  const customerExpansion = emptyExpansion();
+  const sdr = emptySdr();
+  const creator = emptyCreator();
+  const campaign = emptyCampaign();
+  const newLogoBySdr = emptySdr();
+  const newLogoByCampaign = emptyCampaign();
+  const sdrByCreator: Record<SdrCategory, Record<CreatorCategory, number>> = {
+    approved_bdr: emptyCreator(),
+    other_sdr: emptyCreator(),
+    missing: emptyCreator(),
+  };
+  const recordTypeByExpansion: Record<string, Record<CustomerExpansionCategory, number>> = {};
+  const recordTypeBySdr: Record<string, Record<SdrCategory, number>> = {};
+
+  for (const rec of records) {
+    const expansionCat = classifyCustomerExpansion(rec.Existing_Customer_or_New_Business__c as string | null);
+    const sdrName = normalizeSourceValue((rec.Sales_Development_Rep__c as string | null) ?? null);
+    const sdrCat: SdrCategory =
+      sdrName === null ? 'missing' : approvedNames.has(sdrName) ? 'approved_bdr' : 'other_sdr';
+    // Creator classification is DIAGNOSTIC ONLY; no channel (including
+    // Sales Generated) is ever inferred from CreatedBy.
+    const createdById = normalizeSourceValue((rec.CreatedById as string | null) ?? null);
+    const creatorCat: CreatorCategory =
+      createdById === null ? 'missing' : approvedIds.has(createdById) ? 'approved_bdr' : 'other_creator';
+    const campaignCat: CampaignPresence = normalizeSourceValue(rec.CampaignId ?? null)
+      ? 'primary_campaign_present'
+      : 'primary_campaign_missing';
+    const rt = INCLUDED_DEVELOPER_NAMES[rec.RecordType?.DeveloperName ?? ''] ?? 'unknown';
+
+    customerExpansion[expansionCat] += 1;
+    sdr[sdrCat] += 1;
+    creator[creatorCat] += 1;
+    campaign[campaignCat] += 1;
+    if (expansionCat === 'new_logo') {
+      newLogoBySdr[sdrCat] += 1;
+      newLogoByCampaign[campaignCat] += 1;
+    }
+    sdrByCreator[sdrCat][creatorCat] += 1;
+    recordTypeByExpansion[rt] = recordTypeByExpansion[rt] ?? emptyExpansion();
+    recordTypeByExpansion[rt][expansionCat] += 1;
+    recordTypeBySdr[rt] = recordTypeBySdr[rt] ?? emptySdr();
+    recordTypeBySdr[rt][sdrCat] += 1;
+  }
+
+  return {
+    note: 'Diagnostic groups only. No inclusion or exclusion decision is made or applied here.',
+    bdrConfigured,
+    bdrResolutionErrors: resolution.errors,
+    customerExpansion,
+    sdr,
+    creator,
+    campaign,
+    crossTabs: { newLogoBySdr, newLogoByCampaign, sdrByCreator, recordTypeByExpansion, recordTypeBySdr },
+  };
+}
+
+export function buildIndustryVerticalDiagnostic(
+  records: SalesforceOpportunityRecord[],
+): IndustryVerticalDiagnostic {
+  const perField: Record<string, { nonblank: number; distinctValues: number }> = {};
+  const valuesByField: Record<string, Map<string, true>> = {};
+  for (const field of INDUSTRY_VERTICAL_CANDIDATES) {
+    valuesByField[field] = new Map();
+    let nonblank = 0;
+    for (const rec of records) {
+      const v = normalizeSourceValue((rec[field] as string | null) ?? null);
+      if (v !== null) {
+        nonblank += 1;
+        valuesByField[field].set(v, true);
+      }
+    }
+    perField[field] = { nonblank, distinctValues: valuesByField[field].size };
+  }
+  const pairwise: IndustryVerticalPairComparison[] = [];
+  for (let i = 0; i < INDUSTRY_VERTICAL_CANDIDATES.length; i += 1) {
+    for (let j = i + 1; j < INDUSTRY_VERTICAL_CANDIDATES.length; j += 1) {
+      const a = INDUSTRY_VERTICAL_CANDIDATES[i];
+      const b = INDUSTRY_VERTICAL_CANDIDATES[j];
+      let bothPopulated = 0;
+      let disagreements = 0;
+      for (const rec of records) {
+        const va = normalizeSourceValue((rec[a] as string | null) ?? null);
+        const vb = normalizeSourceValue((rec[b] as string | null) ?? null);
+        if (va !== null && vb !== null) {
+          bothPopulated += 1;
+          if (va !== vb) disagreements += 1;
+        }
+      }
+      pairwise.push({ fields: [a, b], bothPopulated, disagreements });
+    }
+  }
+  return { candidates: INDUSTRY_VERTICAL_CANDIDATES, perField, pairwise };
+}
 
 // ---------------------------------------------------------------------------
 // Mapping into the Bite 5A contract
@@ -449,12 +679,10 @@ export interface DryRunSummary {
     opportunitiesRequiringReview: number;
     countsByIssue: Record<string, number>;
   };
-  // Nonblank coverage per Industry Vertical candidate so the field choice
+  // Per-candidate coverage, overlap, and disagreement so the field choice
   // is a data-informed business decision, never a silent default.
-  industryVertical: {
-    candidates: string[];
-    nonblankCoverage: Record<string, number>;
-  };
+  industryVertical: IndustryVerticalDiagnostic;
+  businessScope: BusinessScopeDiagnostic;
 }
 
 // Build the authoritative dry-run summary: RecordType-Id resolution, then
@@ -466,6 +694,7 @@ export function buildDryRunSummary(
   historyRecords: SalesforceOpportunityHistoryRecord[],
   recordTypeRefs: SalesforceRecordTypeRef[],
   input: { executedAt: string; year: number },
+  scopeInput: { approvedBdrNames?: string[]; users?: SalesforceUserRef[] } = {},
 ): DryRunSummary {
   const idMap = buildRecordTypeIdMap(recordTypeRefs);
 
@@ -715,14 +944,11 @@ export function buildDryRunSummary(
       opportunitiesRequiringReview: requiringReview,
       countsByIssue: reviewIssueCounts,
     },
-    industryVertical: {
-      candidates: INDUSTRY_VERTICAL_CANDIDATES,
-      nonblankCoverage: Object.fromEntries(
-        INDUSTRY_VERTICAL_CANDIDATES.map((field) => [
-          field,
-          records.filter((r) => typeof r[field] === 'string' && (r[field] as string).trim() !== '').length,
-        ]),
-      ),
-    },
+    industryVertical: buildIndustryVerticalDiagnostic(records),
+    businessScope: buildBusinessScopeDiagnostic(
+      records,
+      scopeInput.approvedBdrNames ?? [],
+      scopeInput.users ?? [],
+    ),
   };
 }

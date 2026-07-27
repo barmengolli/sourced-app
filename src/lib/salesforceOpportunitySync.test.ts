@@ -14,6 +14,7 @@ import {
   CONFIRMED_CUSTOM_FIELDS,
   INDUSTRY_VERTICAL_CANDIDATES,
   normalizeSourceValue,
+  resolveApprovedBdrUsers,
   mapHistoryRecord,
   mapBaselineObservation,
   chunkOpportunityIds,
@@ -486,19 +487,148 @@ describe('record-type diagnostics and custom fields (final hardening)', () => {
     expect(CONFIRMED_CUSTOM_FIELDS['Primary Campaign Source']).toBe('CampaignId');
   });
 
-  it('keeps Industry Vertical unresolved and reports candidate coverage', () => {
+  it('keeps Industry Vertical unresolved across all three candidates with overlap and disagreement', () => {
     expect(Object.keys(CONFIRMED_CUSTOM_FIELDS)).not.toContain('Industry Vertical');
-    expect(INDUSTRY_VERTICAL_CANDIDATES).toEqual(['Industry_Vertical__c', 'Pursuit_Industry_Vertical__c']);
+    expect(INDUSTRY_VERTICAL_CANDIDATES).toEqual([
+      'Insurance_vertical__c',
+      'Industry_Vertical__c',
+      'Pursuit_Industry_Vertical__c',
+    ]);
     const records = [
-      opp({ Id: 'SYNTH-OPP-V1', Industry_Vertical__c: 'Synthetic Vertical' }),
-      opp({ Id: 'SYNTH-OPP-V2', Pursuit_Industry_Vertical__c: 'Synthetic Vertical' }),
-      opp({ Id: 'SYNTH-OPP-V3' }),
+      // Both directly-named fields populated and AGREEING.
+      opp({ Id: 'SYNTH-OPP-V1', Industry_Vertical__c: 'Synthetic Vertical A', Pursuit_Industry_Vertical__c: 'Synthetic Vertical A' }),
+      // Both populated and DISAGREEING.
+      opp({ Id: 'SYNTH-OPP-V2', Industry_Vertical__c: 'Synthetic Vertical A', Pursuit_Industry_Vertical__c: 'Synthetic Vertical B' }),
+      // Only the insurance candidate populated.
+      opp({ Id: 'SYNTH-OPP-V3', Insurance_vertical__c: 'Synthetic Vertical C' }),
+      opp({ Id: 'SYNTH-OPP-V4' }),
     ];
-    const summary = buildDryRunSummary(records, [], [], RUN);
-    expect(summary.industryVertical.nonblankCoverage).toEqual({
-      Industry_Vertical__c: 1,
-      Pursuit_Industry_Vertical__c: 1,
+    const iv = buildDryRunSummary(records, [], [], RUN).industryVertical;
+    expect(iv.perField.Industry_Vertical__c).toEqual({ nonblank: 2, distinctValues: 1 });
+    expect(iv.perField.Pursuit_Industry_Vertical__c).toEqual({ nonblank: 2, distinctValues: 2 });
+    expect(iv.perField.Insurance_vertical__c).toEqual({ nonblank: 1, distinctValues: 1 });
+    const pair = iv.pairwise.find(
+      (p) => p.fields[0] === 'Industry_Vertical__c' && p.fields[1] === 'Pursuit_Industry_Vertical__c',
+    );
+    expect(pair).toEqual({
+      fields: ['Industry_Vertical__c', 'Pursuit_Industry_Vertical__c'],
+      bothPopulated: 2,
+      disagreements: 1,
     });
+    // Three candidates yield three pairwise comparisons.
+    expect(iv.pairwise).toHaveLength(3);
+  });
+});
+
+describe('business-scope diagnostic (diagnostic groups only)', () => {
+  const users = [
+    { Id: 'SYNTH-USER-BDR1', Name: 'Synthetic Bdr One', IsActive: true },
+    { Id: 'SYNTH-USER-BDR2', Name: 'Synthetic Bdr Two', IsActive: true },
+    { Id: 'SYNTH-USER-SELLER', Name: 'Synthetic Seller', IsActive: true },
+  ];
+  const approved = ['Synthetic Bdr One', 'Synthetic Bdr Two'];
+
+  function scoped(records: SalesforceOpportunityRecord[]) {
+    return buildDryRunSummary(records, [], [], RUN, { approvedBdrNames: approved, users }).businessScope;
+  }
+
+  it('classifies every Customer Expansion category', () => {
+    const scope = scoped([
+      opp({ Existing_Customer_or_New_Business__c: 'New Logo' }),
+      opp({ Existing_Customer_or_New_Business__c: 'New Business' }),
+      opp({ Existing_Customer_or_New_Business__c: 'Existing Customer' }),
+      opp({ Existing_Customer_or_New_Business__c: 'Synthetic Mystery Segment' }),
+      opp({ Existing_Customer_or_New_Business__c: null }),
+    ]);
+    expect(scope.customerExpansion).toEqual({
+      new_logo: 2,
+      existing_customer_or_expansion: 1,
+      other: 1,
+      missing: 1,
+    });
+    expect(scope.note).toContain('Diagnostic groups only');
+  });
+
+  it('classifies approved, other, and missing SDR plus creator categories', () => {
+    const scope = scoped([
+      opp({ Sales_Development_Rep__c: 'Synthetic Bdr One', CreatedById: 'SYNTH-USER-BDR1' }),
+      opp({ Sales_Development_Rep__c: 'Synthetic Outsider', CreatedById: 'SYNTH-USER-SELLER' }),
+      opp({ Sales_Development_Rep__c: null, CreatedById: null }),
+    ]);
+    expect(scope.sdr).toEqual({ approved_bdr: 1, other_sdr: 1, missing: 1 });
+    expect(scope.creator).toEqual({ approved_bdr: 1, other_creator: 1, missing: 1 });
+    expect(scope.bdrConfigured).toBe(true);
+    expect(scope.bdrResolutionErrors).toEqual([]);
+  });
+
+  it('classifies campaign presence and produces every requested cross-tab', () => {
+    const scope = scoped([
+      opp({
+        Existing_Customer_or_New_Business__c: 'New Logo',
+        Sales_Development_Rep__c: 'Synthetic Bdr One',
+        CreatedById: 'SYNTH-USER-BDR1',
+        CampaignId: 'SYNTH-CAMP-1',
+        RecordType: { DeveloperName: 'High_Potential_Prospect', Name: 'High Potential Prospect' },
+      }),
+      opp({
+        Existing_Customer_or_New_Business__c: 'New Logo',
+        Sales_Development_Rep__c: null,
+        CreatedById: 'SYNTH-USER-SELLER',
+        CampaignId: null,
+        RecordType: { DeveloperName: 'Licensing', Name: 'Pursuit' },
+      }),
+      opp({
+        Existing_Customer_or_New_Business__c: 'Existing Customer',
+        Sales_Development_Rep__c: 'Synthetic Outsider',
+        CreatedById: null,
+        CampaignId: null,
+        RecordType: { DeveloperName: 'Leads', Name: 'Opportunity' },
+      }),
+    ]);
+    expect(scope.campaign).toEqual({ primary_campaign_present: 1, primary_campaign_missing: 2 });
+    expect(scope.crossTabs.newLogoBySdr).toEqual({ approved_bdr: 1, other_sdr: 0, missing: 1 });
+    expect(scope.crossTabs.newLogoByCampaign).toEqual({ primary_campaign_present: 1, primary_campaign_missing: 1 });
+    expect(scope.crossTabs.sdrByCreator.approved_bdr.approved_bdr).toBe(1);
+    expect(scope.crossTabs.sdrByCreator.missing.other_creator).toBe(1);
+    expect(scope.crossTabs.recordTypeByExpansion.hpp.new_logo).toBe(1);
+    expect(scope.crossTabs.recordTypeByExpansion.opp.existing_customer_or_expansion).toBe(1);
+    expect(scope.crossTabs.recordTypeBySdr.pursuit.missing).toBe(1);
+    expect(scope.crossTabs.recordTypeBySdr.hpp.approved_bdr).toBe(1);
+  });
+
+  it('fails safely when a configured BDR name is ambiguous or unknown', () => {
+    const dupUsers = [
+      ...users,
+      { Id: 'SYNTH-USER-BDR1B', Name: 'Synthetic Bdr One', IsActive: true },
+    ];
+    const ambiguous = resolveApprovedBdrUsers(['Synthetic Bdr One'], dupUsers);
+    expect(ambiguous.errors).toHaveLength(1);
+    expect(ambiguous.errors[0]).toContain('2 active users');
+    expect(Object.keys(ambiguous.userIdByName)).toHaveLength(0);
+    const unknown = resolveApprovedBdrUsers(['Synthetic Nobody'], users);
+    expect(unknown.errors[0]).toContain('0 active users');
+    // Inactive users never match.
+    const inactive = resolveApprovedBdrUsers(['Synthetic Bdr One'], [
+      { Id: 'SYNTH-USER-BDR1', Name: 'Synthetic Bdr One', IsActive: false },
+    ]);
+    expect(inactive.errors[0]).toContain('0 active users');
+    // Placeholders are skipped, not errors.
+    expect(resolveApprovedBdrUsers(['REPLACE_WITH_BDR_NAME_1'], users).errors).toEqual([]);
+  });
+
+  it('emits no employee identifiers in the committed aggregate output', () => {
+    const serialized = JSON.stringify(
+      buildDryRunSummary(
+        [opp({ Sales_Development_Rep__c: 'Synthetic Bdr One', CreatedById: 'SYNTH-USER-BDR1', CreatedBy: { Name: 'Synthetic Bdr One' } })],
+        [],
+        [],
+        RUN,
+        { approvedBdrNames: approved, users },
+      ),
+    );
+    for (const marker of ['Synthetic Bdr One', 'Synthetic Bdr Two', 'SYNTH-USER-BDR1', 'SYNTH-USER-SELLER', 'Synthetic Seller']) {
+      expect(serialized).not.toContain(marker);
+    }
   });
 });
 
@@ -593,6 +723,25 @@ describe('n8n workflow template safety (static)', () => {
     // No 15/18-character Salesforce ID shapes with known prefixes.
     expect(/\b(006|00D|005|0Q0)[a-zA-Z0-9]{12,15}\b/.test(raw)).toBe(false);
     expect(raw).not.toMatch(/supabase\.co|Bearer |apikey|service_role/i);
+  });
+
+  it('carries only BDR placeholders and a read-only active-user resolution', () => {
+    const config = template.nodes.find((n) => n.name.startsWith('CONFIG (PRIVATE)'));
+    expect(config).toBeTruthy();
+    const code = String(config!.parameters.jsCode);
+    expect(code).toContain('REPLACE_WITH_BDR_NAME_1');
+    expect(code).toContain('REPLACE_WITH_BDR_NAME_2');
+    expect(code).toContain('NEVER export, commit, or share');
+    const userQuery = template.nodes.find((n) => n.name.includes('Resolve approved BDR users'));
+    expect(userQuery).toBeTruthy();
+    expect(String(userQuery!.parameters.query)).toContain('FROM User WHERE IsActive = true');
+    // The summary fails safely on ambiguous or unknown configured names.
+    const summary = template.nodes.find((n) => n.name.startsWith('DRY RUN: Aggregate summary'));
+    expect(String(summary!.parameters.jsCode)).toContain('expected exactly 1');
+    // The private creator diagnostic is clearly labeled and never feeds the guard.
+    const privateNode = template.nodes.find((n) => n.name.startsWith('PRIVATE (n8n only)'));
+    expect(privateNode).toBeTruthy();
+    expect(privateNode!.name).toContain('DO NOT SHARE');
   });
 
   it('ends in a guard that fails unless the run proves dry_run with zero writes', () => {
