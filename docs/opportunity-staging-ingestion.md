@@ -41,10 +41,17 @@ Candidate (new, unlinked Salesforce Opportunity):
   exclude, attribute, or assign a channel, no channel is ever inferred,
   and no linked Lead is required. Every new review seeds missing_channel;
   channel selection is a human act at approval.
-- Ineligible records (current Service, unknown types, older closed) are
-  still STAGED (snapshot and history mirror source truth safely); they
-  simply create no review. Older closed records outside the cohort year
-  are reserved for a later controlled historical-backfill program.
+- Ineligible NEW records are NOT staged at all: a newly discovered,
+  unlinked current-Service/out_of_scope record, unknown record type, or
+  older closed record outside the cohort enters no snapshot, no event,
+  and no review; it appears only in aggregate sync diagnostics without
+  identifiers. Older closed records are reserved for a later controlled
+  historical-backfill program. Exceptions that DO keep staging: existing
+  active links (even after moving to Service), records with an existing
+  review (protected history is retained while temporarily out of scope,
+  without appearing as an active queue candidate), and retired links
+  (preserved, never reactivated). Historical Service movements of an
+  eligible, reviewed, or linked opportunity remain preserved.
 
 Linked (existing active exact Salesforce-to-Sourced link):
 
@@ -71,6 +78,33 @@ event inserts, informational duplicate no-ops, blocked conflicts,
 review creations coupled with their review_created audit events, pending
 review issue updates coupled with issues_updated audit events, and exactly
 one sync-run diagnostics operation.
+
+The serialization boundary (`serializeApplyPayload`) converts a plan into
+the exact `sf_apply_opportunity_ingestion` parameters: full snapshot
+payloads carrying every approved evidence field (raw values and source
+USER IDS only, never configured employee names; all three Industry
+Vertical candidates as separate raw fields; no canonical choice, no
+Customer Expansion rule), events with their canonical SHA-256 content
+hash, and review items carrying their audit event INSIDE the item so the
+database enforces coupling. Unknown operation kinds fail closed, blocked
+conflicts make the batch non-appliable, and `summarizeDryRunPlan` reports
+counts with zero writes attempted. Fingerprints are SHA-256 over an
+explicitly ordered canonical field list (key order irrelevant; every
+staged field included).
+
+Stale-write protection carries the source SystemModstamp end to end: an
+older timestamp is a stale no-op that can never overwrite, an identical
+timestamp with identical fingerprint no-ops, an identical timestamp with
+DIFFERENT content is a blocked conflict never silently chosen, and a
+missing source timestamp fails validation, at both the planner and the
+database boundary.
+
+Review preservation: reviewer-controlled state (channel_id, lead_id,
+notes, reviewed_by, BDR selection, human review state) is inviolable. A
+populated channel means missing_channel was humanly resolved and
+ingestion never re-adds it; issue updates touch ONLY issue_codes and only
+on the expected pending row; reprocessing can never undo a human
+decision.
 
 Idempotency: the same input against the same existing state plans zero
 duplicate work (hash-equal snapshots no-op, known History Ids no-op,
@@ -105,14 +139,28 @@ identifiers ever enter `sf_opportunity_sync_runs`.
 
 ## 5. Write mechanism and credential boundary
 
-The PENDING migration defines `sf_apply_opportunity_ingestion(...)`: one
-SECURITY DEFINER function, pinned search_path, applying one planned batch
-as ONE transaction with conflict-safe inserts (`ON CONFLICT ... DO
-NOTHING` on the History Id and audit dedupe key) and NO update path for
-either append-only table; the append-only triggers remain intact and fire
-regardless. Execution is revoked from PUBLIC, anon, and authenticated and
-granted only to service_role, the trusted server-side identity from the
-Bite 5B contract. RLS stays enabled on all six tables with no browser
+The PENDING migration adds the review-evidence columns and defines
+`public.sf_apply_opportunity_ingestion(...)`: one SECURITY DEFINER
+function with search_path pinned to pg_catalog and every reference
+schema-qualified, applying one planned batch as ONE transaction. The
+sync-run row is created FIRST (status running) and its id tags every
+inserted history event, so all writes trace to their run; on complete
+success that same row becomes completed with the watermarks, and on any
+failure every batch write rolls back and the same row becomes failed with
+NULL watermarks. Event inserts VERIFY content: an existing History Id
+with identical canonical hash is an idempotent no-op, different content
+FAILS the atomic batch (never silently ignored, never updated); audit
+dedupe-key collisions with different content also fail. Review creates
+that lose a race to an existing compatible pending review skip both the
+insert and the review_created audit event (no false audit); issue updates
+require the expected pending row and fail on zero rows. Failure
+diagnostics are SANITIZED: only the SQLSTATE and an allowlisted category
+(custom SF001-SF007 codes for the function's own assertions) are
+persisted or returned; SQLERRM never is, because engine messages can
+embed source values. The future n8n caller MUST treat ok:false as
+workflow failure. Execution is revoked from PUBLIC, anon, and
+authenticated and granted only to service_role, the trusted server-side
+identity from the Bite 5B contract. RLS stays enabled on all six tables with no browser
 policies; no credential exists in React or this repository, and all n8n
 credential references are placeholders.
 
