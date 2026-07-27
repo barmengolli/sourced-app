@@ -97,6 +97,34 @@ describe('record-type classification', () => {
     expect(summary.review.countsByIssue.unknown_record_type).toBe(1);
   });
 
+  it('Service is out of scope: excluded from the funnel, retained in the ledger, never reviewed as unknown', () => {
+    // A current Service opportunity never enters the visible funnel or the
+    // future review queue population.
+    const current = buildDryRunSummary(
+      [opp({ RecordType: { DeveloperName: 'Service', Name: 'Service' } })],
+      [],
+      [],
+      RUN,
+    );
+    expect(current.countsByNormalizedCurrentStage.out_of_scope).toBe(1);
+    expect(current.countsByNormalizedCurrentStage.unknown).toBe(0);
+    expect(current.review.countsByIssue.unknown_record_type).toBeUndefined();
+    // Historical Service movements stay in the append-only ledger without
+    // unknown-record-type review noise.
+    const record = opp({ Id: 'SYNTH-OPP-A' });
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'High Potential Prospect', NewValue: 'Service', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const historical = buildDryRunSummary([record], rows, [], RUN);
+    expect(historical.history.recordTypeValues.unmappedNonblankLabel).toBe(0);
+    expect(historical.review.countsByIssue.unknown_record_type).toBeUndefined();
+    expect(historical.countsByNormalizedCurrentStage.out_of_scope).toBe(1);
+    const result = adaptOpportunityHistory(rows.map(mapHistoryRecord), DRY_RUN_STAGE_CONFIG);
+    expect(result.ledger).toHaveLength(2);
+    expect(result.ledger[1].toState).toBe('out_of_scope');
+  });
+
   it('historical label aliases in history rows classify identically', () => {
     const record = opp({ Id: 'SYNTH-OPP-A', RecordType: { DeveloperName: 'Licensing', Name: 'Pursuit' } });
     const rows = [
@@ -770,6 +798,13 @@ describe('n8n workflow template safety (static)', () => {
     const privateNode = template.nodes.find((n) => n.name.startsWith('PRIVATE (n8n only)'));
     expect(privateNode).toBeTruthy();
     expect(privateNode!.name).toContain('DO NOT SHARE');
+  });
+
+  it('the mirror maps Service out of scope for history and current classification', () => {
+    const aggregate = template.nodes.find((n) => n.name.startsWith('DRY RUN: Aggregate summary'))!;
+    const js = String(aggregate.parameters.jsCode);
+    expect(js).toContain("Service: 'out_of_scope'");
+    expect(js).toContain("RT_MAP[dn] === 'out_of_scope' ? 'out_of_scope' : 'unknown'");
   });
 
   it('every node the Aggregate references is an executed ancestor (serial graph)', () => {

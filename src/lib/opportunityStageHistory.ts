@@ -132,6 +132,11 @@ export const DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP: Record<string, OpportunityReco
   Licensing: 'pursuit',
   'Sales Qualified Opportunity': 'pursuit',
   Nurture: 'out_of_scope',
+  // Business-confirmed (2026-07-27): Service engagements are not funnel
+  // deals. Historical Service movements stay in the append-only ledger; a
+  // current Service opportunity is excluded from the visible funnel and
+  // from the future review queue.
+  Service: 'out_of_scope',
 };
 
 // ---------------------------------------------------------------------------
