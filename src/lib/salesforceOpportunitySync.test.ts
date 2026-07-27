@@ -64,7 +64,7 @@ describe('record-type classification', () => {
   it('maps each included DeveloperName to its funnel stage as a baseline', () => {
     for (const [dev, stage] of Object.entries(INCLUDED_DEVELOPER_NAMES)) {
       const record = opp({ RecordType: { DeveloperName: dev, Name: dev } });
-      const summary = buildDryRunSummary([record], [], RUN);
+      const summary = buildDryRunSummary([record], [], [], RUN);
       expect(summary.countsByNormalizedCurrentStage[stage]).toBe(1);
     }
   });
@@ -72,6 +72,7 @@ describe('record-type classification', () => {
   it('an excluded record type never lands in a visible stage', () => {
     const summary = buildDryRunSummary(
       [opp({ RecordType: { DeveloperName: 'Nurture', Name: 'Nurture' } })],
+      [],
       [],
       RUN,
     );
@@ -83,10 +84,10 @@ describe('record-type classification', () => {
     const summary = buildDryRunSummary(
       [opp({ RecordType: { DeveloperName: 'Synthetic_Future_Type', Name: 'Future' } })],
       [],
+      [],
       RUN,
     );
     expect(summary.countsByNormalizedCurrentStage.unknown).toBe(1);
-    expect(summary.history.unknownRecordTypeValues).toBeGreaterThan(0);
     expect(summary.review.countsByIssue.unknown_record_type).toBe(1);
   });
 
@@ -96,7 +97,7 @@ describe('record-type classification', () => {
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'Sales Accepted Opportunity', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Sales Accepted Opportunity', NewValue: 'Sales Qualified Opportunity', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
     ];
-    const summary = buildDryRunSummary([record], rows, RUN);
+    const summary = buildDryRunSummary([record], rows, [], RUN);
     expect(summary.movement.forwardMoves).toBe(1);
     expect(summary.countsByNormalizedCurrentStage.pursuit).toBe(1);
   });
@@ -118,7 +119,7 @@ describe('initial-sync scope counts', () => {
     expect(scope.closedNow).toBe(1);
     expect(scope.createdInYear).toBe(1);
     expect(scope.modifiedInYear).toBe(2);
-    expect(scope.closedInYear).toBe(1);
+    expect(scope.closedWithCloseDateInYear).toBe(1);
     expect(scope.olderOpen).toBe(1);
   });
 
@@ -149,7 +150,7 @@ describe('history mapping and movement', () => {
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'High Potential Prospect', NewValue: 'Pursuit', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Pursuit', NewValue: 'Opportunity', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
     ];
-    const summary = buildDryRunSummary([record], rows, RUN);
+    const summary = buildDryRunSummary([record], rows, [], RUN);
     expect(summary.movement.forwardMoves).toBe(1);
     expect(summary.movement.forwardSkips).toBe(1);
     expect(summary.movement.backwardMoves).toBe(1);
@@ -162,18 +163,18 @@ describe('history mapping and movement', () => {
       hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '7) Proposal', NewValue: '100) Closed-Won', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
       hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '100) Closed-Won', NewValue: '4) Discovery', CreatedDate: '2026-04-01T09:00:00.000+0000' }),
     ];
-    const summary = buildDryRunSummary([record], rows, RUN);
+    const summary = buildDryRunSummary([record], rows, [], RUN);
     expect(summary.history.stageRows).toBe(2);
     expect(summary.countsByNormalizedCurrentStage.hpp).toBe(1);
-    expect(summary.history.unknownStageValues).toBe(0);
+    expect(summary.history.stageValues.unknownNonblank).toBe(0);
   });
 
   it('exact duplicates are informational; conflicting duplicate IDs are counted', () => {
     const base = hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect' });
-    const exact = buildDryRunSummary([record], [base, { ...base }], RUN);
+    const exact = buildDryRunSummary([record], [base, { ...base }], [], RUN);
     expect(exact.history.exactDuplicates).toBe(1);
     expect(exact.history.conflictingDuplicateHistoryIds).toBe(0);
-    const conflict = buildDryRunSummary([record], [base, { ...base, NewValue: 'Pursuit' }], RUN);
+    const conflict = buildDryRunSummary([record], [base, { ...base, NewValue: 'Pursuit' }], [], RUN);
     expect(conflict.history.conflictingDuplicateHistoryIds).toBe(1);
     expect(conflict.review.countsByIssue.conflicting_history_id).toBe(1);
   });
@@ -183,8 +184,8 @@ describe('history mapping and movement', () => {
       hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '3) Qualification', NewValue: '99) Synthetic Mystery', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
       hist({ OpportunityId: 'SYNTH-OPP-A', CreatedDate: '2026-02-30T09:00:00.000+0000' }),
     ];
-    const summary = buildDryRunSummary([record], rows, RUN);
-    expect(summary.history.unknownStageValues).toBe(1);
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.stageValues.unknownNonblank).toBe(1);
     expect(summary.history.invalidTimestamps).toBe(1);
   });
 
@@ -194,9 +195,138 @@ describe('history mapping and movement', () => {
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'High Potential Prospect', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
       hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Opportunity', NewValue: 'Pursuit', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
     ];
-    const summary = buildDryRunSummary([record], rows, RUN);
-    expect(summary.movement.sameTimestampAmbiguities).toBe(1);
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.movement.sameTimestamp.materiallyAmbiguous).toBe(1);
     expect(summary.review.countsByIssue.ambiguous_same_timestamp).toBe(1);
+  });
+});
+
+describe('runtime RecordType resolution (hardening)', () => {
+  // Fake Salesforce-SHAPED RecordType ids (15 and 18 characters), never real.
+  const RT_HPP_15 = '012AAAA0000SYN1';
+  const RT_OPP_18 = '012AAAA0000SYN2XYZ';
+  const refs = [
+    { Id: RT_HPP_15, Name: 'High Potential Prospect', DeveloperName: 'High_Potential_Prospect', SobjectType: 'Opportunity' },
+    { Id: RT_OPP_18, Name: 'Opportunity', DeveloperName: 'Leads', SobjectType: 'Opportunity' },
+  ];
+  const record = opp({ Id: 'SYNTH-OPP-A' });
+
+  it('resolves RecordTypeId history values through the runtime map', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: RT_HPP_15, CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: RT_HPP_15, NewValue: RT_OPP_18, CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    expect(summary.movement.forwardMoves).toBe(1);
+    expect(summary.countsByNormalizedCurrentStage.opp).toBe(1);
+    expect(summary.history.recordTypeValues.resolvedViaIdMap).toBe(3);
+    expect(summary.history.recordTypeValues.blankBaseline).toBe(1);
+    expect(summary.history.recordTypeValues.affectedRows).toBe(0);
+    expect(summary.review.countsByIssue.unknown_record_type).toBeUndefined();
+  });
+
+  it('indexes the 15-character prefix of an 18-character id', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: RT_OPP_18.slice(0, 15), CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    expect(summary.history.recordTypeValues.resolvedViaIdMap).toBe(1);
+    expect(summary.countsByNormalizedCurrentStage.opp).toBe(1);
+  });
+
+  it('an unresolved Salesforce-ID-shaped value stays unknown and requires review', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: '012AAAA0000SYN9', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, refs, RUN);
+    expect(summary.history.recordTypeValues.unresolvedIdShaped).toBe(1);
+    expect(summary.history.recordTypeValues.affectedRows).toBe(1);
+    expect(summary.review.countsByIssue.unknown_record_type).toBe(1);
+    expect(summary.countsByNormalizedCurrentStage.unknown).toBe(1);
+  });
+
+  it('never exposes RecordType ids in the aggregate summary', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: RT_HPP_15, NewValue: RT_OPP_18, CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: '012AAAA0000SYN9', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
+    ];
+    const serialized = JSON.stringify(buildDryRunSummary([record], rows, refs, RUN));
+    for (const id of [RT_HPP_15, RT_OPP_18, '012AAAA0000SYN9']) {
+      expect(serialized).not.toContain(id);
+    }
+  });
+
+  it('a blank baseline OldValue is not an unknown value in either unit', () => {
+    const rows = [hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect' })];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.recordTypeValues.blankBaseline).toBe(1);
+    expect(summary.history.recordTypeValues.unmappedNonblankLabel).toBe(0);
+    expect(summary.history.recordTypeValues.unresolvedIdShaped).toBe(0);
+    expect(summary.history.recordTypeValues.affectedRows).toBe(0);
+  });
+
+  it('reports occurrences and affected rows as separate units', () => {
+    const rows = [
+      // One row, BOTH sides unmapped labels: two occurrences, one row.
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'Synthetic Legacy A', NewValue: 'Synthetic Legacy B', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.recordTypeValues.unmappedNonblankLabel).toBe(2);
+    expect(summary.history.recordTypeValues.affectedRows).toBe(1);
+  });
+});
+
+describe('stage label diagnostics (hardening)', () => {
+  const record = opp({ Id: 'SYNTH-OPP-A' });
+
+  it('collects distinct unknown nonblank labels with occurrences and where seen', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: 'Synthetic Legacy Stage', NewValue: '4) Discovery', CreatedDate: '2026-02-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '4) Discovery', NewValue: 'Synthetic Legacy Stage', CreatedDate: '2026-03-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: null, NewValue: '1) Suspect', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.stageValues.blankBaseline).toBe(1);
+    expect(summary.history.stageValues.unknownNonblank).toBe(2);
+    expect(summary.history.stageValues.affectedRows).toBe(2);
+    expect(summary.history.stageValues.unknownLabels).toEqual([
+      { label: 'Synthetic Legacy Stage', occurrences: 2, seenAs: 'both' },
+    ]);
+  });
+
+  it('a blank Stage OldValue is a baseline, not an unknown', () => {
+    const rows = [hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: null, NewValue: '1) Suspect' })];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.history.stageValues.blankBaseline).toBe(1);
+    expect(summary.history.stageValues.unknownNonblank).toBe(0);
+    expect(summary.history.stageValues.unknownLabels).toEqual([]);
+  });
+});
+
+describe('same-timestamp classification (hardening)', () => {
+  const record = opp({ Id: 'SYNTH-OPP-A' });
+
+  it('a chained same-timestamp pair is a candidate but provable, not materially ambiguous', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: 'High Potential Prospect', NewValue: 'Opportunity', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.movement.sameTimestamp.candidateGroups).toBe(1);
+    expect(summary.movement.sameTimestamp.materiallyAmbiguous).toBe(0);
+    expect(summary.movement.sameTimestamp.uniquelyProvableOrOrderIndependent).toBe(1);
+    expect(summary.review.countsByIssue.ambiguous_same_timestamp).toBeUndefined();
+  });
+
+  it('cross-ledger co-timing is harmless and not a candidate', () => {
+    const rows = [
+      hist({ OpportunityId: 'SYNTH-OPP-A', OldValue: null, NewValue: 'High Potential Prospect', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+      hist({ OpportunityId: 'SYNTH-OPP-A', Field: 'StageName', OldValue: '1) Suspect', NewValue: '3) Qualification', CreatedDate: '2026-01-01T09:00:00.000+0000' }),
+    ];
+    const summary = buildDryRunSummary([record], rows, [], RUN);
+    expect(summary.movement.sameTimestamp.candidateGroups).toBe(0);
+    expect(summary.movement.sameTimestamp.harmlessCrossLedgerGroups).toBe(1);
+    expect(summary.movement.sameTimestamp.materiallyAmbiguous).toBe(0);
   });
 });
 
@@ -226,7 +356,7 @@ describe('sanitized dry-run output', () => {
   ];
 
   it('emits aggregates only, with dry_run true and zero writes attempted', () => {
-    const summary = buildDryRunSummary(records, rows, RUN);
+    const summary = buildDryRunSummary(records, rows, [], RUN);
     expect(summary.dry_run).toBe(true);
     expect(summary.writes_attempted).toBe(0);
     expect(summary.executedAt).toBe(RUN.executedAt);
@@ -237,7 +367,7 @@ describe('sanitized dry-run output', () => {
   });
 
   it('no raw IDs, names, accounts, or owners appear anywhere in the summary', () => {
-    const serialized = JSON.stringify(buildDryRunSummary(records, rows, RUN));
+    const serialized = JSON.stringify(buildDryRunSummary(records, rows, [], RUN));
     for (const marker of ['SYNTH-OPP', 'SYNTH-HIST', 'SYNTH-ACC', 'SYNTH-USER', 'Synthetic Deal Name', 'Synthetic Account Co', 'Synthetic Owner']) {
       expect(serialized).not.toContain(marker);
     }
