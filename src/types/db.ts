@@ -302,3 +302,28 @@ export interface CampaignCost {
   created_at: string;
   updated_at: string;
 }
+
+// One campaign membership touch per row (Bite 4C,
+// docs/lead-multi-attribution-program.md): the STORAGE shape of the Bite 4A
+// `LeadCampaignTouch` calculation type in src/lib/campaignAttribution.ts
+// (row = what the database holds; the 4A type = calculation input; the pure
+// mapper touchRowToLeadCampaignTouch converts row -> calculation type).
+// campaign_member_id is the preferred idempotency key (UNIQUE where
+// non-null); Id-less rows fall back to the (lead_id, campaign_id,
+// touch_date) natural key per dedupeTouches. 'backfill' rows are the seeded
+// primary source mirrored from leads.source_channel_id and carry no
+// campaign identity. Nothing reads this table until Bite 4D/4E.
+export interface LeadCampaignTouchRow {
+  id: string;
+  lead_id: string;
+  campaign_member_id: string | null;  // SFDC CampaignMember Id
+  campaign_id: string | null;         // SFDC Campaign Id (sub-campaign level)
+  channel_id: string | null;
+  touch_date: string | null;          // ISO date (YYYY-MM-DD)
+  parent_campaign: string | null;
+  sub_campaign: string | null;
+  observed_at: string;
+  source: 'import' | 'n8n_sync' | 'backfill' | 'manual';
+  raw: Record<string, unknown>;
+  created_at: string;
+}
