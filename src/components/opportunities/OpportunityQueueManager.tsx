@@ -1,0 +1,539 @@
+// OpportunityQueueManager: Bite 5C2B1 review-queue UI foundation.
+//
+// This component consumes the OpportunityQueueRepository interface ONLY. It
+// never imports the Supabase client and has no production route: the six
+// sf_opportunity_* tables have RLS with zero browser policies, so live
+// wiring requires the future authenticated review API. Until that exists,
+// the component runs against the synthetic in-memory adapter in tests.
+//
+// Marketing must manually approve an opportunity before it enters Sourced
+// reporting: approval always requires an explicit channel selection, lead
+// association is optional, and evidence fields (BDR, creator, Primary
+// Campaign Source, Customer Expansion) inform but never decide.
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  BLOCKING_ISSUE_CODES,
+  filterQueueItems,
+  isApprovable,
+} from '../../lib/opportunityQueue';
+import type { OpportunityQueueItem, QueueFilters } from '../../lib/opportunityQueue';
+import type {
+  OpportunityQueueRepository,
+  QueueActionResult,
+} from '../../lib/opportunityQueueRepository';
+import type { ReviewState } from '../../lib/opportunityImportStorage';
+
+export interface QueueChannelOption {
+  id: string;
+  name: string;
+}
+
+export interface OpportunityQueueManagerProps {
+  repository: OpportunityQueueRepository;
+  // Sourced channels for the mandatory approval selection.
+  channels: QueueChannelOption[];
+  actorId?: string | null;
+  // Injected clock so tests stay deterministic.
+  getNow?: () => string;
+}
+
+type LoadStatus = 'loading' | 'error' | 'ready';
+
+const REVIEW_STATUS_OPTIONS: Array<{ value: ReviewState | 'all'; label: string }> = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'blocked', label: 'Blocked' },
+];
+
+const RECORD_TYPE_OPTIONS = [
+  { value: 'all', label: 'All types' },
+  { value: 'hpp', label: 'HPP' },
+  { value: 'opp', label: 'Opportunity' },
+  { value: 'pursuit', label: 'Pursuit' },
+  { value: 'unknown', label: 'Unknown' },
+] as const;
+
+const TRISTATE = [
+  { value: 'all', label: 'All' },
+  { value: 'present', label: 'Present' },
+  { value: 'missing', label: 'Missing' },
+] as const;
+
+const selectClass = 'text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal';
+const chipBase = 'text-xs px-2 py-1 rounded border transition-colors ';
+const chipOn = 'bg-indigo text-white border-indigo';
+const chipOff = 'bg-bg text-charcoal border-border hover:border-charcoal/30';
+
+function formatAmount(amount: number | null, currency: string | null): string {
+  if (amount === null) return 'n/a';
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: currency ? 'currency' : 'decimal',
+      currency: currency ?? undefined,
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `${amount} ${currency ?? ''}`.trim();
+  }
+}
+
+function formatDate(iso: string | null): string {
+  return iso ? iso.slice(0, 10) : 'n/a';
+}
+
+const ISSUE_LABELS: Record<string, string> = {
+  missing_channel: 'Missing channel',
+  missing_region: 'Missing region',
+  missing_required_field: 'Missing required field',
+  unknown_record_type: 'Unknown record type',
+  unknown_stage_value: 'Unknown stage value',
+  conflicting_history_id: 'Conflicting history',
+  ambiguous_same_timestamp: 'Ambiguous timestamps',
+  incomplete_history: 'Incomplete history',
+  possible_existing_deal: 'Possible existing deal',
+  invalid_source_row: 'Invalid source row',
+};
+
+export default function OpportunityQueueManager({
+  repository,
+  channels,
+  actorId = null,
+  getNow = () => new Date().toISOString(),
+}: OpportunityQueueManagerProps) {
+  const [status, setStatus] = useState<LoadStatus>('loading');
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [items, setItems] = useState<OpportunityQueueItem[]>([]);
+  const [filters, setFilters] = useState<QueueFilters>({});
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [channelId, setChannelId] = useState('');
+  const [leadId, setLeadId] = useState('');
+  const [note, setNote] = useState('');
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionErrors, setActionErrors] = useState<string[]>([]);
+
+  const [generation, setGeneration] = useState(0);
+
+  // All load state changes happen asynchronously when the repository call
+  // settles; a stale response from an unmounted or superseded effect run is
+  // discarded. Reload (retry, post-action refresh) bumps the generation.
+  useEffect(() => {
+    let cancelled = false;
+    repository.listQueue().then(
+      (queue) => {
+        if (cancelled) return;
+        setItems(queue);
+        setStatus('ready');
+        setLoadError(null);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        setLoadError(error instanceof Error ? error.message : 'queue load failed');
+        setStatus('error');
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [repository, generation]);
+
+  const reload = useCallback(() => {
+    setStatus('loading');
+    setLoadError(null);
+    setGeneration((g) => g + 1);
+  }, []);
+
+  const visible = useMemo(() => filterQueueItems(items, filters), [items, filters]);
+  const selected = visible.find((i) => i.diagnostics.sfOpportunityId === selectedId) ?? null;
+
+  const ctx = useCallback(
+    (actionNote?: string) => ({
+      actorId,
+      occurredAt: getNow(),
+      note: actionNote?.trim() ? actionNote.trim() : null,
+    }),
+    [actorId, getNow],
+  );
+
+  const runAction = useCallback(
+    async (label: string, action: () => Promise<QueueActionResult>) => {
+      setActionMessage(null);
+      setActionErrors([]);
+      const result = await action();
+      if (result.ok) {
+        setActionMessage(`${label} recorded locally with its audit event (in-memory preview; no production write).`);
+        setSelectedId(null);
+        setChannelId('');
+        setLeadId('');
+        setNote('');
+        setGeneration((g) => g + 1);
+      } else {
+        setActionErrors(result.reasons);
+      }
+    },
+    [],
+  );
+
+  const set = (patch: Partial<QueueFilters>) => setFilters((f) => ({ ...f, ...patch }));
+
+  return (
+    <div className="p-8 space-y-4">
+      <header>
+        <h1 className="text-2xl font-semibold text-charcoal">Opportunity queue</h1>
+        <p className="mt-1 text-sm text-slate-muted">
+          Staged Salesforce opportunities awaiting a manual marketing decision. Approval always
+          requires a channel selection; evidence never decides.
+        </p>
+        <p className="mt-1 text-xs text-warning">
+          Preview foundation: this queue is not connected to production data. Live wiring requires
+          the authenticated review API.
+        </p>
+      </header>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="search"
+          aria-label="Search opportunity or account"
+          placeholder="Search opportunity or account"
+          value={filters.search ?? ''}
+          onChange={(e) => set({ search: e.target.value })}
+          className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal w-56"
+        />
+        <label className="flex items-center gap-1 text-xs text-slate-muted">
+          Status
+          <select
+            value={filters.reviewStatus ?? 'all'}
+            onChange={(e) => set({ reviewStatus: e.target.value as QueueFilters['reviewStatus'] })}
+            className={selectClass}
+          >
+            {REVIEW_STATUS_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-xs text-slate-muted">
+          Type
+          <select
+            value={filters.recordType ?? 'all'}
+            onChange={(e) => set({ recordType: e.target.value as QueueFilters['recordType'] })}
+            className={selectClass}
+          >
+            {RECORD_TYPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-xs text-slate-muted">
+          Open or closed
+          <select
+            value={filters.openClosed ?? 'all'}
+            onChange={(e) => set({ openClosed: e.target.value as QueueFilters['openClosed'] })}
+            className={selectClass}
+          >
+            <option value="all">All</option>
+            <option value="open">Open</option>
+            <option value="closed">Closed</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-xs text-slate-muted">
+          Campaign evidence
+          <select
+            value={filters.campaignEvidence ?? 'all'}
+            onChange={(e) =>
+              set({ campaignEvidence: e.target.value as QueueFilters['campaignEvidence'] })
+            }
+            className={selectClass}
+          >
+            {TRISTATE.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-xs text-slate-muted">
+          BDR evidence
+          <select
+            value={filters.bdrEvidence ?? 'all'}
+            onChange={(e) => set({ bdrEvidence: e.target.value as QueueFilters['bdrEvidence'] })}
+            className={selectClass}
+          >
+            {TRISTATE.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          aria-pressed={!!filters.missingChannelOnly}
+          onClick={() => set({ missingChannelOnly: !filters.missingChannelOnly })}
+          className={chipBase + (filters.missingChannelOnly ? chipOn : chipOff)}
+        >
+          Missing channel
+        </button>
+        <button
+          type="button"
+          aria-pressed={!!filters.blockingIssueOnly}
+          onClick={() => set({ blockingIssueOnly: !filters.blockingIssueOnly })}
+          className={chipBase + (filters.blockingIssueOnly ? chipOn : chipOff)}
+        >
+          Blocking issue
+        </button>
+        <button type="button" onClick={() => setFilters({})} className={chipBase + chipOff}>
+          Clear filters
+        </button>
+      </div>
+
+      {actionMessage && (
+        <p role="status" className="text-xs text-success border border-border rounded px-3 py-2 bg-muted/40">
+          {actionMessage}
+        </p>
+      )}
+
+      {status === 'loading' && <p className="text-sm text-slate-muted">Loading queue…</p>}
+
+      {status === 'error' && (
+        <div className="text-sm text-danger border border-border rounded px-4 py-3 bg-muted/40">
+          <p>Queue could not be loaded: {loadError}</p>
+          <button
+            type="button"
+            onClick={reload}
+            className={chipBase + chipOff + ' mt-2'}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {status === 'ready' && visible.length === 0 && (
+        <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
+          No opportunities currently require review.
+        </p>
+      )}
+
+      {status === 'ready' && visible.length > 0 && (
+        <div className="border border-border rounded overflow-x-auto bg-bg">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-slate-muted border-b border-border">
+                <th className="px-3 py-2 font-medium">Opportunity</th>
+                <th className="px-3 py-2 font-medium">Account</th>
+                <th className="px-3 py-2 font-medium">Type</th>
+                <th className="px-3 py-2 font-medium">Stage</th>
+                <th className="px-3 py-2 font-medium">Amount</th>
+                <th className="px-3 py-2 font-medium">Created</th>
+                <th className="px-3 py-2 font-medium">Modified</th>
+                <th className="px-3 py-2 font-medium">Owner</th>
+                <th className="px-3 py-2 font-medium">Issues</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((item) => (
+                <tr
+                  key={item.diagnostics.sfOpportunityId}
+                  onClick={() => {
+                    setSelectedId(item.diagnostics.sfOpportunityId);
+                    setActionErrors([]);
+                    setActionMessage(null);
+                  }}
+                  className="border-b border-border last:border-b-0 cursor-pointer hover:bg-muted/40"
+                >
+                  <td className="px-3 py-2 text-charcoal font-medium">{item.opportunityName}</td>
+                  <td className="px-3 py-2">{item.accountName ?? 'n/a'}</td>
+                  <td className="px-3 py-2 uppercase">{item.recordTypeState}</td>
+                  <td className="px-3 py-2">
+                    {item.stageName ?? 'n/a'}
+                    <span className="text-slate-muted"> · {item.isClosed ? 'closed' : 'open'}</span>
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">
+                    {formatAmount(item.amount, item.amountCurrency)}
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">{formatDate(item.createdAt)}</td>
+                  <td className="px-3 py-2 tabular-nums">{formatDate(item.lastModifiedAt)}</td>
+                  <td className="px-3 py-2">{item.owner ?? 'n/a'}</td>
+                  <td className="px-3 py-2">
+                    {(item.review?.issueCodes ?? []).map((code) => (
+                      <span
+                        key={code}
+                        className={
+                          'inline-block mr-1 mb-0.5 px-1.5 py-0.5 rounded border text-[11px] ' +
+                          (BLOCKING_ISSUE_CODES.has(code)
+                            ? 'border-danger/40 text-danger'
+                            : 'border-border text-slate-muted')
+                        }
+                      >
+                        {ISSUE_LABELS[code] ?? code}
+                      </span>
+                    ))}
+                  </td>
+                  <td className="px-3 py-2 capitalize">{item.review?.reviewState ?? 'n/a'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {selected && selected.review && (
+        <section className="border border-border rounded bg-bg p-4 space-y-3">
+          <header className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-charcoal">{selected.opportunityName}</h2>
+              <p className="text-xs text-slate-muted">
+                {selected.accountName ?? 'No account'} · {selected.recordTypeState.toUpperCase()} ·{' '}
+                {selected.review.reviewState}
+              </p>
+            </div>
+            <button type="button" onClick={() => setSelectedId(null)} className={chipBase + chipOff}>
+              Close
+            </button>
+          </header>
+
+          <div className="text-xs text-charcoal space-y-1">
+            <h3 className="font-medium">Evidence (informational only, never a decision)</h3>
+            <p>BDR evidence: {selected.evidence.bdrUserId ?? 'none'}</p>
+            <p>Creator evidence: {selected.evidence.creatorUserId ?? 'none'}</p>
+            <p>Primary campaign source: {selected.evidence.primaryCampaignSource ?? 'none'}</p>
+            <p>Customer expansion (raw): {selected.evidence.customerExpansionRaw ?? 'none'}</p>
+          </div>
+
+          {actionErrors.length > 0 && (
+            <ul role="alert" className="text-xs text-danger list-disc pl-4">
+              {actionErrors.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          )}
+
+          {selected.review.reviewState === 'blocked' && (
+            <div className="text-xs text-charcoal space-y-2">
+              <p className="text-danger">
+                This review is blocked. Resolve the blocker, then reopen it to pending.
+              </p>
+              <button
+                type="button"
+                onClick={() =>
+                  void runAction('Reopen', () =>
+                    repository.reopenReview(selected.diagnostics.sfOpportunityId, ctx()),
+                  )
+                }
+                className={chipBase + chipOff}
+              >
+                Reopen review
+              </button>
+            </div>
+          )}
+
+          {selected.review.reviewState === 'pending' && !isApprovable(selected) && (
+            <p className="text-xs text-danger">
+              This record cannot be approved until its blocking issues are resolved:{' '}
+              {selected.review.issueCodes
+                .filter((c) => BLOCKING_ISSUE_CODES.has(c))
+                .map((c) => ISSUE_LABELS[c] ?? c)
+                .join(', ') || 'unknown record type'}
+              .
+            </p>
+          )}
+
+          {selected.review.reviewState === 'pending' && isApprovable(selected) && (
+            <form
+              className="text-xs space-y-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runAction('Approval', () =>
+                  repository.approveReview(
+                    selected.diagnostics.sfOpportunityId,
+                    { channelId, leadId: leadId.trim() || null },
+                    ctx(),
+                  ),
+                );
+              }}
+            >
+              <h3 className="font-medium text-charcoal">Approve into Sourced reporting</h3>
+              <label className="flex items-center gap-2 text-slate-muted">
+                Channel (required)
+                <select
+                  value={channelId}
+                  onChange={(e) => setChannelId(e.target.value)}
+                  className={selectClass}
+                >
+                  <option value="">Select a channel…</option>
+                  {channels.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-slate-muted">
+                Lead (optional)
+                <input
+                  type="text"
+                  value={leadId}
+                  onChange={(e) => setLeadId(e.target.value)}
+                  placeholder="Sourced lead id"
+                  className={selectClass}
+                />
+              </label>
+              <button type="submit" className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90">
+                Approve
+              </button>
+            </form>
+          )}
+
+          {selected.review.reviewState === 'pending' && (
+            <div className="text-xs space-y-2 border-t border-border pt-2">
+              <label className="flex items-center gap-2 text-slate-muted">
+                Note
+                <input
+                  type="text"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Optional for ignore; required reason for block"
+                  className={selectClass + ' w-72'}
+                />
+              </label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    void runAction('Ignore', () =>
+                      repository.ignoreReview(selected.diagnostics.sfOpportunityId, ctx(note)),
+                    )
+                  }
+                  className={chipBase + chipOff}
+                >
+                  Ignore
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void runAction('Block', () =>
+                      repository.blockReview(selected.diagnostics.sfOpportunityId, ctx(note)),
+                    )
+                  }
+                  className={chipBase + chipOff}
+                >
+                  Block
+                </button>
+              </div>
+            </div>
+          )}
+
+          <details className="text-xs text-slate-muted">
+            <summary className="cursor-pointer">Diagnostics</summary>
+            <p className="mt-1">Salesforce opportunity id: {selected.diagnostics.sfOpportunityId}</p>
+            <p>Link status: {selected.linkStatus}</p>
+          </details>
+        </section>
+      )}
+    </div>
+  );
+}
