@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BLOCKING_ISSUE_CODES,
+  REVIEW_STATE_LABELS,
   filterQueueItems,
   isApprovable,
 } from '../../lib/opportunityQueue';
@@ -101,6 +102,7 @@ export default function OpportunityQueueManager({
   actorId = null,
   getNow = () => new Date().toISOString(),
 }: OpportunityQueueManagerProps) {
+  const [view, setView] = useState<'active' | 'notSelected'>('active');
   const [status, setStatus] = useState<LoadStatus>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [items, setItems] = useState<OpportunityQueueItem[]>([]);
@@ -119,7 +121,8 @@ export default function OpportunityQueueManager({
   // discarded. Reload (retry, post-action refresh) bumps the generation.
   useEffect(() => {
     let cancelled = false;
-    repository.listQueue().then(
+    const list = view === 'active' ? repository.listQueue() : repository.listNotSelected();
+    list.then(
       (queue) => {
         if (cancelled) return;
         setItems(queue);
@@ -135,7 +138,17 @@ export default function OpportunityQueueManager({
     return () => {
       cancelled = true;
     };
-  }, [repository, generation]);
+  }, [repository, generation, view]);
+
+  const switchView = useCallback((next: 'active' | 'notSelected') => {
+    setView(next);
+    setFilters({});
+    setSelectedId(null);
+    setActionMessage(null);
+    setActionErrors([]);
+    setStatus('loading');
+    setGeneration((g) => g + 1);
+  }, []);
 
   const reload = useCallback(() => {
     setStatus('loading');
@@ -190,6 +203,33 @@ export default function OpportunityQueueManager({
         </p>
       </header>
 
+      <div className="flex items-center gap-2" role="group" aria-label="Queue view">
+        <button
+          type="button"
+          aria-pressed={view === 'active'}
+          onClick={() => switchView('active')}
+          className={chipBase + (view === 'active' ? chipOn : chipOff)}
+        >
+          Active queue
+        </button>
+        <button
+          type="button"
+          aria-pressed={view === 'notSelected'}
+          onClick={() => switchView('notSelected')}
+          className={chipBase + (view === 'notSelected' ? chipOn : chipOff)}
+        >
+          Not selected
+        </button>
+      </div>
+
+      {view === 'notSelected' && (
+        <p className="text-xs text-slate-muted">
+          Opportunities marketing previously decided not to import. Reconsidering one returns it to
+          the pending queue for a fresh decision; it is never approved, linked, or imported by
+          recovery alone.
+        </p>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="search"
@@ -199,20 +239,22 @@ export default function OpportunityQueueManager({
           onChange={(e) => set({ search: e.target.value })}
           className="text-xs px-2 py-1 border border-border rounded bg-bg text-charcoal w-56"
         />
-        <label className="flex items-center gap-1 text-xs text-slate-muted">
-          Status
-          <select
-            value={filters.reviewStatus ?? 'all'}
-            onChange={(e) => set({ reviewStatus: e.target.value as QueueFilters['reviewStatus'] })}
-            className={selectClass}
-          >
-            {REVIEW_STATUS_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {view === 'active' && (
+          <label className="flex items-center gap-1 text-xs text-slate-muted">
+            Status
+            <select
+              value={filters.reviewStatus ?? 'all'}
+              onChange={(e) => set({ reviewStatus: e.target.value as QueueFilters['reviewStatus'] })}
+              className={selectClass}
+            >
+              {REVIEW_STATUS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="flex items-center gap-1 text-xs text-slate-muted">
           Type
           <select
@@ -240,51 +282,73 @@ export default function OpportunityQueueManager({
           </select>
         </label>
         <label className="flex items-center gap-1 text-xs text-slate-muted">
-          Campaign evidence
-          <select
-            value={filters.campaignEvidence ?? 'all'}
-            onChange={(e) =>
-              set({ campaignEvidence: e.target.value as QueueFilters['campaignEvidence'] })
-            }
+          Created from
+          <input
+            type="date"
+            value={filters.createdFrom ?? ''}
+            onChange={(e) => set({ createdFrom: e.target.value || undefined })}
             className={selectClass}
-          >
-            {TRISTATE.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
+          />
         </label>
         <label className="flex items-center gap-1 text-xs text-slate-muted">
-          BDR evidence
-          <select
-            value={filters.bdrEvidence ?? 'all'}
-            onChange={(e) => set({ bdrEvidence: e.target.value as QueueFilters['bdrEvidence'] })}
+          Created to
+          <input
+            type="date"
+            value={filters.createdTo ?? ''}
+            onChange={(e) => set({ createdTo: e.target.value || undefined })}
             className={selectClass}
-          >
-            {TRISTATE.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
+          />
         </label>
-        <button
-          type="button"
-          aria-pressed={!!filters.missingChannelOnly}
-          onClick={() => set({ missingChannelOnly: !filters.missingChannelOnly })}
-          className={chipBase + (filters.missingChannelOnly ? chipOn : chipOff)}
-        >
-          Missing channel
-        </button>
-        <button
-          type="button"
-          aria-pressed={!!filters.blockingIssueOnly}
-          onClick={() => set({ blockingIssueOnly: !filters.blockingIssueOnly })}
-          className={chipBase + (filters.blockingIssueOnly ? chipOn : chipOff)}
-        >
-          Blocking issue
-        </button>
+        {view === 'active' && (
+          <>
+            <label className="flex items-center gap-1 text-xs text-slate-muted">
+              Campaign evidence
+              <select
+                value={filters.campaignEvidence ?? 'all'}
+                onChange={(e) =>
+                  set({ campaignEvidence: e.target.value as QueueFilters['campaignEvidence'] })
+                }
+                className={selectClass}
+              >
+                {TRISTATE.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-xs text-slate-muted">
+              BDR evidence
+              <select
+                value={filters.bdrEvidence ?? 'all'}
+                onChange={(e) => set({ bdrEvidence: e.target.value as QueueFilters['bdrEvidence'] })}
+                className={selectClass}
+              >
+                {TRISTATE.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              aria-pressed={!!filters.missingChannelOnly}
+              onClick={() => set({ missingChannelOnly: !filters.missingChannelOnly })}
+              className={chipBase + (filters.missingChannelOnly ? chipOn : chipOff)}
+            >
+              Missing channel
+            </button>
+            <button
+              type="button"
+              aria-pressed={!!filters.blockingIssueOnly}
+              onClick={() => set({ blockingIssueOnly: !filters.blockingIssueOnly })}
+              className={chipBase + (filters.blockingIssueOnly ? chipOn : chipOff)}
+            >
+              Blocking issue
+            </button>
+          </>
+        )}
         <button type="button" onClick={() => setFilters({})} className={chipBase + chipOff}>
           Clear filters
         </button>
@@ -313,7 +377,9 @@ export default function OpportunityQueueManager({
 
       {status === 'ready' && visible.length === 0 && (
         <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
-          No opportunities currently require review.
+          {view === 'active'
+            ? 'No opportunities currently require review.'
+            : 'No not-selected opportunities are available to reconsider.'}
         </p>
       )}
 
@@ -373,7 +439,9 @@ export default function OpportunityQueueManager({
                       </span>
                     ))}
                   </td>
-                  <td className="px-3 py-2 capitalize">{item.review?.reviewState ?? 'n/a'}</td>
+                  <td className="px-3 py-2">
+                    {item.review ? REVIEW_STATE_LABELS[item.review.reviewState] : 'n/a'}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -388,7 +456,7 @@ export default function OpportunityQueueManager({
               <h2 className="text-sm font-semibold text-charcoal">{selected.opportunityName}</h2>
               <p className="text-xs text-slate-muted">
                 {selected.accountName ?? 'No account'} · {selected.recordTypeState.toUpperCase()} ·{' '}
-                {selected.review.reviewState}
+                {REVIEW_STATE_LABELS[selected.review.reviewState]}
               </p>
             </div>
             <button type="button" onClick={() => setSelectedId(null)} className={chipBase + chipOff}>
@@ -410,6 +478,38 @@ export default function OpportunityQueueManager({
                 <li key={reason}>{reason}</li>
               ))}
             </ul>
+          )}
+
+          {selected.review.reviewState === 'ignored' && (
+            <form
+              className="text-xs space-y-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runAction('Reconsider', () =>
+                  repository.reconsiderReview(selected.diagnostics.sfOpportunityId, ctx(note)),
+                );
+              }}
+            >
+              <h3 className="font-medium text-charcoal">Reconsider opportunity</h3>
+              <p className="text-slate-muted">
+                Returns this record to the pending queue for a fresh decision. The original
+                not-selected decision stays in the audit history. Reconsidering does not approve,
+                link, or import anything; a channel must still be selected before approval.
+              </p>
+              <label className="flex items-center gap-2 text-slate-muted">
+                Reason (required)
+                <input
+                  type="text"
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Short, non-sensitive reason"
+                  className={selectClass + ' w-72'}
+                />
+              </label>
+              <button type="submit" className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90">
+                Reconsider
+              </button>
+            </form>
           )}
 
           {selected.review.reviewState === 'blocked' && (

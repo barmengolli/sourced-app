@@ -757,7 +757,9 @@ Do not turn a focused task into one of these projects without approval:
 - The Opportunity Queue Manager (Bite 5C2B1, `docs/opportunity-queue.md`)
   exists as domain logic (`src/lib/opportunityQueue.ts`), a typed repository
   boundary (`src/lib/opportunityQueueRepository.ts`), and an unrouted UI
-  (`src/components/opportunities/OpportunityQueueManager.tsx`). It runs only
-  against a synthetic in-memory adapter in tests. Live wiring requires the
-  authenticated server-side review API; the browser must never query the
-  protected `sf_opportunity_*` tables directly.
+  (`src/components/opportunities/OpportunityQueueManager.tsx`), including
+  the "Not selected" recovery view (stored review state `ignored`;
+  reconsider requires a reason and reuses the `reopened` audit event). It
+  runs only against a synthetic in-memory adapter in tests. Live wiring
+  requires the authenticated server-side review API; the browser must never
+  query the protected `sf_opportunity_*` tables directly.

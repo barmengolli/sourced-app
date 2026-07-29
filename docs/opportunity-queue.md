@@ -9,9 +9,14 @@ The Opportunity Queue Manager is the human review surface for staged
 Salesforce opportunities. It lists staged records whose review requires
 attention (review state `pending` or `blocked`), shows the reviewer the
 snapshot fields and raw evidence, and produces the review decisions:
-approve, ignore, block, reopen, and exact-ID link. Marketing must manually
-approve an opportunity here before it can enter Sourced reporting; nothing
-is ever approved, linked, or attributed automatically.
+approve, set aside (Not selected), block, reopen, reconsider, and exact-ID
+link. Marketing must manually approve an opportunity here before it can
+enter Sourced reporting; nothing is ever approved, linked, or attributed
+automatically.
+
+User-facing language: the stored review state `ignored` is always shown as
+"Not selected". The persisted state value remains `ignored` exactly as the
+Bite 5B contract defines it; no new database state or migration exists.
 
 Implementation:
 
@@ -20,12 +25,14 @@ Implementation:
   projection mutation plus append-only audit event from the Bite 5B
   contracts (`src/lib/opportunityImportStorage.ts`).
 - `src/lib/opportunityQueueRepository.ts`: the typed data-access boundary
-  (`OpportunityQueueRepository`): listQueue, getQueueItem, approveReview,
-  ignoreReview, blockReview, reopenReview, linkExactDeal.
+  (`OpportunityQueueRepository`): listQueue, listNotSelected, getQueueItem,
+  approveReview, ignoreReview, blockReview, reopenReview, reconsiderReview,
+  linkExactDeal.
 - `src/components/opportunities/OpportunityQueueManager.tsx`: the UI. It
   consumes the repository interface only and covers loading, empty, error,
   pending, blocked, approval-form, validation, non-approvable, evidence
-  disclosure, and local action-result states.
+  disclosure, the Not selected recovery view with its Reconsider form, and
+  local action-result states.
 - Tests use synthetic fixtures and an in-memory adapter that live under
   `src/test/` and are never imported by application code.
 
@@ -69,6 +76,45 @@ Implementation:
   `reopened` audit event.
 - Every state-changing decision produces its projection mutation and its
   append-only audit event together, or not at all.
+
+## Not selected and the recovery workflow
+
+Marketing may initially decide not to import an opportunity and later
+reconsider it with leadership. Recovery never erases or rewrites the
+original decision.
+
+- A separate "Not selected" view lists ignored reviews only; they are
+  never mixed into the active pending queue. The view keeps search,
+  record-type, open/closed, and created-date filters plus the same
+  evidence and diagnostics disclosures as the active queue.
+- The "Reconsider opportunity" action is allowed only when the review
+  state is `ignored`. It transitions `ignored` to `pending` through the
+  existing review-state contract and emits the existing append-only
+  `reopened` audit event. A short, non-sensitive reason is required.
+- The original not-selected event and its note are preserved untouched;
+  no prior audit event is ever overwritten or deleted. An invalid
+  recovery attempt produces neither a projection mutation nor an audit
+  event.
+- Recovery is NOT approval. The record returns to the pending queue for a
+  fresh inspection; a channel must still be selected before approval,
+  lead association remains optional, and nothing is imported, linked, or
+  attributed merely because it was recovered.
+- Safeguards: records currently in Service (out_of_scope) cannot be
+  reconsidered into the active queue (their history is retained but they
+  are unavailable, even in the Not selected view); unknown record types
+  can be reconsidered but remain blocked and non-approvable; linked and
+  retired-link records cannot be recovered or requeued; resolved reviews
+  are terminal; approved and linked reviews cannot be recovered; and a
+  Salesforce update never automatically reopens a not-selected review,
+  including when the record later returns to an eligible funnel record
+  type: the reviewer's explicit Reconsider action is always required.
+
+Limitation: recovery covers opportunities that were previously staged and
+explicitly set aside (ignored). It does not recover opportunities that
+were never staged, Service opportunities, older opportunities excluded by
+the discovery scope, or records removed before entering the review
+system. Reaching those requires a future authenticated Salesforce
+discovery/search feature, which is separate, unapproved work.
 
 ## Exact-ID-only linking
 

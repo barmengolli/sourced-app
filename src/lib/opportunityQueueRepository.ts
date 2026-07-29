@@ -33,6 +33,9 @@ export interface OpportunityQueueRepository {
   // Queue-eligible items only (classifyQueueMembership), further narrowed by
   // the optional filters.
   listQueue(filters?: QueueFilters): Promise<OpportunityQueueItem[]>;
+  // The separate "Not selected" recovery view: ignored reviews only
+  // (classifyNotSelectedMembership), never mixed into the active queue.
+  listNotSelected(filters?: QueueFilters): Promise<OpportunityQueueItem[]>;
   getQueueItem(sfOpportunityId: string): Promise<OpportunityQueueItem | null>;
   // Approval requires the reviewer's explicit channel; lead is optional.
   approveReview(
@@ -45,6 +48,11 @@ export interface OpportunityQueueRepository {
   // ctx.note is the required blocking reason.
   blockReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
   reopenReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
+  // Recovery for a not-selected (ignored) review: ignored -> pending via the
+  // existing state contract with the 'reopened' audit event. ctx.note is the
+  // required, non-sensitive reconsideration reason. Recovery is not
+  // approval; the record re-enters the pending queue for a fresh decision.
+  reconsiderReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
   // Exact Salesforce Opportunity ID match only; similarity never links.
   linkExactDeal(
     sfOpportunityId: string,

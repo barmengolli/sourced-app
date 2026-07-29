@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import {
   BLOCKING_ISSUE_CODES,
   QUEUE_ATTENTION_STATES,
+  REVIEW_STATE_LABELS,
   assessQueueApproval,
   assessSimilaritySuggestion,
   classifyQueueMembership,
@@ -16,8 +17,10 @@ import {
   isApprovable,
   proposeApproval,
   proposeBlock,
+  classifyNotSelectedMembership,
   proposeExactLink,
   proposeIgnore,
+  proposeReconsider,
   proposeReopen,
 } from './opportunityQueue';
 import * as queueModule from './opportunityQueue';
@@ -294,6 +297,174 @@ describe('linking safeguards', () => {
   });
 });
 
+describe('not-selected recovery (reconsider)', () => {
+  const ignored = (over: Parameters<typeof queueItem>[0] = {}) =>
+    queueItem({
+      review: { reviewState: 'ignored', issueCodes: ['missing_channel'], channelId: null, leadId: null },
+      ...over,
+    });
+
+  it('ignored reviews are labeled "Not selected" without a new stored state', () => {
+    expect(REVIEW_STATE_LABELS.ignored).toBe('Not selected');
+    // The stored state value itself is unchanged 5B vocabulary.
+    expect(ignored().review?.reviewState).toBe('ignored');
+  });
+
+  it('ignored opportunities appear under Not Selected, never in the pending queue', () => {
+    const item = ignored();
+    expect(classifyNotSelectedMembership(item)).toEqual({ inQueue: true });
+    expect(classifyQueueMembership(item).inQueue).toBe(false);
+    // And pending items never leak into the Not Selected view.
+    expect(classifyNotSelectedMembership(queueItem()).inQueue).toBe(false);
+  });
+
+  it('reconsider requires a short reason', () => {
+    const result = proposeReconsider(ignored(), CTX);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasons.join(' ')).toContain('requires a short reason');
+  });
+
+  it('reconsider produces ignored -> pending with exactly the reopened audit event', () => {
+    const result = proposeReconsider(ignored(), { ...CTX, note: 'leadership review on 2026-07-27' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.mutation.projection.reviewState).toBe('pending');
+      expect(result.mutation.auditEvent.event_type).toBe('reopened');
+      expect(result.mutation.auditEvent.previous_state).toBe('ignored');
+      expect(result.mutation.auditEvent.new_state).toBe('pending');
+      expect(result.mutation.auditEvent.note).toBe('leadership review on 2026-07-27');
+    }
+  });
+
+  it('recovery is not approval: the record still needs inspection and a channel', () => {
+    const result = proposeReconsider(ignored(), { ...CTX, note: 'synthetic reason' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const recovered = ignored({ review: result.mutation.projection });
+    // Back in the pending queue, nothing imported, linked, or attributed.
+    expect(classifyQueueMembership(recovered)).toEqual({ inQueue: true });
+    expect(recovered.review?.channelId).toBeNull();
+    expect(recovered.linkStatus).toBe('none');
+    // Approval still demands the explicit channel.
+    expect(proposeApproval(recovered, { channelId: '' }, CTX).ok).toBe(false);
+    expect(proposeApproval(recovered, { channelId: 'SYNTH-CHANNEL-1' }, CTX).ok).toBe(true);
+  });
+
+  it('a not-selected record now in Service cannot be reconsidered and is unavailable', () => {
+    const item = ignored({ recordTypeState: 'out_of_scope' });
+    expect(classifyNotSelectedMembership(item).inQueue).toBe(false);
+    const result = proposeReconsider(item, { ...CTX, note: 'synthetic reason' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasons.join(' ')).toContain('Service');
+    // History retained: nothing here deletes the review or its events.
+    expect(item.review?.reviewState).toBe('ignored');
+  });
+
+  it('an unknown record type can be reconsidered but stays non-approvable', () => {
+    const item = ignored({
+      recordTypeState: 'unknown',
+      review: {
+        reviewState: 'ignored',
+        issueCodes: ['missing_channel', 'unknown_record_type'],
+        channelId: null,
+        leadId: null,
+      },
+    });
+    const result = proposeReconsider(item, { ...CTX, note: 'synthetic reason' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const recovered = ignored({ recordTypeState: 'unknown', review: result.mutation.projection });
+    expect(isApprovable(recovered)).toBe(false);
+    expect(proposeApproval(recovered, { channelId: 'SYNTH-CHANNEL-1' }, CTX).ok).toBe(false);
+  });
+
+  it('resolved, approved, linked, and pending reviews cannot be recovered', () => {
+    for (const state of ['resolved', 'approved', 'linked', 'pending'] as ReviewState[]) {
+      const item = queueItem({
+        review: { reviewState: state, issueCodes: [], channelId: 'SYNTH-CHANNEL-1', leadId: null },
+      });
+      const result = proposeReconsider(item, { ...CTX, note: 'synthetic reason' });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it('linked and retired-link records are excluded from recovery entirely', () => {
+    for (const linkStatus of ['active', 'retired'] as const) {
+      const item = ignored({ linkStatus });
+      expect(classifyNotSelectedMembership(item).inQueue).toBe(false);
+      expect(proposeReconsider(item, { ...CTX, note: 'synthetic reason' }).ok).toBe(false);
+    }
+  });
+
+  it('Salesforce updates never automatically reopen a not-selected review', () => {
+    // The same ignored review with fresh source data (new stage, new
+    // modified date, back in an eligible funnel type) stays out of the
+    // pending queue until the explicit Reconsider action.
+    const updated = ignored({
+      recordTypeState: 'hpp',
+      stageName: '4) Discovery',
+      lastModifiedAt: '2026-07-27T09:00:00.000Z',
+    });
+    expect(classifyQueueMembership(updated).inQueue).toBe(false);
+    expect(classifyNotSelectedMembership(updated)).toEqual({ inQueue: true });
+  });
+
+  it('failed recovery mutates nothing and emits no audit event (adapter)', async () => {
+    const repo = createMemoryQueueRepository([
+      ignored({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS1' } }),
+    ]);
+    const missing = await repo.reconsiderReview('SYNTH-OPP-NS1', {
+      actorId: 'SYNTH-REVIEWER',
+      occurredAt: CTX.occurredAt,
+    });
+    expect(missing.ok).toBe(false);
+    expect(repo.auditLog).toHaveLength(0);
+    expect((await repo.listNotSelected())[0].review?.reviewState).toBe('ignored');
+  });
+
+  it('the full recovery cycle preserves the original not-selected audit event', async () => {
+    const repo = createMemoryQueueRepository([
+      queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS2' } }),
+    ]);
+    const ignoredResult = await repo.ignoreReview('SYNTH-OPP-NS2', {
+      actorId: 'SYNTH-REVIEWER',
+      occurredAt: CTX.occurredAt,
+      note: 'not selected for import this cycle',
+    });
+    expect(ignoredResult.ok).toBe(true);
+    const originalAudit = repo.auditLog[0];
+    expect(await repo.listQueue()).toHaveLength(0);
+    expect(await repo.listNotSelected()).toHaveLength(1);
+
+    const recovered = await repo.reconsiderReview('SYNTH-OPP-NS2', {
+      actorId: 'SYNTH-REVIEWER',
+      occurredAt: '2026-07-28T13:00:00.000Z',
+      note: 'leadership asked to revisit',
+    });
+    expect(recovered.ok).toBe(true);
+    // Append-only: the original ignored event is untouched, one reopened
+    // event was appended, nothing was deleted or rewritten.
+    expect(repo.auditLog).toHaveLength(2);
+    expect(repo.auditLog[0]).toBe(originalAudit);
+    if (recovered.ok) {
+      expect(recovered.audit.event_type).toBe('reopened');
+      expect(recovered.audit.note).toBe('leadership asked to revisit');
+    }
+    // Back in the pending queue only; no approval, link, or attribution.
+    expect(await repo.listNotSelected()).toHaveLength(0);
+    const queue = await repo.listQueue();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].review?.reviewState).toBe('pending');
+    expect(queue[0].review?.channelId).toBeNull();
+    expect(queue[0].linkStatus).toBe('none');
+  });
+
+  it('no bulk recovery path exists', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/lib/opportunityQueue.ts'), 'utf8');
+    expect(source).not.toMatch(/reconsiderAll|items\s*:\s*OpportunityQueueItem\[\]\s*,\s*ctx/);
+  });
+});
+
 describe('queue filters', () => {
   const items = [
     queueItem({ opportunityName: 'Alpha Synthetic', accountName: 'Northwind Synthetic' }),
@@ -323,6 +494,17 @@ describe('queue filters', () => {
     expect(filterQueueItems(items, { recordType: 'pursuit' })).toHaveLength(1);
     expect(filterQueueItems(items, { openClosed: 'closed' })).toHaveLength(1);
     expect(filterQueueItems(items, { openClosed: 'open' })).toHaveLength(1);
+  });
+
+  it('filters by inclusive created-date bounds without timezone conversion', () => {
+    const dated = [
+      queueItem({ createdAt: '2026-01-15T23:30:00.000Z' }),
+      queueItem({ createdAt: '2026-06-30T00:00:00.000Z' }),
+    ];
+    expect(filterQueueItems(dated, { createdFrom: '2026-06-01' })).toHaveLength(1);
+    expect(filterQueueItems(dated, { createdTo: '2026-01-15' })).toHaveLength(1);
+    expect(filterQueueItems(dated, { createdFrom: '2026-01-15', createdTo: '2026-06-30' })).toHaveLength(2);
+    expect(filterQueueItems(dated, { createdFrom: '2026-07-01' })).toHaveLength(0);
   });
 
   it('filters by missing channel, blocking issue, and evidence presence', () => {

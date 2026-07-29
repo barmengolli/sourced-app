@@ -95,6 +95,19 @@ export const BLOCKING_ISSUE_CODES: ReadonlySet<ReviewIssueCode> = new Set([
   'invalid_source_row',
 ]);
 
+// User-facing labels for stored review states. The persisted state remains
+// exactly the 5B contract value; only the display changes. 'ignored' is
+// shown as "Not selected" because the business decision it records is
+// "not selected for import", which leadership may later reconsider.
+export const REVIEW_STATE_LABELS: Record<ReviewState, string> = {
+  pending: 'Pending',
+  approved: 'Approved',
+  linked: 'Linked',
+  ignored: 'Not selected',
+  blocked: 'Blocked',
+  resolved: 'Resolved',
+};
+
 export type QueueMembership = { inQueue: true } | { inQueue: false; reason: string };
 
 export function classifyQueueMembership(item: OpportunityQueueItem): QueueMembership {
@@ -116,6 +129,29 @@ export function classifyQueueMembership(item: OpportunityQueueItem): QueueMember
   }
   if (!QUEUE_ATTENTION_STATES.has(item.review.reviewState)) {
     return { inQueue: false, reason: `a ${item.review.reviewState} review does not silently reopen` };
+  }
+  return { inQueue: true };
+}
+
+// Membership for the separate "Not selected" recovery view: ignored reviews
+// only, never mixed into the active pending queue. An ignored record that
+// later became Service (out_of_scope) retains its history but is
+// unavailable here; linked and retired-link records are never recoverable.
+export function classifyNotSelectedMembership(item: OpportunityQueueItem): QueueMembership {
+  if (!item.review) {
+    return { inQueue: false, reason: 'no review record exists' };
+  }
+  if (item.review.reviewState !== 'ignored') {
+    return { inQueue: false, reason: 'only not-selected (ignored) reviews appear here' };
+  }
+  if (item.recordTypeState === 'out_of_scope') {
+    return {
+      inQueue: false,
+      reason: 'a not-selected record now in Service keeps its history but is unavailable',
+    };
+  }
+  if (item.linkStatus !== 'none') {
+    return { inQueue: false, reason: 'linked and retired-link records are never recoverable' };
   }
   return { inQueue: true };
 }
@@ -142,6 +178,9 @@ export interface QueueFilters {
   blockingIssueOnly?: boolean;
   campaignEvidence?: 'present' | 'missing' | 'all';
   bdrEvidence?: 'present' | 'missing' | 'all';
+  // Inclusive calendar-date bounds (YYYY-MM-DD) on the source created date.
+  createdFrom?: string;
+  createdTo?: string;
 }
 
 const present = (value: string | null): boolean => value !== null && value.trim() !== '';
@@ -180,6 +219,13 @@ export function filterQueueItems(
     }
     if (filters.bdrEvidence && filters.bdrEvidence !== 'all') {
       if (present(item.evidence.bdrUserId) !== (filters.bdrEvidence === 'present')) return false;
+    }
+    if (filters.createdFrom || filters.createdTo) {
+      // String comparison on the ISO date prefix: no timezone conversion.
+      const created = item.createdAt ? item.createdAt.slice(0, 10) : null;
+      if (!created) return false;
+      if (filters.createdFrom && created < filters.createdFrom) return false;
+      if (filters.createdTo && created > filters.createdTo) return false;
     }
     return true;
   });
@@ -257,6 +303,42 @@ export function proposeReopen(
 ): ReviewMutationResult {
   const review = requireReview(item);
   if ('ok' in review) return review;
+  return applyReviewTransition(review, 'pending', ctx);
+}
+
+// Reconsider a previously not-selected (ignored) opportunity. Recovery is
+// NOT approval: the review returns to pending through the existing state
+// contract (emitting the append-only 'reopened' audit event), the reviewer
+// must inspect it again, and a channel must still be selected before any
+// approval. The original ignored event and its note are never touched.
+// Requires a short reconsideration reason on ctx.note. Only an ignored
+// review qualifies: Service/out_of_scope, linked, retired-link, resolved,
+// approved, and pending records all fail without producing a mutation or
+// an audit event.
+export function proposeReconsider(
+  item: OpportunityQueueItem,
+  ctx: ReviewActionContext,
+): ReviewMutationResult {
+  const review = requireReview(item);
+  if ('ok' in review) return review;
+  if (review.reviewState !== 'ignored') {
+    return {
+      ok: false,
+      reasons: [`only a not-selected review can be reconsidered, not ${review.reviewState}`],
+    };
+  }
+  if (item.recordTypeState === 'out_of_scope') {
+    return {
+      ok: false,
+      reasons: ['a record currently in Service cannot be reconsidered into the active queue'],
+    };
+  }
+  if (item.linkStatus !== 'none') {
+    return { ok: false, reasons: ['linked and retired-link records cannot be reconsidered'] };
+  }
+  if (!ctx.note || !ctx.note.trim()) {
+    return { ok: false, reasons: ['reconsidering requires a short reason'] };
+  }
   return applyReviewTransition(review, 'pending', ctx);
 }
 

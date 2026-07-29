@@ -5,12 +5,14 @@
 // authenticated server-side review API (the live implementation) is pending.
 
 import {
+  classifyNotSelectedMembership,
   classifyQueueMembership,
   filterQueueItems,
   proposeApproval,
   proposeBlock,
   proposeExactLink,
   proposeIgnore,
+  proposeReconsider,
   proposeReopen,
 } from '../lib/opportunityQueue';
 import type { OpportunityQueueItem, QueueFilters } from '../lib/opportunityQueue';
@@ -71,6 +73,11 @@ export function createMemoryQueueRepository(
       const eligible = items.filter((item) => classifyQueueMembership(item).inQueue);
       return filters ? filterQueueItems(eligible, filters) : eligible;
     },
+    async listNotSelected(filters?: QueueFilters) {
+      if (options.failListWith) throw new Error(options.failListWith);
+      const eligible = items.filter((item) => classifyNotSelectedMembership(item).inQueue);
+      return filters ? filterQueueItems(eligible, filters) : eligible;
+    },
     async getQueueItem(sfOpportunityId: string) {
       return find(sfOpportunityId) ?? null;
     },
@@ -93,6 +100,11 @@ export function createMemoryQueueRepository(
       const item = find(sfOpportunityId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
       return applyResult(item, proposeReopen(item, toReviewCtx(ctx)));
+    },
+    async reconsiderReview(sfOpportunityId, ctx) {
+      const item = find(sfOpportunityId);
+      if (!item) return { ok: false, reasons: ['unknown opportunity'] };
+      return applyResult(item, proposeReconsider(item, toReviewCtx(ctx)));
     },
     async linkExactDeal(sfOpportunityId, candidateSfOpportunityId, ctx) {
       const item = find(sfOpportunityId);

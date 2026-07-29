@@ -193,3 +193,92 @@ describe('approval form', () => {
     expect(repo.allItems()[0].review?.reviewState).toBe('pending');
   });
 });
+
+describe('not selected recovery view', () => {
+  const ignoredItem = (name: string, sfId: string) =>
+    queueItem({
+      opportunityName: name,
+      review: { reviewState: 'ignored', issueCodes: ['missing_channel'], channelId: null, leadId: null },
+      diagnostics: { sfOpportunityId: sfId },
+    });
+
+  it('shows ignored items under Not selected only, never in the active queue', async () => {
+    const user = userEvent.setup();
+    renderQueue(
+      createMemoryQueueRepository([
+        queueItem({ opportunityName: 'Synthetic Active Deal' }),
+        ignoredItem('Synthetic Set Aside Deal', 'SYNTH-OPP-NS-UI1'),
+      ]),
+    );
+    await waitFor(() => screen.getByText('Synthetic Active Deal'));
+    expect(screen.queryByText('Synthetic Set Aside Deal')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Not selected' }));
+    await waitFor(() => screen.getByText('Synthetic Set Aside Deal'));
+    expect(screen.queryByText('Synthetic Active Deal')).toBeNull();
+    // The user-facing label is "Not selected"; the stored word never renders.
+    expect(screen.getAllByText('Not selected').length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/ignored/i)).toBeNull();
+  });
+
+  it('keeps the evidence and diagnostics disclosures in the recovery view', async () => {
+    const user = userEvent.setup();
+    renderQueue(
+      createMemoryQueueRepository([
+        queueItem({
+          opportunityName: 'Synthetic Ignored Evidence Deal',
+          review: { reviewState: 'ignored', issueCodes: [], channelId: null, leadId: null },
+          evidence: {
+            bdrUserId: 'SYNTH-USER-BDR-NS',
+            creatorUserId: null,
+            primaryCampaignSource: 'SYNTH-CAMPAIGN-NS',
+            customerExpansionRaw: null,
+          },
+          diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS-UI2' },
+        }),
+      ]),
+    );
+    const user2 = user;
+    await user2.click(screen.getByRole('button', { name: 'Not selected' }));
+    await waitFor(() => screen.getByText('Synthetic Ignored Evidence Deal'));
+    await user2.click(screen.getByText('Synthetic Ignored Evidence Deal'));
+    expect(screen.getByText(/informational only, never a decision/i)).toBeTruthy();
+    expect(screen.getByText(/SYNTH-USER-BDR-NS/)).toBeTruthy();
+    expect(screen.getByText('Diagnostics')).toBeTruthy();
+    expect(screen.getByText(/SYNTH-OPP-NS-UI2/)).toBeTruthy();
+  });
+
+  it('reconsider requires a reason and shows the domain error', async () => {
+    const user = userEvent.setup();
+    const repo = createMemoryQueueRepository([ignoredItem('Synthetic Ignored Deal', 'SYNTH-OPP-NS-UI3')]);
+    renderQueue(repo);
+    await user.click(screen.getByRole('button', { name: 'Not selected' }));
+    await waitFor(() => screen.getByText('Synthetic Ignored Deal'));
+    await user.click(screen.getByText('Synthetic Ignored Deal'));
+    await user.click(screen.getByRole('button', { name: 'Reconsider' }));
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('requires a short reason');
+    });
+    expect(repo.auditLog).toHaveLength(0);
+  });
+
+  it('a reasoned reconsider returns the item to the pending queue without approving it', async () => {
+    const user = userEvent.setup();
+    const repo = createMemoryQueueRepository([ignoredItem('Synthetic Ignored Deal', 'SYNTH-OPP-NS-UI4')]);
+    renderQueue(repo);
+    await user.click(screen.getByRole('button', { name: 'Not selected' }));
+    await waitFor(() => screen.getByText('Synthetic Ignored Deal'));
+    await user.click(screen.getByText('Synthetic Ignored Deal'));
+    await user.type(screen.getByLabelText(/reason \(required\)/i), 'leadership revisit');
+    await user.click(screen.getByRole('button', { name: 'Reconsider' }));
+    await waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('no production write');
+    });
+    // Gone from Not selected; present and pending (not approved) in the queue.
+    expect(screen.getByText(/no not-selected opportunities/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Active queue' }));
+    await waitFor(() => screen.getByText('Synthetic Ignored Deal'));
+    expect(repo.allItems()[0].review?.reviewState).toBe('pending');
+    expect(repo.allItems()[0].review?.channelId).toBeNull();
+    expect(repo.auditLog).toHaveLength(1);
+  });
+});
