@@ -17,13 +17,24 @@
 //   GET  /api/health
 //   GET  /api/ready
 //
-// :reviewId is the staged Salesforce Opportunity ID (the stable review
-// identity in the 5B storage contract). There are NO bulk endpoints: every
-// mutation addresses exactly one review.
+// :reviewId is the OPAQUE INTERNAL review identity: the UUID primary key of
+// sf_opportunity_reviews.id. It is never a Salesforce Opportunity ID,
+// sf_opportunity_id, opportunity name, or account name; the server resolves
+// the internal review to its staged opportunity itself. There are NO bulk
+// endpoints: every mutation addresses exactly one review.
 
 import type { ReviewIssueCode, ReviewState } from '../lib/opportunityImportStorage';
 import { REVIEW_STATE_LABELS } from '../lib/opportunityQueue';
 import type { OpportunityQueueItem, QueueRecordTypeState } from '../lib/opportunityQueue';
+
+// Route-parameter validation: reviewId must be UUID-shaped. Anything else
+// (including a Salesforce-ID-shaped value) fails validation before any
+// lookup happens.
+export const REVIEW_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidReviewId(reviewId: string): boolean {
+  return REVIEW_ID_PATTERN.test(reviewId);
+}
 
 // ---------------------------------------------------------------------------
 // Errors: sanitized and stable. Never SQL errors, tokens, database details,
@@ -139,9 +150,13 @@ export interface ReconsiderReviewRequest extends MutationEnvelope {
 }
 
 export interface LinkExactRequest extends MutationEnvelope {
-  // Exact Salesforce Opportunity ID only. Similarity is suggestion-only and
-  // has no mutation endpoint.
-  candidateSfOpportunityId: string;
+  // The target Sourced deal's internal id. The client NEVER submits
+  // Salesforce IDs for linking: the server loads the staged Salesforce
+  // Opportunity ID through the internal review, loads the link evidence
+  // stored on this deal, and permits the link only when both stored values
+  // are nonblank and exactly equal. Similarity is suggestion-only and has
+  // no mutation endpoint.
+  dealId: string;
 }
 
 // The allowlisted body keys per action; anything else is a validation error.
@@ -150,14 +165,20 @@ export const ALLOWED_BODY_KEYS: Record<string, ReadonlySet<string>> = {
   ignore_review: new Set(['idempotencyKey', 'expectedVersion', 'note']),
   block_review: new Set(['idempotencyKey', 'expectedVersion', 'reason']),
   reconsider_review: new Set(['idempotencyKey', 'expectedVersion', 'reason']),
-  link_exact: new Set(['idempotencyKey', 'expectedVersion', 'candidateSfOpportunityId']),
+  link_exact: new Set(['idempotencyKey', 'expectedVersion', 'dealId']),
 };
 
 // ---------------------------------------------------------------------------
 // Responses: explicit allowlisted fields only, never raw database rows.
 // ---------------------------------------------------------------------------
 
+// Ordinary responses expose NO Salesforce Opportunity IDs, History IDs,
+// User IDs, database row internals, tokens, or credentials. Evidence is
+// reduced to presence flags plus the non-identifying Customer Expansion
+// label; a future administrative diagnostic contract may expose external
+// IDs behind a separate capability, but it does not exist yet.
 export interface QueueItemResponse {
+  // The opaque internal review identity (sf_opportunity_reviews.id UUID).
   reviewId: string;
   opportunityName: string;
   accountName: string | null;
@@ -175,9 +196,9 @@ export interface QueueItemResponse {
   channelId: string | null;
   leadId: string | null;
   evidence: {
-    bdrUserId: string | null;
-    creatorUserId: string | null;
-    primaryCampaignSource: string | null;
+    bdrEvidencePresent: boolean;
+    creatorEvidencePresent: boolean;
+    campaignEvidencePresent: boolean;
     customerExpansionRaw: string | null;
   };
   linkStatus: 'none' | 'active' | 'retired';
@@ -198,8 +219,9 @@ export function toQueueItemResponse(
   item: OpportunityQueueItem,
   version: string,
 ): QueueItemResponse {
+  const present = (value: string | null): boolean => value !== null && value.trim() !== '';
   return {
-    reviewId: item.diagnostics.sfOpportunityId,
+    reviewId: item.reviewId ?? '',
     opportunityName: item.opportunityName,
     accountName: item.accountName,
     recordType: item.recordTypeState,
@@ -216,9 +238,9 @@ export function toQueueItemResponse(
     channelId: item.review?.channelId ?? null,
     leadId: item.review?.leadId ?? null,
     evidence: {
-      bdrUserId: item.evidence.bdrUserId,
-      creatorUserId: item.evidence.creatorUserId,
-      primaryCampaignSource: item.evidence.primaryCampaignSource,
+      bdrEvidencePresent: present(item.evidence.bdrUserId),
+      creatorEvidencePresent: present(item.evidence.creatorUserId),
+      campaignEvidencePresent: present(item.evidence.primaryCampaignSource),
       customerExpansionRaw: item.evidence.customerExpansionRaw,
     },
     linkStatus: item.linkStatus,

@@ -8,6 +8,7 @@ import type { OpportunityQueueServiceDeps } from '../server/opportunityQueueServ
 import type { IdempotencyRecord, IdempotencyStore } from '../server/opportunityQueueServerRepository';
 import type { OpportunityQueueItem } from '../lib/opportunityQueue';
 import { createMemoryQueueRepository } from './opportunityQueueMemoryAdapter';
+import type { MemoryAdapterOptions } from './opportunityQueueMemoryAdapter';
 import { FIXED_NOW } from './fixtures/opportunityQueueFixtures';
 
 export function testPrincipal(capabilities: QueueCapability[], subject = 'SYNTH-IDP-SUBJECT-1'): QueuePrincipal {
@@ -26,10 +27,13 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
   }
 }
 
-export function makeServiceDeps(seed: OpportunityQueueItem[]): OpportunityQueueServiceDeps & {
+export function makeServiceDeps(
+  seed: OpportunityQueueItem[],
+  options: MemoryAdapterOptions = {},
+): OpportunityQueueServiceDeps & {
   memoryRepository: ReturnType<typeof createMemoryQueueRepository>;
 } {
-  const memoryRepository = createMemoryQueueRepository(seed);
+  const memoryRepository = createMemoryQueueRepository(seed, options);
   return {
     repository: memoryRepository,
     memoryRepository,

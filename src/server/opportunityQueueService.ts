@@ -28,6 +28,7 @@ import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
   apiError,
+  isValidReviewId,
   toQueueItemResponse,
 } from './opportunityQueueApiContract';
 import type {
@@ -107,6 +108,25 @@ function requestHash(action: QueueApiAction, reviewId: string, body: Record<stri
   return sha256Hex(canonical);
 }
 
+// The idempotency identity is NAMESPACED over the complete scope: the
+// authenticated principal's subject, the action, the internal reviewId, and
+// the caller-provided key. Display names never participate. Two principals
+// can safely use the same caller key; one principal can reuse a key across
+// reviews or actions; and no principal can ever receive another principal's
+// stored response. The future persistent store must enforce a UNIQUE
+// constraint over this complete namespace. Blank components are invalid.
+function idempotencyScope(
+  subject: string,
+  action: QueueApiAction,
+  reviewId: string,
+  idempotencyKey: string,
+): string | null {
+  if (!subject.trim() || !action.trim() || !reviewId.trim() || !idempotencyKey.trim()) {
+    return null;
+  }
+  return JSON.stringify([subject, action, reviewId, idempotencyKey]);
+}
+
 function actionContext(principal: QueuePrincipal, deps: OpportunityQueueServiceDeps, note?: string | null): QueueActionContext {
   return {
     // The ONLY source of actor identity is the authenticated principal.
@@ -183,6 +203,11 @@ export async function getReview(
 ): Promise<ApiResponse<QueueItemResponse>> {
   const decision = authorizeAction(principal, 'get_review');
   if (!decision.allowed) return unauthorized(decision);
+  if (!isValidReviewId(reviewId)) {
+    return apiError('validation_failed', 'request validation failed', [
+      'reviewId must be an internal review UUID',
+    ]);
+  }
   try {
     const item = await deps.repository.getQueueItem(reviewId);
     if (!item) return apiError('not_found', 'no review exists for this id');
@@ -211,6 +236,7 @@ async function runMutation<T extends MutationEnvelope>(
   const record = body as unknown as Record<string, unknown>;
 
   const problems = [
+    ...(isValidReviewId(reviewId) ? [] : ['reviewId must be an internal review UUID']),
     ...validateBodyKeys(action, record),
     ...validateEnvelope(body),
     ...extraValidation(),
@@ -219,10 +245,18 @@ async function runMutation<T extends MutationEnvelope>(
     return apiError('validation_failed', 'request validation failed', problems);
   }
 
-  // Idempotency: an identical retry replays the stored result; the same key
-  // with a different payload is a conflict.
+  // Idempotency, scoped to (subject, action, reviewId, caller key). An
+  // identical retry replays the stored result BEFORE any version check, so
+  // a completed request stays replayable even after the review advanced;
+  // the same scope with a different payload is a conflict.
+  const scope = idempotencyScope(authedPrincipal.subject, action, reviewId, body.idempotencyKey);
+  if (scope === null) {
+    return apiError('validation_failed', 'request validation failed', [
+      'idempotency scope components must be nonblank',
+    ]);
+  }
   const hash = requestHash(action, reviewId, record);
-  const existing = await deps.idempotency.get(body.idempotencyKey);
+  const existing = await deps.idempotency.get(scope);
   if (existing) {
     if (existing.requestHash === hash) {
       const replay = existing.result as MutationResponse;
@@ -243,6 +277,9 @@ async function runMutation<T extends MutationEnvelope>(
   if (!current) return apiError('not_found', 'no review exists for this id');
 
   // Optimistic concurrency: the caller must have seen the current version.
+  // The comparison target is ALWAYS the authoritative server-loaded review
+  // projection; the client can submit an expectation but can never declare
+  // what the current version is.
   const currentVersion = computeReviewVersion(current);
   if (body.expectedVersion !== currentVersion) {
     return apiError('version_conflict', 'the review changed since it was loaded; reload and retry');
@@ -272,7 +309,7 @@ async function runMutation<T extends MutationEnvelope>(
     auditEventType: result.audit.event_type,
     replayed: false,
   };
-  await deps.idempotency.put(body.idempotencyKey, { requestHash: hash, result: responseBody });
+  await deps.idempotency.put(scope, { requestHash: hash, result: responseBody });
   return { ok: true, status: 200, body: responseBody };
 }
 
@@ -355,17 +392,18 @@ export async function linkExactReview(
   reviewId: string,
   body: LinkExactRequest,
 ): Promise<ApiResponse<MutationResponse>> {
+  // The body carries only the target Sourced dealId. The repository loads
+  // the staged Salesforce Opportunity ID through the internal review and
+  // the link evidence stored on the deal, and compares them SERVER-SIDE;
+  // the client is never trusted to claim two Salesforce IDs match.
   return runMutation(
     deps,
     principal,
     'link_exact',
     reviewId,
     body,
-    () =>
-      !body.candidateSfOpportunityId || !body.candidateSfOpportunityId.trim()
-        ? ['candidateSfOpportunityId is required']
-        : [],
-    (ctx) => deps.repository.linkExactDeal(reviewId, body.candidateSfOpportunityId, ctx),
+    () => (!body.dealId || !body.dealId.trim() ? ['dealId is required'] : []),
+    (ctx) => deps.repository.linkExactDeal(reviewId, body.dealId, ctx),
   );
 }
 

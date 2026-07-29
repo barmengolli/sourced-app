@@ -1,8 +1,8 @@
 // Tests for the Bite 5C2B2A framework-neutral Opportunity Queue service
-// layer: authorization, mutation safeguards (idempotency, optimistic
-// concurrency, strict body allowlists), sanitized errors, pagination
-// bounds, allowlisted responses, health/readiness, and the static server
-// boundary rules. Synthetic in-memory data only.
+// layer: authorization, internal review identity, scoped idempotency,
+// optimistic concurrency, server-side exact-link verification, sanitized
+// errors, pagination bounds, allowlisted responses, health/readiness, and
+// the static server boundary rules. Synthetic in-memory data only.
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -20,19 +20,24 @@ import {
 } from './opportunityQueueService';
 import * as serviceModule from './opportunityQueueService';
 import { computeReviewVersion } from './opportunityQueueServerRepository';
-import { MAX_PAGE_SIZE } from './opportunityQueueApiContract';
+import { MAX_PAGE_SIZE, isValidReviewId } from './opportunityQueueApiContract';
 import { makeServiceDeps, testPrincipal } from '../test/opportunityQueueServerTestKit';
-import { queueItem } from '../test/fixtures/opportunityQueueFixtures';
+import { queueItem, synthReviewUuid } from '../test/fixtures/opportunityQueueFixtures';
 
 const REVIEWER = testPrincipal(['opportunity_queue:read', 'opportunity_queue:review', 'opportunity_queue:link']);
 const ADMIN = testPrincipal(['opportunity_queue:admin'], 'SYNTH-IDP-ADMIN-1');
 
-function pendingItem(sfId = 'SYNTH-OPP-API-1', over: Parameters<typeof queueItem>[0] = {}) {
-  return queueItem({ diagnostics: { sfOpportunityId: sfId }, ...over });
+// Synthetic internal review UUIDs (sf_opportunity_reviews.id shaped).
+const R1 = '11111111-1111-4111-8111-111111111111';
+const R2 = '22222222-2222-4222-8222-222222222222';
+const R_MISSING = '99999999-9999-4999-8999-999999999999';
+
+function pendingItem(reviewId = R1, over: Parameters<typeof queueItem>[0] = {}) {
+  return queueItem({ reviewId, ...over });
 }
 
-async function versionOf(deps: ReturnType<typeof makeServiceDeps>, sfId: string): Promise<string> {
-  const item = await deps.repository.getQueueItem(sfId);
+async function versionOf(deps: ReturnType<typeof makeServiceDeps>, reviewId: string): Promise<string> {
+  const item = await deps.repository.getQueueItem(reviewId);
   return computeReviewVersion(item!);
 }
 
@@ -40,18 +45,39 @@ function envelope(version: string, key = 'SYNTH-IDEM-1') {
   return { idempotencyKey: key, expectedVersion: version };
 }
 
+describe('internal review identity', () => {
+  it('reviewId is an opaque internal UUID, never a Salesforce ID', async () => {
+    const deps = makeServiceDeps([pendingItem()]);
+    expect(isValidReviewId(R1)).toBe(true);
+    // A Salesforce-Opportunity-ID-shaped value is rejected before lookup.
+    for (const bad of ['SYNTH-OPP-API-1', '006000000000ABCDEF', 'Synthetic Deal 1', '']) {
+      expect(isValidReviewId(bad)).toBe(false);
+      const read = await getReview(deps, REVIEWER, bad);
+      expect(!read.ok && read.body.error.code).toBe('validation_failed');
+      const mutate = await ignoreReview(deps, REVIEWER, bad, envelope('v1:any'));
+      expect(!mutate.ok && mutate.body.error.code).toBe('validation_failed');
+    }
+  });
+
+  it('fixtures produce UUID-shaped synthetic review ids', () => {
+    const item = queueItem();
+    expect(item.reviewId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(synthReviewUuid(7)).toBe('00000000-0000-4000-8000-000000000007');
+  });
+});
+
 describe('authentication and authorization at the service boundary', () => {
   it('no principal returns unauthenticated on every endpoint', async () => {
     const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
+    const version = await versionOf(deps, R1);
     const responses = [
       await listReviews(deps, null),
-      await getReview(deps, null, 'SYNTH-OPP-API-1'),
-      await approveReview(deps, null, 'SYNTH-OPP-API-1', { ...envelope(version), channelId: 'SYNTH-CHANNEL-1' }),
-      await ignoreReview(deps, null, 'SYNTH-OPP-API-1', envelope(version)),
-      await blockReview(deps, null, 'SYNTH-OPP-API-1', { ...envelope(version), reason: 'r' }),
-      await reconsiderReview(deps, null, 'SYNTH-OPP-API-1', { ...envelope(version), reason: 'r' }),
-      await linkExactReview(deps, null, 'SYNTH-OPP-API-1', { ...envelope(version), candidateSfOpportunityId: 'SYNTH-OPP-API-1' }),
+      await getReview(deps, null, R1),
+      await approveReview(deps, null, R1, { ...envelope(version), channelId: 'SYNTH-CHANNEL-1' }),
+      await ignoreReview(deps, null, R1, envelope(version)),
+      await blockReview(deps, null, R1, { ...envelope(version), reason: 'r' }),
+      await reconsiderReview(deps, null, R1, { ...envelope(version), reason: 'r' }),
+      await linkExactReview(deps, null, R1, { ...envelope(version), dealId: 'SYNTH-DEAL-1' }),
     ];
     for (const response of responses) {
       expect(response.ok).toBe(false);
@@ -65,8 +91,8 @@ describe('authentication and authorization at the service boundary', () => {
   it('a missing capability returns forbidden and performs nothing', async () => {
     const deps = makeServiceDeps([pendingItem()]);
     const readOnly = testPrincipal(['opportunity_queue:read']);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const denied = await approveReview(deps, readOnly, 'SYNTH-OPP-API-1', {
+    const version = await versionOf(deps, R1);
+    const denied = await approveReview(deps, readOnly, R1, {
       ...envelope(version),
       channelId: 'SYNTH-CHANNEL-1',
     });
@@ -75,17 +101,17 @@ describe('authentication and authorization at the service boundary', () => {
     expect(deps.memoryRepository.auditLog).toHaveLength(0);
     // Link capability is separate from review capability.
     const reviewer = testPrincipal(['opportunity_queue:review']);
-    const linkDenied = await linkExactReview(deps, reviewer, 'SYNTH-OPP-API-1', {
+    const linkDenied = await linkExactReview(deps, reviewer, R1, {
       ...envelope(version),
-      candidateSfOpportunityId: 'SYNTH-OPP-API-1',
+      dealId: 'SYNTH-DEAL-1',
     });
     expect(!linkDenied.ok && linkDenied.body.error.code).toBe('forbidden');
   });
 
   it('admin cannot bypass channel or blocking-issue domain validation', async () => {
     const deps = makeServiceDeps([
-      pendingItem('SYNTH-OPP-API-1'),
-      pendingItem('SYNTH-OPP-API-2', {
+      pendingItem(R1),
+      pendingItem(R2, {
         review: {
           reviewState: 'pending',
           issueCodes: ['missing_channel', 'conflicting_history_id'],
@@ -94,14 +120,11 @@ describe('authentication and authorization at the service boundary', () => {
         },
       }),
     ]);
-    const v1 = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const noChannel = await approveReview(deps, ADMIN, 'SYNTH-OPP-API-1', {
-      ...envelope(v1),
-      channelId: '',
-    });
+    const v1 = await versionOf(deps, R1);
+    const noChannel = await approveReview(deps, ADMIN, R1, { ...envelope(v1), channelId: '' });
     expect(!noChannel.ok && noChannel.body.error.code).toBe('validation_failed');
-    const v2 = await versionOf(deps, 'SYNTH-OPP-API-2');
-    const blockedIssue = await approveReview(deps, ADMIN, 'SYNTH-OPP-API-2', {
+    const v2 = await versionOf(deps, R2);
+    const blockedIssue = await approveReview(deps, ADMIN, R2, {
       ...envelope(v2, 'SYNTH-IDEM-2'),
       channelId: 'SYNTH-CHANNEL-1',
     });
@@ -111,9 +134,8 @@ describe('authentication and authorization at the service boundary', () => {
 
   it('actor identity comes from the session principal, never the request body', async () => {
     const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    // A body attempting to smuggle an actor is rejected outright.
-    const smuggled = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const version = await versionOf(deps, R1);
+    const smuggled = await approveReview(deps, REVIEWER, R1, {
       ...envelope(version),
       channelId: 'SYNTH-CHANNEL-1',
       actorId: 'SYNTH-FORGED-ACTOR',
@@ -122,8 +144,7 @@ describe('authentication and authorization at the service boundary', () => {
     if (!smuggled.ok) {
       expect(smuggled.body.error.reasons?.join(' ')).toContain('unexpected field: actorId');
     }
-    // A clean request records the principal subject as the audit actor.
-    const approved = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const approved = await approveReview(deps, REVIEWER, R1, {
       ...envelope(version, 'SYNTH-IDEM-3'),
       channelId: 'SYNTH-CHANNEL-1',
     });
@@ -136,8 +157,8 @@ describe('authentication and authorization at the service boundary', () => {
 describe('mutation safeguards', () => {
   it('channel stays explicit and lead stays optional on approval', async () => {
     const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const approved = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const version = await versionOf(deps, R1);
+    const approved = await approveReview(deps, REVIEWER, R1, {
       ...envelope(version),
       channelId: 'SYNTH-CHANNEL-1',
     });
@@ -152,17 +173,14 @@ describe('mutation safeguards', () => {
 
   it('reconsider requires a reason and follows ignored -> pending', async () => {
     const deps = makeServiceDeps([
-      pendingItem('SYNTH-OPP-API-1', {
+      pendingItem(R1, {
         review: { reviewState: 'ignored', issueCodes: ['missing_channel'], channelId: null, leadId: null },
       }),
     ]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const noReason = await reconsiderReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
-      ...envelope(version),
-      reason: ' ',
-    });
+    const version = await versionOf(deps, R1);
+    const noReason = await reconsiderReview(deps, REVIEWER, R1, { ...envelope(version), reason: ' ' });
     expect(!noReason.ok && noReason.body.error.code).toBe('validation_failed');
-    const recovered = await reconsiderReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const recovered = await reconsiderReview(deps, REVIEWER, R1, {
       ...envelope(version, 'SYNTH-IDEM-2'),
       reason: 'leadership revisit',
     });
@@ -173,34 +191,16 @@ describe('mutation safeguards', () => {
     }
   });
 
-  it('linking is exact Salesforce Opportunity ID only', async () => {
-    const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const mismatch = await linkExactReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
-      ...envelope(version),
-      candidateSfOpportunityId: 'SYNTH-OPP-OTHER',
-    });
-    expect(!mismatch.ok && mismatch.body.error.code).toBe('validation_failed');
-    const linked = await linkExactReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
-      ...envelope(version, 'SYNTH-IDEM-2'),
-      candidateSfOpportunityId: 'SYNTH-OPP-API-1',
-    });
-    expect(linked.ok).toBe(true);
-    if (linked.ok) expect(linked.body.auditEventType).toBe('link_recorded');
-    // No similarity-based mutation exists anywhere in the service surface.
-    expect(Object.keys(serviceModule).some((name) => /similar|suggest/i.test(name))).toBe(false);
-  });
-
   it('idempotency key and expected version are required', async () => {
     const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const missingKey = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const version = await versionOf(deps, R1);
+    const missingKey = await approveReview(deps, REVIEWER, R1, {
       idempotencyKey: '',
       expectedVersion: version,
       channelId: 'SYNTH-CHANNEL-1',
     });
     expect(!missingKey.ok && missingKey.body.error.reasons?.join(' ')).toContain('idempotencyKey is required');
-    const missingVersion = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const missingVersion = await approveReview(deps, REVIEWER, R1, {
       idempotencyKey: 'SYNTH-IDEM-1',
       expectedVersion: '',
       channelId: 'SYNTH-CHANNEL-1',
@@ -210,10 +210,10 @@ describe('mutation safeguards', () => {
 
   it('a stale expected version produces a version conflict and changes nothing', async () => {
     const deps = makeServiceDeps([pendingItem()]);
-    const staleVersion = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const first = await ignoreReview(deps, REVIEWER, 'SYNTH-OPP-API-1', envelope(staleVersion, 'SYNTH-IDEM-A'));
+    const staleVersion = await versionOf(deps, R1);
+    const first = await ignoreReview(deps, REVIEWER, R1, envelope(staleVersion, 'SYNTH-IDEM-A'));
     expect(first.ok).toBe(true);
-    const stale = await reconsiderReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const stale = await reconsiderReview(deps, REVIEWER, R1, {
       ...envelope(staleVersion, 'SYNTH-IDEM-B'),
       reason: 'stale attempt',
     });
@@ -222,46 +222,14 @@ describe('mutation safeguards', () => {
     expect(deps.memoryRepository.auditLog).toHaveLength(1);
   });
 
-  it('an identical idempotent retry replays the same logical result', async () => {
-    const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const body = { ...envelope(version), channelId: 'SYNTH-CHANNEL-1' };
-    const first = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', body);
-    const retry = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', body);
-    expect(first.ok && retry.ok).toBe(true);
-    if (first.ok && retry.ok) {
-      expect(retry.body.item).toEqual(first.body.item);
-      expect(first.body.replayed).toBe(false);
-      expect(retry.body.replayed).toBe(true);
-    }
-    // The mutation ran exactly once.
-    expect(deps.memoryRepository.auditLog).toHaveLength(1);
-  });
-
-  it('the same key with a different payload is an idempotency conflict', async () => {
-    const deps = makeServiceDeps([pendingItem()]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const first = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
-      ...envelope(version, 'SYNTH-IDEM-SAME'),
-      channelId: 'SYNTH-CHANNEL-1',
-    });
-    expect(first.ok).toBe(true);
-    const conflicting = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
-      ...envelope(version, 'SYNTH-IDEM-SAME'),
-      channelId: 'SYNTH-CHANNEL-2',
-    });
-    expect(!conflicting.ok && conflicting.status).toBe(409);
-    expect(!conflicting.ok && conflicting.body.error.code).toBe('idempotency_conflict');
-  });
-
   it('acting on a blocked review returns the stable review_blocked code', async () => {
     const deps = makeServiceDeps([
-      pendingItem('SYNTH-OPP-API-1', {
+      pendingItem(R1, {
         review: { reviewState: 'blocked', issueCodes: ['invalid_source_row'], channelId: null, leadId: null },
       }),
     ]);
-    const version = await versionOf(deps, 'SYNTH-OPP-API-1');
-    const response = await approveReview(deps, REVIEWER, 'SYNTH-OPP-API-1', {
+    const version = await versionOf(deps, R1);
+    const response = await approveReview(deps, REVIEWER, R1, {
       ...envelope(version),
       channelId: 'SYNTH-CHANNEL-1',
     });
@@ -271,32 +239,189 @@ describe('mutation safeguards', () => {
 
   it('an unknown review id returns not_found', async () => {
     const deps = makeServiceDeps([]);
-    const response = await getReview(deps, REVIEWER, 'SYNTH-OPP-MISSING');
+    const response = await getReview(deps, REVIEWER, R_MISSING);
     expect(!response.ok && response.status).toBe(404);
     expect(!response.ok && response.body.error.code).toBe('not_found');
   });
 
   it('no bulk mutation surface exists', () => {
-    // Every mutation addresses exactly one reviewId; no export name or
-    // signature suggests a bulk operation.
     expect(Object.keys(serviceModule).some((name) => /bulk|batch/i.test(name))).toBe(false);
     const source = readFileSync(resolve(process.cwd(), 'src/server/opportunityQueueService.ts'), 'utf8');
     expect(source).not.toMatch(/reviewIds\s*:/);
   });
 });
 
+describe('exact-link server-side verification', () => {
+  const linkSeed = () =>
+    pendingItem(R1, { diagnostics: { sfOpportunityId: 'SYNTH-OPP-LINKED' } });
+
+  it('links only when server-loaded evidence matches exactly', async () => {
+    const deps = makeServiceDeps([linkSeed()], {
+      deals: {
+        'SYNTH-DEAL-MATCH': { sfOpportunityId: 'SYNTH-OPP-LINKED' },
+        'SYNTH-DEAL-OTHER': { sfOpportunityId: 'SYNTH-OPP-OTHER' },
+        'SYNTH-DEAL-BLANK': { sfOpportunityId: null },
+      },
+    });
+    const version = await versionOf(deps, R1);
+    // Mismatched stored evidence never links.
+    const mismatch = await linkExactReview(deps, REVIEWER, R1, {
+      ...envelope(version, 'SYNTH-IDEM-M'),
+      dealId: 'SYNTH-DEAL-OTHER',
+    });
+    expect(!mismatch.ok && mismatch.body.error.code).toBe('validation_failed');
+    // Blank stored evidence never links.
+    const blank = await linkExactReview(deps, REVIEWER, R1, {
+      ...envelope(version, 'SYNTH-IDEM-N'),
+      dealId: 'SYNTH-DEAL-BLANK',
+    });
+    expect(!blank.ok && blank.body.error.code).toBe('validation_failed');
+    // Exact stored equality links.
+    const linked = await linkExactReview(deps, REVIEWER, R1, {
+      ...envelope(version, 'SYNTH-IDEM-L'),
+      dealId: 'SYNTH-DEAL-MATCH',
+    });
+    expect(linked.ok).toBe(true);
+    if (linked.ok) expect(linked.body.auditEventType).toBe('link_recorded');
+  });
+
+  it('the client cannot submit Salesforce IDs and claim they match', async () => {
+    const deps = makeServiceDeps([linkSeed()], {
+      deals: { 'SYNTH-DEAL-MATCH': { sfOpportunityId: 'SYNTH-OPP-LINKED' } },
+    });
+    const version = await versionOf(deps, R1);
+    const forged = await linkExactReview(deps, REVIEWER, R1, {
+      ...envelope(version),
+      dealId: 'SYNTH-DEAL-MATCH',
+      candidateSfOpportunityId: 'SYNTH-OPP-LINKED',
+    } as never);
+    expect(!forged.ok && forged.body.error.code).toBe('validation_failed');
+    if (!forged.ok) {
+      expect(forged.body.error.reasons?.join(' ')).toContain('unexpected field: candidateSfOpportunityId');
+    }
+    // An unknown deal id is refused by the server-side resolution.
+    const unknownDeal = await linkExactReview(deps, REVIEWER, R1, {
+      ...envelope(version, 'SYNTH-IDEM-U'),
+      dealId: 'SYNTH-DEAL-MISSING',
+    });
+    expect(!unknownDeal.ok && unknownDeal.body.error.code).toBe('validation_failed');
+    // No similarity-based mutation exists anywhere in the service surface.
+    expect(Object.keys(serviceModule).some((name) => /similar|suggest/i.test(name))).toBe(false);
+  });
+});
+
+describe('idempotency namespace', () => {
+  const OTHER = testPrincipal(
+    ['opportunity_queue:read', 'opportunity_queue:review'],
+    'SYNTH-IDP-SUBJECT-2',
+  );
+
+  it('an identical retry replays the original result even after the version advanced', async () => {
+    const deps = makeServiceDeps([pendingItem()]);
+    const version = await versionOf(deps, R1);
+    const body = { ...envelope(version), channelId: 'SYNTH-CHANNEL-1' };
+    const first = await approveReview(deps, REVIEWER, R1, body);
+    // The approval advanced the review version, so this identical retry
+    // would fail the version check; the replay happens FIRST.
+    const retry = await approveReview(deps, REVIEWER, R1, body);
+    expect(first.ok && retry.ok).toBe(true);
+    if (first.ok && retry.ok) {
+      expect(retry.body.item).toEqual(first.body.item);
+      expect(first.body.replayed).toBe(false);
+      expect(retry.body.replayed).toBe(true);
+    }
+    expect(deps.memoryRepository.auditLog).toHaveLength(1);
+  });
+
+  it('the same scope with a different payload conflicts', async () => {
+    const deps = makeServiceDeps([pendingItem()]);
+    const version = await versionOf(deps, R1);
+    const first = await approveReview(deps, REVIEWER, R1, {
+      ...envelope(version, 'SYNTH-IDEM-SAME'),
+      channelId: 'SYNTH-CHANNEL-1',
+    });
+    expect(first.ok).toBe(true);
+    const conflicting = await approveReview(deps, REVIEWER, R1, {
+      ...envelope(version, 'SYNTH-IDEM-SAME'),
+      channelId: 'SYNTH-CHANNEL-2',
+    });
+    expect(!conflicting.ok && conflicting.status).toBe(409);
+    expect(!conflicting.ok && conflicting.body.error.code).toBe('idempotency_conflict');
+  });
+
+  it('different principals are isolated: no cross-principal replay or leak', async () => {
+    const deps = makeServiceDeps([pendingItem()]);
+    const version = await versionOf(deps, R1);
+    const body = envelope(version, 'SYNTH-IDEM-SHARED');
+    const first = await ignoreReview(deps, REVIEWER, R1, body);
+    expect(first.ok).toBe(true);
+    // The second principal reuses the SAME caller key with the SAME payload:
+    // it must NOT receive the first principal's stored response. It reaches
+    // the version check and conflicts, proving no replay occurred.
+    const second = await ignoreReview(deps, OTHER, R1, body);
+    expect(second.ok).toBe(false);
+    if (!second.ok) {
+      expect(second.body.error.code).toBe('version_conflict');
+      expect(JSON.stringify(second.body)).not.toContain('replayed');
+    }
+  });
+
+  it('the same principal may reuse a caller key across reviews and actions', async () => {
+    const deps = makeServiceDeps([
+      pendingItem(R1),
+      pendingItem(R2, {
+        review: { reviewState: 'ignored', issueCodes: [], channelId: null, leadId: null },
+      }),
+    ]);
+    const v1 = await versionOf(deps, R1);
+    const ignored = await ignoreReview(deps, REVIEWER, R1, envelope(v1, 'SYNTH-IDEM-REUSE'));
+    expect(ignored.ok).toBe(true);
+    // Same key, different review: allowed.
+    const v2 = await versionOf(deps, R2);
+    const otherReview = await reconsiderReview(deps, REVIEWER, R2, {
+      ...envelope(v2, 'SYNTH-IDEM-REUSE'),
+      reason: 'different review',
+    });
+    expect(otherReview.ok).toBe(true);
+    // Same key, same review, different action: allowed.
+    const v1b = await versionOf(deps, R1);
+    const differentAction = await reconsiderReview(deps, REVIEWER, R1, {
+      ...envelope(v1b, 'SYNTH-IDEM-REUSE'),
+      reason: 'different action',
+    });
+    expect(differentAction.ok).toBe(true);
+  });
+
+  it('blank namespace components fail validation', async () => {
+    const deps = makeServiceDeps([pendingItem()]);
+    const version = await versionOf(deps, R1);
+    const blankKey = await ignoreReview(deps, REVIEWER, R1, envelope(version, '   '));
+    expect(!blankKey.ok && blankKey.body.error.code).toBe('validation_failed');
+    const blankReview = await ignoreReview(deps, REVIEWER, '', envelope(version));
+    expect(!blankReview.ok && blankReview.body.error.code).toBe('validation_failed');
+    // A blank subject is rejected earlier as unauthenticated.
+    const blankSubject = await ignoreReview(
+      deps,
+      testPrincipal(['opportunity_queue:review'], '   '),
+      R1,
+      envelope(version),
+    );
+    expect(!blankSubject.ok && blankSubject.body.error.code).toBe('unauthenticated');
+  });
+});
+
 describe('list contract', () => {
   it('separates the attention queue from the not-selected view', async () => {
     const deps = makeServiceDeps([
-      pendingItem('SYNTH-OPP-API-1'),
-      pendingItem('SYNTH-OPP-API-2', {
+      pendingItem(R1),
+      pendingItem(R2, {
         review: { reviewState: 'ignored', issueCodes: [], channelId: null, leadId: null },
       }),
     ]);
     const attention = await listReviews(deps, REVIEWER, {});
     const notSelected = await listReviews(deps, REVIEWER, { view: 'not_selected' });
-    expect(attention.ok && attention.body.items.map((i) => i.reviewId)).toEqual(['SYNTH-OPP-API-1']);
-    expect(notSelected.ok && notSelected.body.items.map((i) => i.reviewId)).toEqual(['SYNTH-OPP-API-2']);
+    expect(attention.ok && attention.body.items.map((i) => i.reviewId)).toEqual([R1]);
+    expect(notSelected.ok && notSelected.body.items.map((i) => i.reviewId)).toEqual([R2]);
     if (notSelected.ok) {
       expect(notSelected.body.items[0].reviewStateLabel).toBe('Not selected');
     }
@@ -312,7 +437,7 @@ describe('list contract', () => {
   });
 
   it('paginates deterministically with totals', async () => {
-    const items = Array.from({ length: 7 }, (_, i) => pendingItem(`SYNTH-OPP-PAGE-${i + 1}`));
+    const items = Array.from({ length: 7 }, (_, i) => pendingItem(synthReviewUuid(i + 1)));
     const deps = makeServiceDeps(items);
     const page2 = await listReviews(deps, REVIEWER, { page: 2, pageSize: 3 });
     expect(page2.ok).toBe(true);
@@ -326,7 +451,6 @@ describe('list contract', () => {
 
   it('response fields are allowlisted: extra domain fields never leak', async () => {
     const item = pendingItem();
-    // Simulate a future domain field the API has not approved.
     (item as unknown as Record<string, unknown>).internalScratchpad = 'SYNTH-SECRET-FIELD';
     const deps = makeServiceDeps([item]);
     const response = await listReviews(deps, REVIEWER, {});
@@ -358,6 +482,37 @@ describe('list contract', () => {
       );
       expect(JSON.stringify(response.body)).not.toContain('SYNTH-SECRET-FIELD');
     }
+  });
+
+  it('ordinary responses expose no Salesforce, User, or History identifiers', async () => {
+    const deps = makeServiceDeps([
+      pendingItem(R1, {
+        diagnostics: { sfOpportunityId: 'SYNTH-OPP-HIDDEN' },
+        evidence: {
+          bdrUserId: 'SYNTH-USER-BDR-HIDDEN',
+          creatorUserId: 'SYNTH-USER-CREATOR-HIDDEN',
+          primaryCampaignSource: 'SYNTH-CAMPAIGN-HIDDEN',
+          customerExpansionRaw: 'Synthetic expansion label',
+        },
+      }),
+    ]);
+    const list = await listReviews(deps, REVIEWER, {});
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    const serialized = JSON.stringify(list.body);
+    // No staged Salesforce Opportunity ID, no User IDs, no campaign ID.
+    expect(serialized).not.toContain('SYNTH-OPP-HIDDEN');
+    expect(serialized).not.toContain('SYNTH-USER');
+    expect(serialized).not.toContain('SYNTH-CAMPAIGN-HIDDEN');
+    // No real-Salesforce-ID-shaped values of any kind.
+    expect(serialized).not.toMatch(/\b(006|005|008|017|012|00Q|003|001)[A-Za-z0-9]{12}\b/);
+    // Evidence is reduced to presence flags plus the non-identifying label.
+    expect(list.body.items[0].evidence).toEqual({
+      bdrEvidencePresent: true,
+      creatorEvidencePresent: true,
+      campaignEvidencePresent: true,
+      customerExpansionRaw: 'Synthetic expansion label',
+    });
   });
 });
 

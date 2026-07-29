@@ -22,9 +22,20 @@
 // - Enforce optimistic concurrency: the stored review row carries a version
 //   (its updated_at or a row version); a mutation with a stale expected
 //   version fails with version_conflict and changes nothing.
-// - Enforce idempotency: the idempotency ledger is persisted server-side so
-//   an identical retried request returns the original result and a same-key
-//   different-payload request fails with idempotency_conflict.
+// - Enforce idempotency: the persistent ledger keys on the COMPLETE
+//   namespace (principal subject, action, internal reviewId, caller key)
+//   with a UNIQUE constraint over all four components, so an identical
+//   retried request returns the original result, a same-scope
+//   different-payload request fails with idempotency_conflict, different
+//   principals can safely reuse the same caller key, and one principal can
+//   never receive another principal's stored response. Replay of a stored
+//   identical request happens BEFORE version checking, so completed
+//   requests stay replayable after the review advances.
+// - Resolve exact links server-side: load the staged Salesforce
+//   Opportunity ID through the internal review, load the Salesforce link
+//   evidence stored on the target Sourced deal, and permit the proposal
+//   only when both stored values are nonblank and exactly equal. Names and
+//   accounts never link.
 // - Preserve reviewer decisions during ingestion: channel_id, lead_id,
 //   notes, reviewed_by, and human review states are never overwritten by
 //   sync (the Bite 5C2A apply function already guarantees this on the
@@ -40,10 +51,13 @@
 import { sha256Hex } from '../lib/sha256';
 import type { OpportunityQueueItem } from '../lib/opportunityQueue';
 
+// The live implementation compares the caller's expectedVersion against the
+// version of the AUTHORITATIVE server-loaded review projection; a client can
+// state an expectation but never declares the current version.
 export function computeReviewVersion(item: OpportunityQueueItem): string {
   const review = item.review;
   const canonical = JSON.stringify([
-    item.diagnostics.sfOpportunityId,
+    item.reviewId,
     review ? review.reviewState : null,
     review ? [...review.issueCodes].sort() : null,
     review ? review.channelId : null,
