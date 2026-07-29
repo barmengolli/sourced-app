@@ -754,3 +754,10 @@ Do not turn a focused task into one of these projects without approval:
   single-entry `stage_history` data, fixing the nightly SFDC workflow's
   lifecycle gaps, and confirming Salesforce date-field API names are all
   future, separately approved work.
+- The Opportunity Queue Manager (Bite 5C2B1, `docs/opportunity-queue.md`)
+  exists as domain logic (`src/lib/opportunityQueue.ts`), a typed repository
+  boundary (`src/lib/opportunityQueueRepository.ts`), and an unrouted UI
+  (`src/components/opportunities/OpportunityQueueManager.tsx`). It runs only
+  against a synthetic in-memory adapter in tests. Live wiring requires the
+  authenticated server-side review API; the browser must never query the
+  protected `sf_opportunity_*` tables directly.
