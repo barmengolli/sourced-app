@@ -36,27 +36,37 @@ export interface OpportunityQueueRepository {
   // The separate "Not selected" recovery view: ignored reviews only
   // (classifyNotSelectedMembership), never mixed into the active queue.
   listNotSelected(filters?: QueueFilters): Promise<OpportunityQueueItem[]>;
-  getQueueItem(sfOpportunityId: string): Promise<OpportunityQueueItem | null>;
+  // Every method below keys on the OPAQUE INTERNAL review identity
+  // (sf_opportunity_reviews.id UUID), never on a Salesforce Opportunity
+  // ID, opportunity name, or account name. The implementation resolves the
+  // internal review to its staged opportunity server-side.
+  getQueueItem(reviewId: string): Promise<OpportunityQueueItem | null>;
   // Approval requires the reviewer's explicit channel; lead is optional.
   approveReview(
-    sfOpportunityId: string,
+    reviewId: string,
     decision: { channelId: string; leadId?: string | null },
     ctx: QueueActionContext,
   ): Promise<QueueActionResult>;
   // Optional non-sensitive note on ctx.note.
-  ignoreReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
+  ignoreReview(reviewId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
   // ctx.note is the required blocking reason.
-  blockReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
-  reopenReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
+  blockReview(reviewId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
+  reopenReview(reviewId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
   // Recovery for a not-selected (ignored) review: ignored -> pending via the
   // existing state contract with the 'reopened' audit event. ctx.note is the
   // required, non-sensitive reconsideration reason. Recovery is not
   // approval; the record re-enters the pending queue for a fresh decision.
-  reconsiderReview(sfOpportunityId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
-  // Exact Salesforce Opportunity ID match only; similarity never links.
+  reconsiderReview(reviewId: string, ctx: QueueActionContext): Promise<QueueActionResult>;
+  // Exact-ID linking, verified SERVER-SIDE: the caller supplies only the
+  // internal reviewId and the target Sourced dealId. The implementation
+  // loads the staged Salesforce Opportunity ID through the review, loads
+  // the Salesforce link evidence stored on the target deal, and permits
+  // the link only when both stored values are nonblank and exactly equal.
+  // The client is never trusted to submit two Salesforce IDs and claim
+  // they match, and names/accounts never link.
   linkExactDeal(
-    sfOpportunityId: string,
-    candidateSfOpportunityId: string,
+    reviewId: string,
+    dealId: string,
     ctx: QueueActionContext,
   ): Promise<QueueActionResult>;
 }

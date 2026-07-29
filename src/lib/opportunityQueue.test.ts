@@ -410,10 +410,9 @@ describe('not-selected recovery (reconsider)', () => {
   });
 
   it('failed recovery mutates nothing and emits no audit event (adapter)', async () => {
-    const repo = createMemoryQueueRepository([
-      ignored({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS1' } }),
-    ]);
-    const missing = await repo.reconsiderReview('SYNTH-OPP-NS1', {
+    const item = ignored({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS1' } });
+    const repo = createMemoryQueueRepository([item]);
+    const missing = await repo.reconsiderReview(item.reviewId!, {
       actorId: 'SYNTH-REVIEWER',
       occurredAt: CTX.occurredAt,
     });
@@ -423,10 +422,9 @@ describe('not-selected recovery (reconsider)', () => {
   });
 
   it('the full recovery cycle preserves the original not-selected audit event', async () => {
-    const repo = createMemoryQueueRepository([
-      queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS2' } }),
-    ]);
-    const ignoredResult = await repo.ignoreReview('SYNTH-OPP-NS2', {
+    const cycled = queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-NS2' } });
+    const repo = createMemoryQueueRepository([cycled]);
+    const ignoredResult = await repo.ignoreReview(cycled.reviewId!, {
       actorId: 'SYNTH-REVIEWER',
       occurredAt: CTX.occurredAt,
       note: 'not selected for import this cycle',
@@ -436,7 +434,7 @@ describe('not-selected recovery (reconsider)', () => {
     expect(await repo.listQueue()).toHaveLength(0);
     expect(await repo.listNotSelected()).toHaveLength(1);
 
-    const recovered = await repo.reconsiderReview('SYNTH-OPP-NS2', {
+    const recovered = await repo.reconsiderReview(cycled.reviewId!, {
       actorId: 'SYNTH-REVIEWER',
       occurredAt: '2026-07-28T13:00:00.000Z',
       note: 'leadership asked to revisit',
@@ -519,16 +517,18 @@ describe('queue filters', () => {
 
 describe('in-memory adapter honors the repository contract', () => {
   it('lists only queue-eligible items and applies coupled mutations', async () => {
+    const eligible = queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-Q1' } });
     const repo = createMemoryQueueRepository([
-      queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-Q1' } }),
+      eligible,
       queueItem({ recordTypeState: 'out_of_scope', diagnostics: { sfOpportunityId: 'SYNTH-OPP-Q2' } }),
       queueItem({ linkStatus: 'active', diagnostics: { sfOpportunityId: 'SYNTH-OPP-Q3' } }),
     ]);
     const queue = await repo.listQueue();
     expect(queue.map((i) => i.diagnostics.sfOpportunityId)).toEqual(['SYNTH-OPP-Q1']);
 
+    // Repository methods key on the opaque internal review UUID.
     const result = await repo.approveReview(
-      'SYNTH-OPP-Q1',
+      eligible.reviewId!,
       { channelId: 'SYNTH-CHANNEL-1' },
       { actorId: 'SYNTH-REVIEWER', occurredAt: CTX.occurredAt },
     );
@@ -539,11 +539,10 @@ describe('in-memory adapter honors the repository contract', () => {
   });
 
   it('a failed action mutates nothing and records no audit event', async () => {
-    const repo = createMemoryQueueRepository([
-      queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-Q1' } }),
-    ]);
+    const item = queueItem({ diagnostics: { sfOpportunityId: 'SYNTH-OPP-Q1' } });
+    const repo = createMemoryQueueRepository([item]);
     const result = await repo.approveReview(
-      'SYNTH-OPP-Q1',
+      item.reviewId!,
       { channelId: '' },
       { actorId: 'SYNTH-REVIEWER', occurredAt: CTX.occurredAt },
     );

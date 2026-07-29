@@ -63,6 +63,12 @@ export interface QueueDiagnostics {
 export type QueueLinkStatus = 'none' | 'active' | 'retired';
 
 export interface OpportunityQueueItem {
+  // The opaque internal review identity (sf_opportunity_reviews.id UUID).
+  // This is the ONLY public identifier for a review: API routes and
+  // repository methods key on it, never on the Salesforce Opportunity ID,
+  // sf_opportunity_id, opportunity name, or account name. Null only when no
+  // review row exists (such records never appear on any queue surface).
+  reviewId: string | null;
   opportunityName: string;
   accountName: string | null;
   recordTypeState: QueueRecordTypeState;

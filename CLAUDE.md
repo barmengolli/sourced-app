@@ -762,4 +762,9 @@ Do not turn a focused task into one of these projects without approval:
   reconsider requires a reason and reuses the `reopened` audit event). It
   runs only against a synthetic in-memory adapter in tests. Live wiring
   requires the authenticated server-side review API; the browser must never
-  query the protected `sf_opportunity_*` tables directly.
+  query the protected `sf_opportunity_*` tables directly. The portable API
+  contract, capability authorization, and framework-neutral service layer
+  for that API exist under `src/server/` (Bite 5C2B2A,
+  `docs/opportunity-queue-api.md`): no runtime, framework, PingOne login,
+  or database connection yet, and server code never imports React, Vite
+  env, browser storage, Supabase, or test principals.

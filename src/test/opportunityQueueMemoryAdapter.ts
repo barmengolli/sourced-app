@@ -26,6 +26,9 @@ import type { ReviewActionContext, ReviewMutationResult } from '../lib/opportuni
 export interface MemoryAdapterOptions {
   // Simulate a backend failure for UI error-state tests.
   failListWith?: string;
+  // Synthetic Sourced deals for exact-link tests: dealId -> the Salesforce
+  // link evidence stored on that deal. The adapter compares SERVER-SIDE.
+  deals?: Record<string, { sfOpportunityId: string | null }>;
 }
 
 function toReviewCtx(ctx: QueueActionContext): ReviewActionContext {
@@ -50,8 +53,9 @@ export function createMemoryQueueRepository(
   }));
   const auditLog: unknown[] = [];
 
-  const find = (sfOpportunityId: string): OpportunityQueueItem | undefined =>
-    items.find((i) => i.diagnostics.sfOpportunityId === sfOpportunityId);
+  // All lookups key on the opaque internal review identity.
+  const find = (reviewId: string): OpportunityQueueItem | undefined =>
+    items.find((i) => i.reviewId === reviewId);
 
   const applyResult = (
     item: OpportunityQueueItem,
@@ -78,38 +82,43 @@ export function createMemoryQueueRepository(
       const eligible = items.filter((item) => classifyNotSelectedMembership(item).inQueue);
       return filters ? filterQueueItems(eligible, filters) : eligible;
     },
-    async getQueueItem(sfOpportunityId: string) {
-      return find(sfOpportunityId) ?? null;
+    async getQueueItem(reviewId: string) {
+      return find(reviewId) ?? null;
     },
-    async approveReview(sfOpportunityId, decision, ctx) {
-      const item = find(sfOpportunityId);
+    async approveReview(reviewId, decision, ctx) {
+      const item = find(reviewId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
       return applyResult(item, proposeApproval(item, decision, toReviewCtx(ctx)));
     },
-    async ignoreReview(sfOpportunityId, ctx) {
-      const item = find(sfOpportunityId);
+    async ignoreReview(reviewId, ctx) {
+      const item = find(reviewId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
       return applyResult(item, proposeIgnore(item, toReviewCtx(ctx)));
     },
-    async blockReview(sfOpportunityId, ctx) {
-      const item = find(sfOpportunityId);
+    async blockReview(reviewId, ctx) {
+      const item = find(reviewId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
       return applyResult(item, proposeBlock(item, toReviewCtx(ctx)));
     },
-    async reopenReview(sfOpportunityId, ctx) {
-      const item = find(sfOpportunityId);
+    async reopenReview(reviewId, ctx) {
+      const item = find(reviewId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
       return applyResult(item, proposeReopen(item, toReviewCtx(ctx)));
     },
-    async reconsiderReview(sfOpportunityId, ctx) {
-      const item = find(sfOpportunityId);
+    async reconsiderReview(reviewId, ctx) {
+      const item = find(reviewId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
       return applyResult(item, proposeReconsider(item, toReviewCtx(ctx)));
     },
-    async linkExactDeal(sfOpportunityId, candidateSfOpportunityId, ctx) {
-      const item = find(sfOpportunityId);
+    async linkExactDeal(reviewId, dealId, ctx) {
+      const item = find(reviewId);
       if (!item) return { ok: false, reasons: ['unknown opportunity'] };
-      return applyResult(item, proposeExactLink(item, candidateSfOpportunityId, toReviewCtx(ctx)));
+      // Server-side evidence resolution: the staged Salesforce Opportunity
+      // ID comes from the review's item; the candidate value comes from the
+      // deal registry, never from the caller.
+      const deal = options.deals?.[dealId];
+      if (!deal) return { ok: false, reasons: ['unknown deal'] };
+      return applyResult(item, proposeExactLink(item, deal.sfOpportunityId, toReviewCtx(ctx)));
     },
   };
 }

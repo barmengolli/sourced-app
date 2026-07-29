@@ -119,10 +119,15 @@ discovery/search feature, which is separate, unapproved work.
 ## Exact-ID-only linking
 
 An existing Sourced deal can be linked automatically only by an exact,
-nonblank, identical Salesforce Opportunity ID on both sides. Name or
-account similarity may be displayed as a suggestion only and requires a
-future explicit human decision; a similarity method can never produce a
-link.
+nonblank, identical Salesforce Opportunity ID on both sides, and the
+comparison happens SERVER-SIDE: the caller supplies only the opaque
+internal review id and the target Sourced deal id, and the repository
+resolves both stored Salesforce values itself (the client is never
+trusted to claim two Salesforce IDs match). Repository methods key on the
+internal review identity (`sf_opportunity_reviews.id` UUID), never on
+Salesforce IDs or names. Name or account similarity may be displayed as a
+suggestion only and requires a future explicit human decision; a
+similarity method can never produce a link.
 
 ## Why direct browser access is prohibited
 

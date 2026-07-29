@@ -8,6 +8,12 @@ import type { ReviewProjection } from '../../lib/opportunityImportStorage';
 
 let seq = 0;
 
+// Deterministic synthetic UUID for the internal review identity
+// (sf_opportunity_reviews.id). Version-4 shaped, obviously fake.
+export function synthReviewUuid(n: number): string {
+  return `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+}
+
 export function queueItem(over: Partial<OpportunityQueueItem> = {}): OpportunityQueueItem {
   seq += 1;
   const review: ReviewProjection | null =
@@ -15,6 +21,7 @@ export function queueItem(over: Partial<OpportunityQueueItem> = {}): Opportunity
       ? { reviewState: 'pending', issueCodes: ['missing_channel'], channelId: null, leadId: null }
       : over.review;
   return {
+    reviewId: review ? synthReviewUuid(seq) : null,
     opportunityName: `Synthetic Deal ${seq}`,
     accountName: `Synthetic Account ${seq}`,
     recordTypeState: 'hpp' as QueueRecordTypeState,

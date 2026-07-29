@@ -157,7 +157,9 @@ export default function OpportunityQueueManager({
   }, []);
 
   const visible = useMemo(() => filterQueueItems(items, filters), [items, filters]);
-  const selected = visible.find((i) => i.diagnostics.sfOpportunityId === selectedId) ?? null;
+  // Selection and every repository call key on the opaque internal review
+  // identity, never the Salesforce Opportunity ID.
+  const selected = visible.find((i) => i.reviewId === selectedId) ?? null;
 
   const ctx = useCallback(
     (actionNote?: string) => ({
@@ -403,9 +405,9 @@ export default function OpportunityQueueManager({
             <tbody>
               {visible.map((item) => (
                 <tr
-                  key={item.diagnostics.sfOpportunityId}
+                  key={item.reviewId ?? item.diagnostics.sfOpportunityId}
                   onClick={() => {
-                    setSelectedId(item.diagnostics.sfOpportunityId);
+                    setSelectedId(item.reviewId);
                     setActionErrors([]);
                     setActionMessage(null);
                   }}
@@ -486,7 +488,7 @@ export default function OpportunityQueueManager({
               onSubmit={(e) => {
                 e.preventDefault();
                 void runAction('Reconsider', () =>
-                  repository.reconsiderReview(selected.diagnostics.sfOpportunityId, ctx(note)),
+                  repository.reconsiderReview(selected.reviewId ?? '', ctx(note)),
                 );
               }}
             >
@@ -521,7 +523,7 @@ export default function OpportunityQueueManager({
                 type="button"
                 onClick={() =>
                   void runAction('Reopen', () =>
-                    repository.reopenReview(selected.diagnostics.sfOpportunityId, ctx()),
+                    repository.reopenReview(selected.reviewId ?? '', ctx()),
                   )
                 }
                 className={chipBase + chipOff}
@@ -549,7 +551,7 @@ export default function OpportunityQueueManager({
                 e.preventDefault();
                 void runAction('Approval', () =>
                   repository.approveReview(
-                    selected.diagnostics.sfOpportunityId,
+                    selected.reviewId ?? '',
                     { channelId, leadId: leadId.trim() || null },
                     ctx(),
                   ),
@@ -605,7 +607,7 @@ export default function OpportunityQueueManager({
                   type="button"
                   onClick={() =>
                     void runAction('Ignore', () =>
-                      repository.ignoreReview(selected.diagnostics.sfOpportunityId, ctx(note)),
+                      repository.ignoreReview(selected.reviewId ?? '', ctx(note)),
                     )
                   }
                   className={chipBase + chipOff}
@@ -616,7 +618,7 @@ export default function OpportunityQueueManager({
                   type="button"
                   onClick={() =>
                     void runAction('Block', () =>
-                      repository.blockReview(selected.diagnostics.sfOpportunityId, ctx(note)),
+                      repository.blockReview(selected.reviewId ?? '', ctx(note)),
                     )
                   }
                   className={chipBase + chipOff}
