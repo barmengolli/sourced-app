@@ -46,6 +46,11 @@ interface FunnelTableProps {
   // non-editable as a guard against accidental clicks. Computed Lead/MQL
   // actuals and the attribution-badge modal flow are unaffected.
   editsLocked?: boolean;
+  // Bite 4E: clicking a Lead/MQL actual opens the touch drilldown.
+  onLeadCellClick?: (channelId: string, stage: 'lead' | 'mql') => void;
+  // Bite 4E: distinct contacts underlying the Lead/MQL counts, shown as a
+  // secondary row under the totals (never a channel-row denominator).
+  uniqueContacts?: { lead: number; mql: number } | null;
 }
 
 export function attributionCellKey(
@@ -303,6 +308,7 @@ interface RowCellsProps {
   // the ACT cell renders as a clickable badge that calls onAttributionClick.
   attributionCounts?: Partial<Record<AttributionStageKey, number>>;
   onAttributionClick?: (stage: AttributionStageKey) => void;
+  onLeadStageClick?: (stage: 'lead' | 'mql') => void;
   focusedCell: FocusedCell | null;
   onCellFocus: (rowId: string, colIdx: number) => void;
   editsLocked?: boolean;
@@ -323,6 +329,7 @@ function RowCells({
   manualActualsEditable,
   attributionCounts,
   onAttributionClick,
+  onLeadStageClick,
   focusedCell,
   onCellFocus,
   editsLocked = false,
@@ -357,6 +364,14 @@ function RowCells({
         // on an attribution stage; the manualActualsEditable gate
         // only governs the alternative numeric-input rendering below.
         const showAttribBadge = attribCount > 0 && isAttributionStage(stage);
+        // Bite 4E: Lead/MQL actuals are computed from touches and open the
+        // touch drilldown when clicked (memberships, not editability).
+        const showTouchBadge =
+          !isAttributionStage(stage) &&
+          (stage === 'lead' || stage === 'mql') &&
+          Boolean(onLeadStageClick) &&
+          c.actual !== null &&
+          c.actual > 0;
 
         const baseCol = baseColForStage(idx);
         const projCol = baseCol;
@@ -387,7 +402,18 @@ function RowCells({
               onCellFocus={() => onCellFocus(rowId, projCol)}
               locked={editsLocked}
             />
-            {showAttribBadge ? (
+            {showTouchBadge ? (
+              <TouchBadgeCell
+                key={`${stage}-act`}
+                count={c.actual ?? 0}
+                stage={stage as 'lead' | 'mql'}
+                onClick={() => {
+                  onCellFocus(rowId, actCol);
+                  onLeadStageClick?.(stage as 'lead' | 'mql');
+                }}
+                crosshair={crosshairFor(focusedCell, rowId, actCol)}
+              />
+            ) : showAttribBadge ? (
               <AttributionBadgeCell
                 key={`${stage}-act`}
                 count={attribCount}
@@ -446,6 +472,36 @@ function RowCells({
   );
 }
 
+function TouchBadgeCell({
+  count,
+  stage,
+  onClick,
+  crosshair,
+}: {
+  count: number;
+  stage: 'lead' | 'mql';
+  onClick: () => void;
+  crosshair: CrosshairState;
+}) {
+  return (
+    <td
+      className={
+        'px-2 py-1 text-xs tabular-nums text-right border-r border-border last:border-r-0' +
+        crosshairClasses(crosshair)
+      }
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        className="inline-flex items-center justify-center min-w-[2rem] px-1.5 py-0.5 rounded text-charcoal font-semibold text-xs hover:bg-indigo/10 transition-colors"
+        title={`${count} ${stage === 'lead' ? 'membership' : 'MQL membership'} count${count === 1 ? '' : 's'}, click to view the underlying touches`}
+      >
+        {count}
+      </button>
+    </td>
+  );
+}
+
 function AttributionBadgeCell({
   count,
   onClick,
@@ -481,6 +537,8 @@ export default function FunnelTable({
   onActualChange,
   attributionsByCell,
   onAttributionCellClick,
+  onLeadCellClick,
+  uniqueContacts,
   editsLocked = false,
 }: FunnelTableProps) {
   const channelById = new Map(channels.map((c) => [c.id, c] as const));
@@ -534,6 +592,13 @@ export default function FunnelTable({
 
   return (
     <div className="flex-1 min-w-0 border border-border rounded-lg bg-bg overflow-x-auto">
+      {uniqueContacts && (
+        <p className="px-3 py-1.5 text-[11px] text-slate-muted border-b border-border">
+          Lead and MQL channel counts are campaign memberships and intentionally
+          overlap: a contact in several campaigns counts in each. Totals sum
+          memberships; the unique contacts line below shows distinct people.
+        </p>
+      )}
       <table className="w-full text-xs border-collapse">
         <thead>
           {/* Stage spanner row */}
@@ -729,6 +794,11 @@ export default function FunnelTable({
                   onAttributionClick={(stage) =>
                     onAttributionCellClick?.(row.channelId, stage)
                   }
+                  onLeadStageClick={
+                    onLeadCellClick
+                      ? (stage) => onLeadCellClick(row.channelId, stage)
+                      : undefined
+                  }
                   focusedCell={focusedCell}
                   onCellFocus={handleCellFocus}
                   editsLocked={editsLocked}
@@ -751,6 +821,42 @@ export default function FunnelTable({
               onCellFocus={handleCellFocus}
             />
           </tr>
+          {uniqueContacts && (
+            <tr className="border-t border-border bg-muted/60 text-slate-muted">
+              <td className="px-3 py-1 text-[11px] italic border-r border-border">
+                Unique contacts
+              </td>
+              {FUNNEL_STAGES.map((stage) => {
+                const span = stage === 'lead' ? 3 : 4;
+                if (stage === 'lead' || stage === 'mql') {
+                  return (
+                    <>
+                      <td key={`${stage}-uc-proj`} className="border-r border-border" />
+                      <td
+                        key={`${stage}-uc-act`}
+                        className="px-2 py-1 text-[11px] tabular-nums text-right italic border-r border-border"
+                        title="Distinct contacts underlying the memberships summed above"
+                      >
+                        {stage === 'lead' ? uniqueContacts.lead : uniqueContacts.mql}
+                      </td>
+                      <td
+                        key={`${stage}-uc-rest`}
+                        colSpan={span - 2}
+                        className="border-r border-border"
+                      />
+                    </>
+                  );
+                }
+                return (
+                  <td
+                    key={`${stage}-uc`}
+                    colSpan={span}
+                    className="border-r border-border last:border-r-0"
+                  />
+                );
+              })}
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
