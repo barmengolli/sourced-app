@@ -3,9 +3,6 @@ import type { PageKey } from '../App';
 export interface SidebarChild {
   key: PageKey;
   label: string;
-  // When true, render a small "Beta" pill next to the label in the
-  // sidebar. Signals to readers that the surface isn't finalized.
-  beta?: boolean;
 }
 
 export interface SidebarSection {
@@ -42,8 +39,9 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
       { key: 'funnel-dashboard', label: 'Leads & MQLs' },
       { key: 'funnel-velocity', label: 'Opportunities' },
       { key: 'funnel-events', label: 'Events' },
-      { key: 'funnel-spend', label: 'Spend', beta: true },
-      { key: 'funnel-compare', label: 'Compare', beta: true },
+      { key: 'funnel-spend', label: 'Spend' },
+      // Compare is HIDDEN (not deleted): the funnel-compare PageKey, its
+      // route case, and FunnelComparePage.tsx stay for a possible return.
     ],
   },
   {
@@ -55,7 +53,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     lastTabStorageKey: 'sourced.sixsense.lastTab',
     expandedStorageKey: 'sourced.sidebar.expanded.sixsense',
     children: [
-      { key: 'sixsense-dashboard', label: 'Dashboard', beta: true },
+      { key: 'sixsense-dashboard', label: 'Dashboard' },
       { key: 'sixsense-import', label: 'Import' },
     ],
   },
@@ -66,7 +64,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     lastTabStorageKey: 'sourced.bdrquota.lastTab',
     expandedStorageKey: 'sourced.sidebar.expanded.bdrquota',
     children: [
-      { key: 'bdr-quota-dashboard', label: 'Dashboard', beta: true },
+      { key: 'bdr-quota-dashboard', label: 'Dashboard' },
       { key: 'bdr-quota-quotas', label: 'Quotas' },
     ],
   },
@@ -88,7 +86,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     defaultChild: 'linkedin-dashboard',
     lastTabStorageKey: 'sourced.linkedin.lastTab',
     expandedStorageKey: 'sourced.sidebar.expanded.linkedin',
-    children: [{ key: 'linkedin-dashboard', label: 'Dashboard', beta: true }],
+    children: [{ key: 'linkedin-dashboard', label: 'Dashboard' }],
   },
   {
     id: 'campaigns',
@@ -97,7 +95,7 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
     lastTabStorageKey: 'sourced.campaigns.lastTab',
     expandedStorageKey: 'sourced.sidebar.expanded.campaigns',
     children: [
-      { key: 'campaigns-overview', label: 'Overview', beta: true },
+      { key: 'campaigns-overview', label: 'Overview' },
       { key: 'campaigns-tags', label: 'Tags' },
     ],
   },
@@ -111,6 +109,19 @@ export const UTILITY_PAGES: SidebarChild[] = [
   { key: 'funnel-import', label: 'Funnel Import' },
   { key: 'settings', label: 'Settings' },
 ];
+
+// Resolve where a section-label click should land: the stored last-visited
+// child when it is still one of the section's children, else the default.
+// Guards stale localStorage values pointing at hidden or retired tabs
+// (e.g. a stored 'funnel-compare' after the Compare tab was hidden).
+export function resolveSectionTarget(
+  section: SidebarSection,
+  storedLastTab: PageKey | null,
+): PageKey {
+  return storedLastTab && section.children.some((c) => c.key === storedLastTab)
+    ? storedLastTab
+    : section.defaultChild;
+}
 
 // Quick lookup: which section, if any, owns this PageKey?
 export function sectionForPage(page: PageKey): SidebarSection | null {

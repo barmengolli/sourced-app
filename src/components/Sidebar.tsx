@@ -3,6 +3,7 @@ import type { PageKey } from '../App';
 import {
   SIDEBAR_SECTIONS,
   UTILITY_PAGES,
+  resolveSectionTarget,
   type SidebarChild,
   type SidebarSection,
 } from '../constants/sidebar';
@@ -74,12 +75,10 @@ function SidebarSectionView({
 
   const handleParentClick = () => {
     // Click the parent label = jump to whatever sub-tab the user was last on,
-    // falling back to the section's default child.
+    // falling back to the section's default child. resolveSectionTarget
+    // guards stale stored values pointing at hidden tabs.
     const last = readJson<PageKey | null>(section.lastTabStorageKey, null);
-    const target = last && section.children.some((c) => c.key === last)
-      ? last
-      : section.defaultChild;
-    onNavigate(target);
+    onNavigate(resolveSectionTarget(section, last));
   };
 
   return (
@@ -133,7 +132,6 @@ function SidebarSectionView({
               >
                 <span className="flex items-center gap-1.5">
                   {child.label}
-                  {child.beta && <BetaPill active={active} />}
                 </span>
               </button>
             );
@@ -165,28 +163,7 @@ function UtilityNavButton({ child, page, onNavigate }: UtilityNavButtonProps) {
     >
       <span className="flex items-center gap-1.5">
         {child.label}
-        {child.beta && <BetaPill active={active} />}
       </span>
     </button>
-  );
-}
-
-// Small "Beta" pill rendered next to a sidebar child label. Reuses
-// the app's warning token so it reads as caution without clashing
-// with the indigo primary. The active variant tones the pill down
-// against the indigo-on-white inverted state of the selected row.
-function BetaPill({ active }: { active: boolean }) {
-  const cls = active
-    ? 'bg-white/20 text-white'
-    : 'bg-warning/15 text-warning';
-  return (
-    <span
-      className={
-        'text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded ' +
-        cls
-      }
-    >
-      Beta
-    </span>
   );
 }
