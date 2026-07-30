@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLeads } from '../hooks/useLeads';
+import { useLeadCampaignTouches } from '../hooks/useLeadCampaignTouches';
 import { useChannels } from '../hooks/useChannels';
 import { descendantIds } from '../hooks/useChannelMutations';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
@@ -18,6 +19,7 @@ import FunnelTable, {
 } from '../components/funnel/FunnelTable';
 import ConversionsPanel from '../components/funnel/ConversionsPanel';
 import PeriodSelector from '../components/funnel/PeriodSelector';
+import TouchDrilldownPanel from '../components/funnel/TouchDrilldownPanel';
 import CreateHPPModal from '../components/attribution/CreateHPPModal';
 import OpportunitiesListModal from '../components/attribution/OpportunitiesListModal';
 import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
@@ -32,6 +34,11 @@ interface FunnelDataEntryPageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+}
+
+interface TouchDrilldownQuery {
+  channelId: string;
+  stage: 'lead' | 'mql';
 }
 
 interface ListModalQuery {
@@ -56,6 +63,7 @@ export default function FunnelDataEntryPage({
   onRegionsChange,
 }: FunnelDataEntryPageProps) {
   const { leads } = useLeads();
+  const { touches } = useLeadCampaignTouches();
   const channels = useChannels();
   const projectionsHook = useFunnelProjections();
   const actualsHook = useFunnelActuals();
@@ -117,6 +125,7 @@ export default function FunnelDataEntryPage({
     () =>
       computeGrid({
         leads,
+        touches,
         channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
@@ -127,6 +136,7 @@ export default function FunnelDataEntryPage({
       }),
     [
       leads,
+      touches,
       visibleChannels,
       projectionsHook.projections,
       actualsHook.actuals,
@@ -178,6 +188,7 @@ export default function FunnelDataEntryPage({
 
   const [createOpen, setCreateOpen] = useState(false);
   const [listQuery, setListQuery] = useState<ListModalQuery | null>(null);
+  const [touchQuery, setTouchQuery] = useState<TouchDrilldownQuery | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
 
   // Lock for the manual-actual columns (HPP/Opp/Pursuit/CloseWon on leaves).
@@ -332,6 +343,8 @@ export default function FunnelDataEntryPage({
             )
           }
           attributionsByCell={attributionsByCell}
+          uniqueContacts={grid.uniqueContacts}
+          onLeadCellClick={(channelId, stage) => setTouchQuery({ channelId, stage })}
           onAttributionCellClick={(channelId, stage) => {
             // Parent rows: open the rollup. descendantIds includes the
             // root itself, so the filter set spans parent + every
@@ -375,6 +388,21 @@ export default function FunnelDataEntryPage({
             setCreateOpen(false);
             setEditId(target.id);
           }}
+        />
+      )}
+
+      {touchQuery && (
+        <TouchDrilldownPanel
+          stage={touchQuery.stage}
+          channelLabel={channelById.get(touchQuery.channelId)?.name ?? 'Channel'}
+          channelIds={[...descendantIds(channels, touchQuery.channelId)]}
+          touches={touches}
+          leads={leads}
+          channels={channels}
+          year={year}
+          filter={filter}
+          regions={regions}
+          onClose={() => setTouchQuery(null)}
         />
       )}
 

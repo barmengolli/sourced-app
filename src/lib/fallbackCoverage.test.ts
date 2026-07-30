@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { computeGrid, computeMonthlyLeadsForYear } from './compute';
 import type { RegionKey } from '../constants/regions';
 import { channel, lead, attribution } from '../test/fixtures/factories';
+import { seedTouchesFor } from '../test/fixtures/factories';
 import type { FunnelActual } from '../types/db';
 
 function manualLead(over: Partial<FunnelActual>): FunnelActual {
@@ -39,6 +40,7 @@ describe('computeGrid — M3 manual fallback vs source coverage', () => {
     const manual = [manualLead({ channel_id: 'c1', actual: 30 })];
     const grid = computeGrid({
       leads,
+      touches: seedTouchesFor(leads),
       channels: [c],
       projections: [],
       manualActuals: manual,
@@ -58,6 +60,7 @@ describe('computeGrid — M3 manual fallback vs source coverage', () => {
     const c = channel({ id: 'c1' });
     const grid = computeGrid({
       leads: [],
+      touches: [],
       channels: [c],
       projections: [],
       manualActuals: [manualLead({ channel_id: 'c1', actual: 30 })],
@@ -81,6 +84,7 @@ describe('computeGrid — M3 manual fallback vs source coverage', () => {
     ];
     const grid = computeGrid({
       leads: [],
+      touches: [],
       channels: [c],
       projections: [],
       manualActuals: [manualLead({ channel_id: 'c1', stage_key: 'opp', actual: 5 })],
@@ -105,6 +109,7 @@ describe('computeMonthlyLeadsForYear — M4 quarterly fallback', () => {
     const leads = [lead({ source_channel_id: 'c1', region: 'NA', marketing_sourced_date: '2026-01-15' })];
     const result = computeMonthlyLeadsForYear({
       leads,
+      touches: seedTouchesFor(leads),
       channels: [c],
       year: 2026,
       regions: new Set<RegionKey>(['NA', 'EMEA cont & LATAM', 'UK&IRE, ME, Japan', 'Other']),
@@ -124,6 +129,7 @@ describe('computeMonthlyLeadsForYear — M4 quarterly fallback', () => {
     // separate labeled fallback, and monthTotals stays all-zero.
     const result = computeMonthlyLeadsForYear({
       leads: [],
+      touches: [],
       channels: [c],
       year: 2026,
       regions: undefined as unknown as Set<RegionKey>,
@@ -138,6 +144,7 @@ describe('computeMonthlyLeadsForYear — M4 quarterly fallback', () => {
     const leads = [lead({ source_channel_id: 'c1', region: 'NA', marketing_sourced_date: '2026-01-15' })];
     const result = computeMonthlyLeadsForYear({
       leads,
+      touches: seedTouchesFor(leads),
       channels: [c],
       year: 2026,
       regions: undefined as unknown as Set<RegionKey>,

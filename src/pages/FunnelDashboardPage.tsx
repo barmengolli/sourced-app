@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useLeads } from '../hooks/useLeads';
+import { useLeadCampaignTouches } from '../hooks/useLeadCampaignTouches';
 import { useChannels } from '../hooks/useChannels';
 import { useFunnelProjections } from '../hooks/useFunnelProjections';
 import { useFunnelActuals } from '../hooks/useFunnelActuals';
@@ -45,6 +46,7 @@ export default function FunnelDashboardPage({
   // work; remove this line when the card is restored.
   void FunnelSankeyView;
   const { leads, loading: leadsLoading } = useLeads();
+  const { touches } = useLeadCampaignTouches();
   const channels = useChannels();
   const projectionsHook = useFunnelProjections();
   const actualsHook = useFunnelActuals();
@@ -102,6 +104,7 @@ export default function FunnelDashboardPage({
     () =>
       computeGrid({
         leads,
+        touches,
         channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
@@ -112,6 +115,7 @@ export default function FunnelDashboardPage({
       }),
     [
       leads,
+      touches,
       visibleChannels,
       projectionsHook.projections,
       actualsHook.actuals,
@@ -135,12 +139,13 @@ export default function FunnelDashboardPage({
     () =>
       computeMonthlyLeadsForYear({
         leads,
+        touches,
         channels: visibleChannels,
         year,
         regions,
         manualActuals: actualsHook.actuals,
       }),
-    [leads, visibleChannels, year, regions, actualsHook.actuals],
+    [leads, touches, visibleChannels, year, regions, actualsHook.actuals],
   );
 
   // Prior-year totals for the YoY overlay on the Total Leads per Month
@@ -156,12 +161,13 @@ export default function FunnelDashboardPage({
     () =>
       computeMonthlyLeadsForYear({
         leads,
+        touches,
         channels: priorYearChannels,
         year: year - 1,
         regions,
         manualActuals: actualsHook.actuals,
       }),
-    [leads, priorYearChannels, year, regions, actualsHook.actuals],
+    [leads, touches, priorYearChannels, year, regions, actualsHook.actuals],
   );
 
   // Per-quarter totals across the selected year, for the trend chart. Always
@@ -171,6 +177,7 @@ export default function FunnelDashboardPage({
       quarter: q,
       totals: computeGrid({
         leads,
+        touches,
         channels: visibleChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
@@ -182,6 +189,7 @@ export default function FunnelDashboardPage({
     }));
   }, [
     leads,
+    touches,
     visibleChannels,
     projectionsHook.projections,
     actualsHook.actuals,
@@ -198,6 +206,7 @@ export default function FunnelDashboardPage({
       quarter: q,
       totals: computeGrid({
         leads,
+        touches,
         channels: priorYearChannels,
         projections: projectionsHook.projections,
         manualActuals: actualsHook.actuals,
@@ -209,6 +218,7 @@ export default function FunnelDashboardPage({
     }));
   }, [
     leads,
+    touches,
     priorYearChannels,
     projectionsHook.projections,
     actualsHook.actuals,

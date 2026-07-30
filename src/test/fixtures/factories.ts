@@ -7,6 +7,7 @@ import type {
   Channel,
   CampaignCost,
   Lead,
+  LeadCampaignTouchRow,
   Attribution,
   AttributionTouch,
   StageHistoryEntry,
@@ -108,4 +109,40 @@ export function touch(over: Partial<AttributionTouch> = {}): AttributionTouch {
     created_at: '2026-02-15T00:00:00Z',
     ...over,
   };
+}
+
+export function touchRow(over: Partial<LeadCampaignTouchRow> = {}): LeadCampaignTouchRow {
+  return {
+    id: over.id ?? id('touch'),
+    lead_id: over.lead_id ?? id('lead'),
+    campaign_member_id: null,
+    campaign_id: null,
+    channel_id: null,
+    touch_date: '2026-02-15',
+    parent_campaign: null,
+    sub_campaign: null,
+    observed_at: '2026-07-01T00:00:00Z',
+    source: 'import',
+    raw: {},
+    created_at: '2026-07-01T00:00:00Z',
+    ...over,
+  };
+}
+
+// Seed-equivalent touches for a single-membership world: exactly what the
+// 4C backfill produced (one touch per lead from its primary source). Lets
+// pre-4E tests keep their expectations by feeding the touch-based counting
+// the same information the lead rows used to carry.
+export function seedTouchesFor(leads: Lead[]): LeadCampaignTouchRow[] {
+  return leads
+    .filter((l) => l.source_channel_id || l.marketing_sourced_date)
+    .map((l) =>
+      touchRow({
+        id: `seed-${l.id}`,
+        lead_id: l.id,
+        channel_id: l.source_channel_id ?? null,
+        touch_date: l.marketing_sourced_date ?? null,
+        source: 'backfill',
+      }),
+    );
 }

@@ -8,6 +8,7 @@ import type {
   FunnelActual,
   FunnelProjection,
   Lead,
+  LeadCampaignTouchRow,
   PeriodIndex,
 } from '../types/db';
 import {
@@ -63,10 +64,21 @@ export interface ComputedGrid {
   rows: ComputedRow[];
   totals: Record<FunnelStageKey, CellValues>;
   unassignedLeadCount: number;
+  // Bite 4E: distinct leads underlying the Lead and MQL channel counts in
+  // the selected scope (the 4A uniquePeople). Displayed as a secondary
+  // line; NEVER a channel-row denominator. Channel counts are memberships
+  // and intentionally overlap, so totals >= unique by design.
+  uniqueContacts: { lead: number; mql: number };
 }
 
 interface ComputeInput {
   leads: Lead[];
+  // Bite 4E: campaign membership touches are the counting basis for the
+  // Lead and MQL stages (docs/lead-multi-attribution-program.md section 4).
+  // One row per membership; a multi-campaign contact counts in EACH
+  // touched channel. Required so no caller silently keeps the old
+  // one-channel-per-lead counting.
+  touches: LeadCampaignTouchRow[];
   channels: Channel[];
   projections: FunnelProjection[];
   manualActuals: FunnelActual[];
@@ -102,7 +114,8 @@ function matchesPeriod(
 }
 
 // Find the earliest stage_history entry whose stage === 'mql'. Returns the
-// entered_at ISO string, or null if the lead never reached MQL.
+// entered_at ISO string, or null if the lead never reached MQL. Still used
+// by the weekly/monthly/Sankey surfaces (audited in Bite 4F).
 function firstMqlDate(lead: Lead): string | null {
   let best: string | null = null;
   for (const e of lead.stage_history ?? []) {
@@ -112,9 +125,24 @@ function firstMqlDate(lead: Lead): string | null {
   return best;
 }
 
+// Bite 4E: EVERY 'mql' entry is a qualification event (one entry per
+// qualification cycle; demotion and re-qualification are separate events,
+// program doc section 1.6). Exact same-date duplicates are collapsed
+// defensively (dirty double-writes are data noise, not two cycles); two
+// entries on different dates are two events.
+export function mqlEventDates(lead: Lead): string[] {
+  const dates = new Set<string>();
+  for (const e of lead.stage_history ?? []) {
+    if (e.stage !== 'mql' || !e.entered_at) continue;
+    dates.add(e.entered_at);
+  }
+  return [...dates].sort();
+}
+
 export function computeGrid(input: ComputeInput): ComputedGrid {
   const {
     leads,
+    touches,
     channels,
     projections,
     manualActuals,
@@ -163,40 +191,66 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   //    The manual fallback below dedupes against sourceCoverage (built from raw
   //    records before filtering), not against what these loops land, so a
   //    filtered-to-zero source cell is still treated as covered.
+  //
+  //    Bite 4E (docs/lead-multi-attribution-program.md section 4): the Lead
+  //    and MQL stages count MEMBERSHIPS from lead_campaign_touches, not one
+  //    channel per lead. A multi-campaign contact counts in each touched
+  //    channel; channel counts intentionally overlap and the totals row
+  //    exceeds distinct contacts by design (uniqueContacts carries the
+  //    distinct-people line). The previous strict-cohort MQL rule is
+  //    RETIRED by locked business decision 1.2: an MQL event counts in
+  //    every channel the contact belongs to, bucketed solely by the
+  //    event's entered_at.
+  const leadById = new Map(leads.map((l) => [l.id, l] as const));
   let unassignedLeadCount = 0;
-  for (const l of leads) {
-    if (!matchesRegionFilter(l.region, regions)) continue;
-    // Lead stage: bucket by marketing_sourced_date.
-    const leadBucket = quarterOfIsoDate(l.marketing_sourced_date);
-    const leadInPeriod = Boolean(
-      leadBucket && matchesPeriod(leadBucket, year, filter),
-    );
-    if (leadInPeriod && leadBucket) {
-      if (!l.source_channel_id) {
-        unassignedLeadCount += 1;
-      } else {
-        const row = rowMap.get(l.source_channel_id);
-        if (row) {
-          const cell = row.cells.lead;
-          cell.actual = (cell.actual ?? 0) + 1;
-        }
-      }
+  const uniqueLeadIds = new Set<string>();
+  const uniqueMqlIds = new Set<string>();
+
+  // Lead stage: one count per touch, bucketed by touch_date. An undated
+  // touch cannot bucket into any period (surfaced as undated in the
+  // drilldown, never silently counted); a dated touch without a channel
+  // feeds the unassigned count exactly like channel-less leads used to.
+  for (const t of touches) {
+    const touchLead = leadById.get(t.lead_id);
+    if (!touchLead) continue; // orphan in-flight row; FK cascade prevents at rest
+    if (!matchesRegionFilter(touchLead.region, regions)) continue;
+    const bucket = quarterOfIsoDate(t.touch_date);
+    if (!bucket || !matchesPeriod(bucket, year, filter)) continue;
+    if (!t.channel_id) {
+      unassignedLeadCount += 1;
+      continue;
     }
-    // MQL stage: strict cohort. Only count when the lead's own
-    // marketing_sourced_date is ALSO in the selected period; otherwise
-    // the MQL belongs to a different cohort and contributes nothing
-    // to this period's MQL cell.
-    if (!leadInPeriod) continue;
-    const mqlIso = firstMqlDate(l);
-    if (mqlIso) {
-      const mqlBucket = quarterOfIsoDate(mqlIso);
-      if (mqlBucket && matchesPeriod(mqlBucket, year, filter)) {
-        if (l.source_channel_id) {
-          const row = rowMap.get(l.source_channel_id);
-          if (row) {
-            const cell = row.cells.mql;
-            cell.actual = (cell.actual ?? 0) + 1;
-          }
+    const row = rowMap.get(t.channel_id);
+    if (row) {
+      row.cells.lead.actual = (row.cells.lead.actual ?? 0) + 1;
+      uniqueLeadIds.add(t.lead_id);
+    }
+  }
+
+  // MQL stage: events x memberships. Membership is any touch with a
+  // channel, dated or not (an undated touch still proves the membership).
+  const channelsByLead = new Map<string, Set<string>>();
+  for (const t of touches) {
+    if (!t.channel_id) continue;
+    let set = channelsByLead.get(t.lead_id);
+    if (!set) {
+      set = new Set<string>();
+      channelsByLead.set(t.lead_id, set);
+    }
+    set.add(t.channel_id);
+  }
+  for (const l of leads) {
+    const memberships = channelsByLead.get(l.id);
+    if (!memberships || memberships.size === 0) continue;
+    if (!matchesRegionFilter(l.region, regions)) continue;
+    for (const iso of mqlEventDates(l)) {
+      const mqlBucket = quarterOfIsoDate(iso);
+      if (!mqlBucket || !matchesPeriod(mqlBucket, year, filter)) continue;
+      for (const cid of memberships) {
+        const row = rowMap.get(cid);
+        if (row) {
+          row.cells.mql.actual = (row.cells.mql.actual ?? 0) + 1;
+          uniqueMqlIds.add(l.id);
         }
       }
     }
@@ -288,15 +342,23 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   // empty source period is indistinguishable from an unimported one. Presence of
   // any eligible source record is the coverage signal for this cleanup.
   const sourceCoverage = new Set<string>();
+  // Bite 4E: lead/mql coverage comes from TOUCHES (pre-region, per stored
+  // quarter), preserving the M3 semantics: a channel-period with ANY
+  // touch-based signal uses touches; the manual fallback applies only
+  // where there is none.
+  for (const t of touches) {
+    if (!t.channel_id) continue;
+    const tb = quarterOfIsoDate(t.touch_date);
+    if (tb) sourceCoverage.add(attribKey(t.channel_id, tb.year, tb.quarter, 'lead'));
+  }
   for (const l of leads) {
-    if (!l.source_channel_id) continue;
-    const lb = quarterOfIsoDate(l.marketing_sourced_date);
-    if (lb) {
-      sourceCoverage.add(attribKey(l.source_channel_id, lb.year, lb.quarter, 'lead'));
-      const mqlIso = firstMqlDate(l);
-      const mb = mqlIso ? quarterOfIsoDate(mqlIso) : null;
-      if (mb) {
-        sourceCoverage.add(attribKey(l.source_channel_id, mb.year, mb.quarter, 'mql'));
+    const memberships = channelsByLead.get(l.id);
+    if (!memberships) continue;
+    for (const iso of mqlEventDates(l)) {
+      const mb = quarterOfIsoDate(iso);
+      if (!mb) continue;
+      for (const cid of memberships) {
+        sourceCoverage.add(attribKey(cid, mb.year, mb.quarter, 'mql'));
       }
     }
   }
@@ -445,7 +507,12 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     }
   }
 
-  return { rows: orderedRows, totals, unassignedLeadCount };
+  return {
+    rows: orderedRows,
+    totals,
+    unassignedLeadCount,
+    uniqueContacts: { lead: uniqueLeadIds.size, mql: uniqueMqlIds.size },
+  };
 }
 
 // Conversion %: numerator / denominator * 100. null if denom is 0 or null.
@@ -970,7 +1037,10 @@ export interface MonthlyLeadsForYear {
 }
 
 export interface ComputeMonthlyLeadsForYearInput {
+  // Bite 4E: membership touches are the lead-counting basis; leads supply
+  // region lookup only.
   leads: Lead[];
+  touches: LeadCampaignTouchRow[];
   channels: Channel[];
   year: number;
   regions: Set<RegionKey>;
@@ -985,8 +1055,9 @@ export interface ComputeMonthlyLeadsForYearInput {
 export function computeMonthlyLeadsForYear(
   input: ComputeMonthlyLeadsForYearInput,
 ): MonthlyLeadsForYear {
-  const { leads, channels, year, regions, manualActuals } = input;
+  const { leads, touches, channels, year, regions, manualActuals } = input;
   const channelById = new Map(channels.map((c) => [c.id, c] as const));
+  const leadById = new Map(leads.map((l) => [l.id, l] as const));
 
   // Accumulator: top-level channel id → 12-element month array. We
   // also need a quick lookup for channel name when materializing.
@@ -1004,31 +1075,33 @@ export function computeMonthlyLeadsForYear(
   const coverageKey = (cid: string, quarter: number): string =>
     `${cid}\x1f${quarter}`;
   const sourceCoverage = new Set<string>();
-  for (const lead of leads) {
-    if (!lead.source_channel_id) continue;
-    const lm = monthOfIsoDate(lead.marketing_sourced_date);
-    if (!lm || lm.year !== year) continue;
-    const topId = resolveTopLevelChannelId(lead.source_channel_id, channelById);
-    const quarter = Math.floor((lm.month - 1) / 3) + 1;
+  // Bite 4E: coverage comes from touches (pre-region), same M4 semantics.
+  for (const t of touches) {
+    if (!t.channel_id) continue;
+    const tm = monthOfIsoDate(t.touch_date);
+    if (!tm || tm.year !== year) continue;
+    const topId = resolveTopLevelChannelId(t.channel_id, channelById);
+    const quarter = Math.floor((tm.month - 1) / 3) + 1;
     sourceCoverage.add(coverageKey(topId, quarter));
   }
 
-  // Monthly bars: source-dated real leads only (region-filtered for display).
-  for (const lead of leads) {
-    if (!lead.source_channel_id) continue;
-    if (!matchesRegionFilter(lead.region, regions)) continue;
-    const leadMonth = monthOfIsoDate(lead.marketing_sourced_date);
-    if (!leadMonth || leadMonth.year !== year) continue;
-    const topId = resolveTopLevelChannelId(
-      lead.source_channel_id,
-      channelById,
-    );
+  // Monthly bars: dated membership touches (region filter via the touch's
+  // lead). A multi-campaign contact contributes one count per membership;
+  // undated touches cannot bucket into a month and are excluded here.
+  for (const t of touches) {
+    if (!t.channel_id) continue;
+    const touchLead = leadById.get(t.lead_id);
+    if (!touchLead) continue;
+    if (!matchesRegionFilter(touchLead.region, regions)) continue;
+    const touchMonth = monthOfIsoDate(t.touch_date);
+    if (!touchMonth || touchMonth.year !== year) continue;
+    const topId = resolveTopLevelChannelId(t.channel_id, channelById);
     let row = perChannel.get(topId);
     if (!row) {
       row = new Array<number>(12).fill(0);
       perChannel.set(topId, row);
     }
-    const idx = leadMonth.month - 1;
+    const idx = touchMonth.month - 1;
     row[idx] += 1;
     monthTotals[idx] += 1;
   }

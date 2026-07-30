@@ -36,6 +36,7 @@ describe('computeGrid — leadless, channel-attributed HPP', () => {
     ];
     const grid = computeGrid({
       leads: [],
+      touches: [],
       channels: [c],
       projections: [],
       manualActuals: [],
@@ -66,6 +67,7 @@ describe('computeGrid — leadless, channel-attributed HPP', () => {
     ];
     const grid = computeGrid({
       leads: [],
+      touches: [],
       channels: [c],
       projections: [],
       manualActuals: [],
