@@ -6,8 +6,10 @@ import {
   dedupeTouches,
   resolvePrimarySources,
   influenceReport,
+  touchRowToLeadCampaignTouch,
 } from './campaignAttribution';
 import type { LeadCampaignTouch } from './campaignAttribution';
+import type { LeadCampaignTouchRow } from '../types/db';
 
 function touch(over: Partial<LeadCampaignTouch> & Pick<LeadCampaignTouch, 'leadId' | 'campaignId'>): LeadCampaignTouch {
   return {
@@ -135,5 +137,68 @@ describe('primary source versus influence', () => {
   it('an empty population is missing, not zero', () => {
     expect(resolvePrimarySources([]).state).toBe('missing');
     expect(influenceReport([]).state).toBe('missing');
+  });
+});
+
+describe('touchRowToLeadCampaignTouch (Bite 4C storage mapping)', () => {
+  function row(over: Partial<LeadCampaignTouchRow> = {}): LeadCampaignTouchRow {
+    return {
+      id: 'row-1',
+      lead_id: 'lead-1',
+      campaign_member_id: 'CM-SYNTH-1',
+      campaign_id: 'CAMP-SYNTH-1',
+      channel_id: 'channel-1',
+      touch_date: '2026-03-01',
+      parent_campaign: 'Synthetic Parent',
+      sub_campaign: 'Synthetic Sub',
+      observed_at: '2026-03-02T00:00:00Z',
+      source: 'import',
+      raw: { note: 'synthetic' },
+      created_at: '2026-03-02T00:00:00Z',
+      ...over,
+    };
+  }
+
+  it('maps every storage field onto the 4A calculation type', () => {
+    const mapped = touchRowToLeadCampaignTouch(row());
+    expect(mapped).toEqual({
+      leadId: 'lead-1',
+      campaignMemberId: 'CM-SYNTH-1',
+      campaignId: 'CAMP-SYNTH-1',
+      channelId: 'channel-1',
+      touchDate: '2026-03-01',
+      parentCampaign: 'Synthetic Parent',
+      subCampaign: 'Synthetic Sub',
+      observedAt: '2026-03-02T00:00:00Z',
+      raw: { note: 'synthetic' },
+    });
+  });
+
+  it('a mapped membership row survives dedupeTouches unchanged', () => {
+    const result = dedupeTouches([touchRowToLeadCampaignTouch(row())]);
+    expect(result.touches).toHaveLength(1);
+    expect(result.rejected).toHaveLength(0);
+    expect(result.duplicatesRemoved).toBe(0);
+  });
+
+  it('a backfill seed row without campaign identity is rejected by dedupe, by design', () => {
+    // Seed rows are the mirrored primary source, not campaign memberships;
+    // the migration's own guard protects them instead of the natural key.
+    const seed = touchRowToLeadCampaignTouch(
+      row({ campaign_member_id: null, campaign_id: null, source: 'backfill' }),
+    );
+    expect(seed.campaignId).toBe('');
+    const result = dedupeTouches([seed]);
+    expect(result.touches).toHaveLength(0);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.issues.some((i) => i.kind === 'missing_campaign_identity')).toBe(true);
+  });
+
+  it('an Id-less report-export row dedupes on the natural key after mapping', () => {
+    const a = touchRowToLeadCampaignTouch(row({ id: 'row-a', campaign_member_id: null }));
+    const b = touchRowToLeadCampaignTouch(row({ id: 'row-b', campaign_member_id: null }));
+    const result = dedupeTouches([a, b]);
+    expect(result.touches).toHaveLength(1);
+    expect(result.duplicatesRemoved).toBe(1);
   });
 });

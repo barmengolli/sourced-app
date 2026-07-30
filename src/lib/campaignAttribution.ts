@@ -13,13 +13,17 @@
 //   campaigns. Influence totals intentionally overlap and are NEVER a
 //   denominator for overall acquisition efficiency.
 //
-// The LeadCampaignTouch shape is the future normalized contract for campaign
-// membership ingestion. No database table or migration exists for it yet; the
-// Salesforce Campaign Member ID is the preferred idempotency key once the
-// feed captures it. Synthetic identifiers only; nothing here touches the
-// network, the clock, or the database.
+// The LeadCampaignTouch shape is the normalized contract for campaign
+// membership ingestion. Its storage table is lead_campaign_touches
+// (Bite 4C, migrations/2026-07-29_lead_campaign_touches.sql; row shape
+// LeadCampaignTouchRow in src/types/db.ts, mapped here by
+// touchRowToLeadCampaignTouch). The Salesforce Campaign Member ID is the
+// preferred idempotency key once the feed captures it. Synthetic
+// identifiers only; nothing here touches the network, the clock, or the
+// database.
 
 import type { CohortIssueKind } from './funnelCohorts';
+import type { LeadCampaignTouchRow } from '../types/db';
 
 // ---------------------------------------------------------------------------
 // The future normalized touch contract
@@ -114,6 +118,31 @@ export function dedupeTouches(input: LeadCampaignTouch[]): DedupedTouches {
   }
 
   return { touches: out, rejected, duplicatesRemoved, issues };
+}
+
+// ---------------------------------------------------------------------------
+// Storage row mapping (Bite 4C)
+// ---------------------------------------------------------------------------
+
+// Pure mapper from the lead_campaign_touches storage row
+// (LeadCampaignTouchRow in src/types/db.ts) to the calculation type above.
+// A row without campaign identity (the seeded 'backfill' primary-source
+// rows) maps to an empty campaignId, which dedupeTouches deliberately
+// routes to `rejected`: membership ingestion and dedupe apply only to real
+// campaign touches, while seed rows are protected by the migration's own
+// guard instead.
+export function touchRowToLeadCampaignTouch(row: LeadCampaignTouchRow): LeadCampaignTouch {
+  return {
+    leadId: row.lead_id,
+    campaignMemberId: row.campaign_member_id,
+    campaignId: row.campaign_id ?? '',
+    channelId: row.channel_id,
+    touchDate: row.touch_date,
+    parentCampaign: row.parent_campaign,
+    subCampaign: row.sub_campaign,
+    observedAt: row.observed_at,
+    raw: row.raw,
+  };
 }
 
 // ---------------------------------------------------------------------------
