@@ -66,6 +66,11 @@ export const MAPPABLE_FIELDS = [
   'parent_campaign',
   'sub_campaign',
   'event_activations',
+  // Campaign-touch identity columns (Bite 4D). Optional: older saved report
+  // exports lack them. They never feed the lead upsert; the touch pipeline
+  // reads them per ROW (multi-campaign people keep one row per membership).
+  'campaign_member_id',
+  'campaign_id',
 ] as const;
 
 export type MappableField = (typeof MAPPABLE_FIELDS)[number];
@@ -116,7 +121,7 @@ export function parseSfdcDate(input: string | undefined | null): string | null {
   return `${year}-${month}-${day}`;
 }
 
-function readMapped(
+export function readMapped(
   row: Record<string, string>,
   mapping: MappingValue | undefined,
 ): string | undefined {
@@ -264,6 +269,8 @@ const HEADER_ALIASES: Record<MappableField, string[]> = {
   parent_campaign: ['parentcampaigncampaignname', 'parentcampaign'],
   sub_campaign: ['campaignname', 'campaign'],
   event_activations: ['eventactivation', 'eventactivations'],
+  campaign_member_id: ['campaignmemberid', 'campaignmemberidid'],
+  campaign_id: ['campaignid', 'campaigncampaignid'],
 };
 
 const CONTACT_PREFIX = 'contact';
@@ -309,6 +316,8 @@ export function suggestMapping(headers: string[]): ColumnMapping {
     'marketing_sourced_date',
     'parent_campaign',
     'sub_campaign',
+    'campaign_member_id',
+    'campaign_id',
   ] as MappableField[]) {
     const found = findExact(headers, HEADER_ALIASES[f]);
     if (found) out[f] = found;

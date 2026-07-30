@@ -1,10 +1,14 @@
 import { useState } from 'react';
 import type { BulkSyncResult } from '../../hooks/useLeads';
+import type { TouchImportResult } from '../../hooks/touchImportApply';
+import { MISSING_IDENTITY_WARNING } from '../../lib/touchImport';
 
 interface ImportProgressModalProps {
   total: number;
   done: number;
   result: BulkSyncResult | null;
+  touchResult?: TouchImportResult | null;
+  touchIdentityMapped?: boolean;
   onDone: () => void;
 }
 
@@ -12,6 +16,8 @@ export default function ImportProgressModal({
   total,
   done,
   result,
+  touchResult = null,
+  touchIdentityMapped = false,
   onDone,
 }: ImportProgressModalProps) {
   const [copied, setCopied] = useState(false);
@@ -65,6 +71,47 @@ export default function ImportProgressModal({
                 error{result.errors.length === 1 ? '' : 's'}
               </li>
             </ul>
+            <div className="pt-2 border-t border-border">
+              <p className="text-xs font-medium text-slate-muted mb-1">
+                Campaign touches
+              </p>
+              {!touchIdentityMapped ? (
+                <p className="text-xs text-warning">{MISSING_IDENTITY_WARNING}</p>
+              ) : touchResult ? (
+                <ul className="text-sm text-charcoal space-y-1">
+                  <li>
+                    <span className="font-medium">{touchResult.newTouches}</span>{' '}
+                    new touches
+                  </li>
+                  <li>
+                    <span className="font-medium">{touchResult.updatedTouches}</span>{' '}
+                    updated touches
+                  </li>
+                  <li>
+                    <span className="font-medium">{touchResult.seedsSuperseded}</span>{' '}
+                    seeds superseded
+                  </li>
+                  <li>
+                    <span className="font-medium">{touchResult.skippedNoIdentity}</span>{' '}
+                    rows skipped (no campaign identity)
+                  </li>
+                  {touchResult.unchanged > 0 && (
+                    <li className="text-slate-muted text-xs">
+                      {touchResult.unchanged} unchanged,{' '}
+                      {touchResult.duplicateRowsCollapsed} duplicate rows collapsed
+                      {touchResult.rowsWithoutLead > 0 &&
+                        `, ${touchResult.rowsWithoutLead} rows without a lead`}
+                    </li>
+                  )}
+                  {touchResult.errors.length > 0 && (
+                    <li className="text-danger text-xs">
+                      {touchResult.errors.length} touch error(s):{' '}
+                      {touchResult.errors.slice(0, 3).join('; ')}
+                    </li>
+                  )}
+                </ul>
+              ) : null}
+            </div>
             {result.errors.length > 0 && (
               <details className="text-xs text-slate-muted">
                 <summary className="cursor-pointer">Show errors</summary>

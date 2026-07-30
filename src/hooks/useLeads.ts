@@ -100,7 +100,10 @@ async function fetchAllLeads(): Promise<Lead[]> {
 //   4. UPDATEs each child's parent_channel_id to point at its parent's id,
 //      idempotently and skipping cycles.
 //   5. Mutates each sync's source_channel_id to the leaf (subChannelName) id.
-async function resolveChannelHierarchy(syncs: SfdcSync[]): Promise<void> {
+// Exported for the campaign-touch applier (Bite 4D), which must resolve
+// channels for EVERY row's (parent, sub) pair, including memberships whose
+// email was collapsed out of the lead candidates.
+export async function resolveChannelHierarchy(syncs: SfdcSync[]): Promise<void> {
   // 1. Collect every distinct name + every (parent, child) pair. If a child
   //    appears with multiple parents across rows, last-write-wins and we
   //    emit a console.warn so the conflict is visible in the dev console.

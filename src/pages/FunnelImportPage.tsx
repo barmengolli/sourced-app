@@ -8,6 +8,12 @@ import {
   type ParsedCsv,
   coalesceRows,
 } from '../lib/csv';
+import { extractTouchRows, type TouchExtraction } from '../lib/touchImport';
+import {
+  applyTouchImport,
+  emptyTouchImportResult,
+  type TouchImportResult,
+} from '../hooks/touchImportApply';
 import DropZone from '../components/import/DropZone';
 import ColumnMapper from '../components/import/ColumnMapper';
 import ImportDiff from '../components/import/ImportDiff';
@@ -53,11 +59,20 @@ export default function FunnelImportPage() {
   const [mapping, setMapping] = useState<ColumnMapping | null>(null);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [result, setResult] = useState<BulkSyncResult | null>(null);
+  const [touchResult, setTouchResult] = useState<TouchImportResult | null>(null);
   const [topError, setTopError] = useState<string | null>(null);
 
   const coalesce: CoalesceResult | null = useMemo(() => {
     if (!parsed || !mapping) return null;
     return coalesceRows(parsed.rows, mapping);
+  }, [parsed, mapping]);
+
+  // Campaign touches are per ROW (multi-campaign people keep one row per
+  // membership), so they extract from the raw rows, not the coalesced
+  // candidates.
+  const touchExtraction: TouchExtraction | null = useMemo(() => {
+    if (!parsed || !mapping) return null;
+    return extractTouchRows(parsed.rows, mapping);
   }, [parsed, mapping]);
 
   const reset = () => {
@@ -66,6 +81,7 @@ export default function FunnelImportPage() {
     setMapping(null);
     setProgress({ done: 0, total: 0 });
     setResult(null);
+    setTouchResult(null);
     setTopError(null);
   };
 
@@ -78,6 +94,21 @@ export default function FunnelImportPage() {
       const r = await bulkSyncFromSfdc(syncs, {
         onProgress: (done, total) => setProgress({ done, total }),
       });
+      // Touches ride the same apply: only when an identity column is
+      // mapped; otherwise nothing is written and the summary shows the
+      // missing-columns warning. A touch failure never hides the lead
+      // result.
+      let touches = emptyTouchImportResult();
+      if (touchExtraction?.identityMapped) {
+        try {
+          touches = await applyTouchImport(touchExtraction.rows);
+        } catch (e) {
+          touches.errors.push(
+            e instanceof Error ? e.message : 'campaign touch import failed',
+          );
+        }
+      }
+      setTouchResult(touches);
       setResult(r);
       setStep('complete');
     } catch (e) {
@@ -173,6 +204,7 @@ export default function FunnelImportPage() {
           parseSummary={{ totalRows: parsed.rows.length }}
           coalesce={coalesce}
           existingLeads={leads}
+          touchExtraction={touchExtraction}
           onApply={(candidates) => void apply(candidates)}
           onBack={() => setStep('map')}
         />
@@ -183,6 +215,8 @@ export default function FunnelImportPage() {
           total={progress.total}
           done={progress.done}
           result={result}
+          touchResult={touchResult}
+          touchIdentityMapped={touchExtraction?.identityMapped ?? false}
           onDone={reset}
         />
       )}

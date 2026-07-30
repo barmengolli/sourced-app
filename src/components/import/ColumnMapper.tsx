@@ -29,6 +29,8 @@ const FIELD_LABELS: Record<MappableField, string> = {
   parent_campaign: 'Parent campaign (stash)',
   sub_campaign: 'Sub campaign (stash)',
   event_activations: 'Event Activation',
+  campaign_member_id: 'Campaign Member ID (touches)',
+  campaign_id: 'Campaign ID (touches)',
 };
 
 interface ColumnMapperProps {
