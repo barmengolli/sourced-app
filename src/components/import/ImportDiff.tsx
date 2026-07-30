@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type { Lead } from '../../types/db';
 import { EDITABLE_LEAD_FIELDS, LEAD_FIELD_LABELS } from '../../constants/leadFields';
 import type { CoalesceResult, LeadCandidate } from '../../lib/csv';
+import { MISSING_IDENTITY_WARNING, type TouchExtraction } from '../../lib/touchImport';
 import { comparableField } from '../../lib/leadSync';
 import LockIcon from '../common/LockIcon';
 
@@ -11,6 +12,7 @@ interface ImportDiffProps {
   };
   coalesce: CoalesceResult;
   existingLeads: Lead[];
+  touchExtraction?: TouchExtraction | null;
   onApply: (
     candidates: LeadCandidate[],
     existingByEmail: Map<string, Lead>,
@@ -48,6 +50,7 @@ export default function ImportDiff({
   parseSummary,
   coalesce,
   existingLeads,
+  touchExtraction,
   onApply,
   onBack,
 }: ImportDiffProps) {
@@ -133,6 +136,22 @@ export default function ImportDiff({
             <span className="font-medium">{buckets.unchanged}</span> unchanged
           </li>
         </ul>
+        {touchExtraction && (
+          <div className="pt-2 border-t border-border space-y-1">
+            <h3 className="text-sm font-medium text-charcoal">Campaign touches</h3>
+            {touchExtraction.identityMapped ? (
+              <p className="text-sm text-slate-muted">
+                {touchExtraction.rows.length} touch rows will be recorded:{' '}
+                {touchExtraction.withMemberId} with a Campaign Member ID,{' '}
+                {touchExtraction.withCampaignIdOnly} by Campaign ID only,{' '}
+                {touchExtraction.withoutIdentity} without campaign identity
+                (skipped).
+              </p>
+            ) : (
+              <p className="text-sm text-warning">{MISSING_IDENTITY_WARNING}</p>
+            )}
+          </div>
+        )}
         {coalesce.parseWarnings.length > 0 && (
           <details className="text-xs text-slate-muted">
             <summary className="cursor-pointer">
