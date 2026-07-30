@@ -7,10 +7,12 @@ import {
   TOUCH_DATE_SENTINEL,
   buildTouchCandidate,
   extractTouchRows,
+  isChannelOrDescendant,
   planTouchUpserts,
   touchUpsertKey,
 } from './touchImport';
 import type {
+  ChannelParentMap,
   ExistingTouchLite,
   TouchCandidate,
   TouchLeadContext,
@@ -288,8 +290,15 @@ describe('fixture-file walkthrough (acceptance scenario)', () => {
       },
       'noid@example.test': { ...LEAD, leadId: 'lead-noid' },
     };
+    // 4D.1: the report's touches land on a CHILD of each lead's primary
+    // channel; descendant-aware supersession and locked-date precedence
+    // must behave exactly as they did for the equal-channel case.
+    const walkParents: ChannelParentMap = {
+      'channel-primary': null,
+      'channel-primary-child': 'channel-primary',
+    };
     const candidates = extraction.rows.map((row) =>
-      buildTouchCandidate(row, leads[row.email], 'channel-primary'),
+      buildTouchCandidate(row, leads[row.email], 'channel-primary-child', walkParents),
     );
     const seeds: ExistingTouchLite[] = Object.values(leads).map((lead, i) => ({
       id: `seed-${i}`,
@@ -303,7 +312,7 @@ describe('fixture-file walkthrough (acceptance scenario)', () => {
       source: 'backfill',
     }));
 
-    const plan = planTouchUpserts(candidates, seeds);
+    const plan = planTouchUpserts(candidates, seeds, walkParents);
     // Four identity-carrying touches insert (multi lead contributes two).
     expect(plan.inserts).toHaveLength(4);
     expect(plan.inserts.filter((t) => t.lead_id === 'lead-multi')).toHaveLength(2);
@@ -327,10 +336,127 @@ describe('fixture-file walkthrough (acceptance scenario)', () => {
       sub_campaign: row.sub_campaign,
       source: row.source,
     }));
-    const rerun = planTouchUpserts(candidates, stored);
+    const rerun = planTouchUpserts(candidates, stored, walkParents);
     expect(rerun.inserts).toHaveLength(0);
     expect(rerun.updates).toHaveLength(0);
     expect(rerun.seedDeleteIds).toHaveLength(0);
     expect(rerun.unchanged).toBe(4);
+  });
+});
+
+describe('channel ancestry (Bite 4D.1)', () => {
+  // channel-parent (root) -> channel-child -> channel-grandchild
+  const PARENTS: ChannelParentMap = {
+    'channel-parent': null,
+    'channel-child': 'channel-parent',
+    'channel-grandchild': 'channel-child',
+    'channel-unrelated': null,
+  };
+
+  it('walks self, child, and grandchild relationships', () => {
+    expect(isChannelOrDescendant('channel-parent', 'channel-parent', PARENTS)).toBe(true);
+    expect(isChannelOrDescendant('channel-child', 'channel-parent', PARENTS)).toBe(true);
+    expect(isChannelOrDescendant('channel-grandchild', 'channel-parent', PARENTS)).toBe(true);
+    // Never in the other direction, and never across families.
+    expect(isChannelOrDescendant('channel-parent', 'channel-child', PARENTS)).toBe(false);
+    expect(isChannelOrDescendant('channel-unrelated', 'channel-parent', PARENTS)).toBe(false);
+    expect(isChannelOrDescendant(null, 'channel-parent', PARENTS)).toBe(false);
+    expect(isChannelOrDescendant('channel-child', null, PARENTS)).toBe(false);
+  });
+
+  it('the cycle guard terminates on corrupt parentage', () => {
+    const cyclic: ChannelParentMap = { a: 'b', b: 'a' };
+    expect(isChannelOrDescendant('a', 'z', cyclic)).toBe(false);
+    expect(isChannelOrDescendant('a', 'b', cyclic)).toBe(true);
+  });
+
+  it('a parent-level seed is superseded by a child-level touch', () => {
+    const seed = existingRow({
+      id: 'seed-parent',
+      source: 'backfill',
+      campaign_member_id: null,
+      campaign_id: null,
+      channel_id: 'channel-parent',
+    });
+    const childTouch = buildTouchCandidate(input(), LEAD, 'channel-child', PARENTS);
+    const plan = planTouchUpserts([childTouch], [seed], PARENTS);
+    expect(plan.seedDeleteIds).toEqual(['seed-parent']);
+    // Grandchild reaches the same seed through the full walk.
+    const grandchildTouch = buildTouchCandidate(
+      input({ campaignMemberId: 'SYNTH-CM-G' }),
+      LEAD,
+      'channel-grandchild',
+      PARENTS,
+    );
+    const deep = planTouchUpserts([grandchildTouch], [seed], PARENTS);
+    expect(deep.seedDeleteIds).toEqual(['seed-parent']);
+  });
+
+  it('an unrelated-channel touch never supersedes the parent seed', () => {
+    const seed = existingRow({
+      id: 'seed-parent',
+      source: 'backfill',
+      campaign_member_id: null,
+      campaign_id: null,
+      channel_id: 'channel-parent',
+    });
+    const unrelated = buildTouchCandidate(input(), LEAD, 'channel-unrelated', PARENTS);
+    expect(planTouchUpserts([unrelated], [seed], PARENTS).seedDeleteIds).toHaveLength(0);
+    // And a child seed is never superseded by its PARENT's touch (upward
+    // only from the touch, downward never).
+    const childSeed = existingRow({
+      id: 'seed-child',
+      source: 'backfill',
+      campaign_member_id: null,
+      campaign_id: null,
+      channel_id: 'channel-child',
+    });
+    const parentTouch = buildTouchCandidate(input(), LEAD, 'channel-parent', PARENTS);
+    expect(planTouchUpserts([parentTouch], [childSeed], PARENTS).seedDeleteIds).toHaveLength(0);
+  });
+
+  it('locked-date precedence applies on a child of the primary channel', () => {
+    const locked: TouchLeadContext = {
+      leadId: 'lead-1',
+      sourceChannelId: 'channel-parent',
+      marketingSourcedDate: '2026-01-10',
+      sourcedDateLocked: true,
+    };
+    const onChild = buildTouchCandidate(input(), locked, 'channel-child', PARENTS);
+    expect(onChild.touchDate).toBe('2026-01-10');
+    expect(onChild.raw.sfdc_touch_date).toBe('2026-03-15');
+    const onUnrelated = buildTouchCandidate(input(), locked, 'channel-unrelated', PARENTS);
+    expect(onUnrelated.touchDate).toBe('2026-03-15');
+    expect(onUnrelated.raw.sfdc_touch_date).toBeUndefined();
+  });
+
+  it('the descendant supersession decision is idempotent', () => {
+    const seed = existingRow({
+      id: 'seed-parent',
+      source: 'backfill',
+      campaign_member_id: null,
+      campaign_id: null,
+      channel_id: 'channel-parent',
+    });
+    const childTouch = buildTouchCandidate(input(), LEAD, 'channel-child', PARENTS);
+    const first = planTouchUpserts([childTouch], [seed], PARENTS);
+    expect(first.seedDeleteIds).toEqual(['seed-parent']);
+    // Second run: the seed is gone and the touch exists; nothing happens.
+    const stored: ExistingTouchLite[] = first.inserts.map((row, i) => ({
+      id: `t-${i}`,
+      lead_id: row.lead_id,
+      campaign_member_id: row.campaign_member_id,
+      campaign_id: row.campaign_id,
+      channel_id: row.channel_id,
+      touch_date: row.touch_date,
+      parent_campaign: row.parent_campaign,
+      sub_campaign: row.sub_campaign,
+      source: row.source,
+    }));
+    const rerun = planTouchUpserts([childTouch], stored, PARENTS);
+    expect(rerun.inserts).toHaveLength(0);
+    expect(rerun.updates).toHaveLength(0);
+    expect(rerun.seedDeleteIds).toHaveLength(0);
+    expect(rerun.unchanged).toBe(1);
   });
 });

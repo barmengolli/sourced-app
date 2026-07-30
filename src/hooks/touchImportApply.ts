@@ -15,6 +15,7 @@ import {
   planTouchUpserts,
 } from '../lib/touchImport';
 import type {
+  ChannelParentMap,
   ExistingTouchLite,
   TouchCandidate,
   TouchLeadContext,
@@ -85,6 +86,20 @@ export async function applyTouchImport(rows: TouchRowInput[]): Promise<TouchImpo
     channelByPair.set(key, sync.values.source_channel_id ?? null);
   }
 
+  // Child -> parent map over the whole channels tree (Bite 4D.1): the
+  // descendant-aware supersession and locked-date decisions need ancestry,
+  // and a seed may sit on a parent no touch row names directly.
+  const channelParents: ChannelParentMap = {};
+  {
+    const { data, error } = await supabase
+      .from('channels')
+      .select('id, parent_channel_id');
+    if (error) throw error;
+    for (const row of (data ?? []) as { id: string; parent_channel_id: string | null }[]) {
+      channelParents[row.id] = row.parent_channel_id;
+    }
+  }
+
   // 2. Fetch the imported leads fresh (locks and primary channel included).
   const emails = [...new Set(rows.map((r) => r.email))];
   const leadByEmail = new Map<string, TouchLeadContext>();
@@ -120,7 +135,7 @@ export async function applyTouchImport(rows: TouchRowInput[]): Promise<TouchImpo
     const channelId = sub
       ? (channelByPair.get(`${row.parentCampaign?.trim() ?? ''}|${sub}`) ?? null)
       : null;
-    candidates.push(buildTouchCandidate(row, lead, channelId));
+    candidates.push(buildTouchCandidate(row, lead, channelId, channelParents));
   }
 
   // 4. Fetch existing touches for the affected leads.
@@ -138,7 +153,7 @@ export async function applyTouchImport(rows: TouchRowInput[]): Promise<TouchImpo
   }
 
   // 5. Pure plan, then execute.
-  const plan = planTouchUpserts(candidates, existing);
+  const plan = planTouchUpserts(candidates, existing, channelParents);
   result.skippedNoIdentity = plan.skippedNoIdentity;
   result.unchanged = plan.unchanged;
   result.duplicateRowsCollapsed = plan.duplicateRowsCollapsed;

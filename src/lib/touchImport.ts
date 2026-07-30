@@ -23,6 +23,34 @@ export const MISSING_IDENTITY_WARNING =
   'Campaign Member ID / Campaign ID not mapped; campaign touches were not recorded for this import.';
 
 // ---------------------------------------------------------------------------
+// Channel ancestry (Bite 4D.1)
+// ---------------------------------------------------------------------------
+
+// child channel id -> parent channel id (null at the root), built by the
+// apply layer from the channels table.
+export type ChannelParentMap = Record<string, string | null>;
+
+// True when channelId IS ancestorId or sits anywhere below it in the
+// channels tree. General ancestor walk (the taxonomy is two levels today)
+// with a cycle guard so corrupt parentage can never hang an import.
+export function isChannelOrDescendant(
+  channelId: string | null,
+  ancestorId: string | null,
+  channelParents: ChannelParentMap,
+): boolean {
+  if (!channelId || !ancestorId) return false;
+  const visited = new Set<string>();
+  let cursor: string | null = channelId;
+  while (cursor) {
+    if (cursor === ancestorId) return true;
+    if (visited.has(cursor)) return false; // cycle guard
+    visited.add(cursor);
+    cursor = channelParents[cursor] ?? null;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Per-row extraction
 // ---------------------------------------------------------------------------
 
@@ -100,15 +128,17 @@ export interface TouchCandidate {
 }
 
 // The touch date is the report's date EXCEPT when this touch sits on the
-// lead's primary channel AND Marketing locked marketing_sourced_date: the
-// manually corrected date is authoritative (it must keep winning when
-// Bite 4E starts counting from touches), and the report's raw date is
-// preserved in raw.sfdc_touch_date. Non-primary-channel touches always use
-// the report date, locked or not.
+// lead's primary channel OR any descendant of it (a parent-level primary
+// with a child-level membership is the same channel family) AND Marketing
+// locked marketing_sourced_date: the manually corrected date is
+// authoritative (it must keep winning when Bite 4E starts counting from
+// touches), and the report's raw date is preserved in raw.sfdc_touch_date.
+// Unrelated-channel touches always use the report date, locked or not.
 export function buildTouchCandidate(
   input: TouchRowInput,
   lead: TouchLeadContext,
   channelId: string | null,
+  channelParents: ChannelParentMap = {},
 ): TouchCandidate {
   const raw: Record<string, unknown> = {
     parent_campaign: input.parentCampaign,
@@ -117,8 +147,11 @@ export function buildTouchCandidate(
     campaign_id: input.campaignId,
   };
   let touchDate = input.reportTouchDate;
-  const onPrimaryChannel =
-    channelId !== null && lead.sourceChannelId !== null && channelId === lead.sourceChannelId;
+  const onPrimaryChannel = isChannelOrDescendant(
+    channelId,
+    lead.sourceChannelId,
+    channelParents,
+  );
   if (onPrimaryChannel && lead.sourcedDateLocked) {
     touchDate = lead.marketingSourcedDate;
     raw.sfdc_touch_date = input.reportTouchDate;
@@ -224,6 +257,7 @@ function candidateValue(c: TouchCandidate, column: (typeof PATCHABLE)[number]): 
 export function planTouchUpserts(
   candidates: TouchCandidate[],
   existing: ExistingTouchLite[],
+  channelParents: ChannelParentMap = {},
 ): TouchPlan {
   const byMember = new Map<string, ExistingTouchLite>();
   const byNatural = new Map<string, ExistingTouchLite>();
@@ -304,14 +338,22 @@ export function planTouchUpserts(
       });
     }
 
-    // Seed supersession: an identity-carrying touch on (lead, channel)
-    // supersedes the surviving backfill seed for the same pair. Applies on
-    // insert, update, AND no-op re-observation so any import self-cleans;
-    // only campaign-identified touches ever supersede (identity-less rows
-    // were skipped above).
+    // Seed supersession, descendant-aware (Bite 4D.1): an identity-
+    // carrying touch on channel C supersedes the same lead's backfill seed
+    // on C or any ANCESTOR of C (a coarse parent-level seed is superseded
+    // by its precise child-level membership). Applies on insert, update,
+    // AND no-op re-observation so any import self-cleans; only campaign-
+    // identified touches ever supersede (identity-less rows were skipped
+    // above). Walk up with a cycle guard.
     if (candidate.channelId) {
-      const seed = seedByLeadChannel.get(`${candidate.leadId}|${candidate.channelId}`);
-      if (seed) seedDeletes.add(seed.id);
+      const visited = new Set<string>();
+      let cursor: string | null = candidate.channelId;
+      while (cursor && !visited.has(cursor)) {
+        visited.add(cursor);
+        const seed = seedByLeadChannel.get(`${candidate.leadId}|${cursor}`);
+        if (seed) seedDeletes.add(seed.id);
+        cursor = channelParents[cursor] ?? null;
+      }
     }
   }
 
