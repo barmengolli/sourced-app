@@ -109,6 +109,12 @@ export default function CampaignsOverviewPage({
             Full-funnel view per campaign, from each campaign's tagged assets:
             6Sense engagement, leads and MQLs, opportunities, and Outreach.
           </p>
+          <p className="mt-1 text-xs text-slate-muted">
+            Basis: leads and MQLs count unique contacts by primary source,
+            not campaign memberships, so they will not match the funnel
+            grid's membership counts. Campaign-level overlap arrives with
+            the influence report.
+          </p>
         </div>
         <label className="flex items-center gap-2 text-xs text-slate-muted">
           Year

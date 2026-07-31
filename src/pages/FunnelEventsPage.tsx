@@ -194,6 +194,12 @@ export default function FunnelEventsPage({
             Event-marketing engagement by activation type. Counts are
             unique contacts per event in the selected period.
           </p>
+          <p className="mt-1 text-xs text-slate-muted">
+            Basis: unique contacts on their primary source channel, not
+            campaign memberships. An activation is a person-level fact, so
+            these numbers do not overlap and will not match the
+            membership counts on the funnel grid.
+          </p>
         </div>
         <PeriodSelector
           year={year}
