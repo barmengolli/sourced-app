@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import type { Channel, Lead, StageHistoryEntry } from '../../types/db';
+import type {
+  Channel,
+  Lead,
+  LeadCampaignTouchRow,
+  StageHistoryEntry,
+} from '../../types/db';
+import { computeLeadTouchHistory } from '../../lib/leadTouchHistory';
 import {
   EDITABLE_LEAD_FIELDS,
   type EditableLeadField,
@@ -11,6 +17,14 @@ import StageHistoryEditor from './StageHistoryEditor';
 interface LeadDetailDrawerProps {
   lead: Lead;
   channels: Channel[];
+  // Bite 4F: every campaign membership for this lead, read-only.
+  touches?: LeadCampaignTouchRow[];
+  // Query status for the touches fetch. Kept explicit so the drawer can
+  // tell "still loading" and "failed to load" apart from a genuine empty
+  // history; treating either as "no touches" would silently misreport a
+  // contact's memberships. Defaults keep existing callers working.
+  touchesLoading?: boolean;
+  touchesError?: Error | null;
   onClose: () => void;
   onEditField: (
     field: EditableLeadField,
@@ -49,9 +63,108 @@ function ReadOnlyRow({
   );
 }
 
+function SourceBadge({ source }: { source: LeadCampaignTouchRow['source'] }) {
+  const isSeed = source === 'backfill';
+  return (
+    <span
+      className={
+        'inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ' +
+        (isSeed ? 'bg-warning/15 text-warning' : 'bg-indigo/10 text-indigo')
+      }
+      title={
+        isSeed
+          ? 'Seeded from the primary source when touches were introduced; no campaign identity'
+          : `Recorded by ${source}`
+      }
+    >
+      {isSeed ? 'seed' : source}
+    </span>
+  );
+}
+
+function TouchHistoryList({
+  entries,
+  loading,
+  error,
+}: {
+  entries: ReturnType<typeof computeLeadTouchHistory>;
+  loading: boolean;
+  error: Error | null;
+}) {
+  if (loading) {
+    return (
+      <p className="text-xs italic text-slate-muted">
+        Loading campaign touches…
+      </p>
+    );
+  }
+  // An error is NOT an empty history: say so plainly rather than implying
+  // this contact has no memberships. Nothing else in the drawer is hidden.
+  if (error) {
+    return (
+      <p className="text-xs text-danger">
+        Campaign touches could not be loaded. Try refreshing the page.
+      </p>
+    );
+  }
+  if (entries.length === 0) {
+    return (
+      <p className="text-xs italic text-slate-muted">
+        No campaign touches recorded for this contact.
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-1.5">
+      {entries.map((e) => (
+        <li
+          key={e.touchId}
+          className="flex items-start justify-between gap-3 text-xs border-b border-border last:border-b-0 pb-1.5 last:pb-0"
+        >
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-charcoal font-medium">{e.channelName}</span>
+              {e.isPrimaryChannel && (
+                <span
+                  className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-charcoal/10 text-charcoal"
+                  title="This contact's primary source channel"
+                >
+                  primary
+                </span>
+              )}
+              <SourceBadge source={e.source} />
+            </div>
+            {(e.parentCampaign || e.subCampaign) && (
+              <div className="text-slate-muted mt-0.5 truncate">
+                {[e.parentCampaign, e.subCampaign].filter(Boolean).join(' / ')}
+              </div>
+            )}
+          </div>
+          <div className="text-right shrink-0 tabular-nums">
+            {e.touchDate ?? (
+              <span className="italic text-warning">undated</span>
+            )}
+            {e.correctedFromSfdcDate && (
+              <span
+                className="ml-1 text-warning"
+                title={`Corrected date. Salesforce reported ${e.correctedFromSfdcDate}.`}
+              >
+                (corrected)
+              </span>
+            )}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function LeadDetailDrawer({
   lead,
   channels,
+  touches = [],
+  touchesLoading = false,
+  touchesError = null,
   onClose,
   onEditField,
   onToggleLock,
@@ -152,6 +265,28 @@ export default function LeadDetailDrawer({
           history={lead.stage_history ?? []}
           currentStage={lead.current_stage}
           onSave={onSetStageHistory}
+        />
+      </section>
+
+      <section className="px-5 py-4 space-y-3 border-b border-border">
+        <h3 className="text-xs font-medium text-slate-muted uppercase tracking-wide">
+          Campaign touches
+        </h3>
+        <p className="text-xs text-slate-muted">
+          Every campaign membership recorded for this contact. Each one counts
+          in its own channel on the funnel grid (memberships, overlapping);
+          the primary source is the single channel used for deal inheritance
+          and spend math.
+        </p>
+        <TouchHistoryList
+          entries={computeLeadTouchHistory({
+            touches,
+            leadId: lead.id,
+            primaryChannelId: lead.source_channel_id ?? null,
+            channels,
+          })}
+          loading={touchesLoading}
+          error={touchesError}
         />
       </section>
 

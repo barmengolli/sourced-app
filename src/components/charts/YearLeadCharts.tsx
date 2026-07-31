@@ -332,10 +332,14 @@ export default function YearLeadCharts({
   }, [data, hasPriorYear, priorYearTotals]);
 
   const subtitle = `All ${year} months. Region filter applies.`;
+  // Bite 4F basis labeling: these charts count campaign memberships
+  // (lead_campaign_touches), so a contact in several campaigns appears in
+  // each of their channels and channel totals intentionally overlap.
+  const BASIS = 'Counts campaign memberships (overlapping): a contact in several campaigns counts in each.';
   const totalsSubtitle = hasPriorYear
-    ? `All ${year} months vs ${priorYear}. Monthly bars show source-dated leads only; any quarterly backfill is noted above, not plotted. Region filter applies.`
-    : subtitle;
-  const channelCountSubtitle = `${selectedChannels.length} channel${selectedChannels.length === 1 ? '' : 's'} selected. Region filter applies.`;
+    ? `${BASIS} All ${year} months vs ${priorYear}. Monthly bars show source-dated memberships only; any quarterly backfill is noted above, not plotted. Region filter applies.`
+    : `${BASIS} ${subtitle}`;
+  const channelCountSubtitle = `${BASIS} ${selectedChannels.length} channel${selectedChannels.length === 1 ? '' : 's'} selected. Region filter applies.`;
   const hasAnyData = data.byChannel.length > 0 || (priorYearByChannel?.length ?? 0) > 0;
   const currentYearKey = String(year);
   const priorYearKey = hasPriorYear ? String(priorYear) : '';

@@ -38,6 +38,11 @@ export default function ChannelsPage({ onNavigate }: ChannelsPageProps = {}) {
             name. Rename, reorder, hide, or merge channels here. Lead counts
             update live from the leads table.
           </p>
+          <p className="mt-1 text-xs text-slate-muted">
+            Basis: unique contacts by primary source. These counts answer
+            "how many contacts would this channel orphan", so they differ
+            from the campaign-membership counts on the funnel grid.
+          </p>
         </div>
         <label className="flex items-center gap-2 text-xs text-slate-muted">
           Budget quick-fill year

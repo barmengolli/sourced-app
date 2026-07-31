@@ -262,9 +262,9 @@ export default function FunnelDashboardPage({
 
       {grid.unassignedLeadCount > 0 && (
         <div className="text-xs text-slate-muted">
-          {grid.unassignedLeadCount} lead
-          {grid.unassignedLeadCount === 1 ? '' : 's'} in this period have no
-          source channel and are not counted in any chart.
+          {grid.unassignedLeadCount} campaign touch
+          {grid.unassignedLeadCount === 1 ? '' : 'es'} in this period have no
+          channel and are not counted in any chart.
         </div>
       )}
 
@@ -300,24 +300,36 @@ export default function FunnelDashboardPage({
           </span>
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <ChartCard title="Actuals vs Projections">
+          <ChartCard
+            title="Actuals vs Projections"
+            subtitle="Lead and MQL actuals count campaign memberships (overlapping); HPP and later count deals."
+          >
             <BarChartView
               totals={grid.totals}
               rows={grid.rows}
               channels={visibleChannels}
             />
           </ChartCard>
-          <ChartCard title="Channel Distribution">
+          <ChartCard
+            title="Channel Distribution"
+            subtitle="Share of campaign memberships (overlapping), not distinct contacts."
+          >
             <DonutChartView rows={grid.rows} channels={visibleChannels} />
           </ChartCard>
-          <ChartCard title="Conversion Funnel">
+          <ChartCard
+            title="Conversion Funnel"
+            subtitle="Lead and MQL steps count campaign memberships (overlapping); HPP and later count deals, so the two sides are not one conserved population."
+          >
             <FunnelChartView
               totals={grid.totals}
               rows={grid.rows}
               channels={visibleChannels}
             />
           </ChartCard>
-          <ChartCard title="Quarterly Trend">
+          <ChartCard
+            title="Quarterly Trend"
+            subtitle="Lead and MQL series count campaign memberships (overlapping)."
+          >
             <TrendLineChartView
               quarterly={quarterly}
               quarterlyPrior={quarterlyPrior}

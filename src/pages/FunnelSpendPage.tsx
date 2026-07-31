@@ -230,6 +230,12 @@ export default function FunnelSpendPage({
             Cost per lead, cost per MQL, and first-touch ROI by channel.
             Date-range budgets are prorated to the selected period.
           </p>
+          <p className="mt-1 text-xs text-slate-muted">
+            Basis: primary source (one channel per contact). CPL and CPMQL
+            denominators deliberately do NOT use campaign memberships, so
+            they are lower than the membership lead counts on the funnel
+            grid and each contact is charged to a single channel.
+          </p>
         </div>
         <PeriodSelector
           year={year}
