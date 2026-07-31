@@ -22,12 +22,17 @@ const LEAD = lead({
 
 const noop = async () => {};
 
-function renderDrawer(touches: ReturnType<typeof touchRow>[]) {
+function renderDrawer(
+  touches: ReturnType<typeof touchRow>[],
+  status: { loading?: boolean; error?: Error | null } = {},
+) {
   return render(
     <LeadDetailDrawer
       lead={LEAD}
       channels={CHANNELS}
       touches={touches}
+      touchesLoading={status.loading ?? false}
+      touchesError={status.error ?? null}
       onClose={() => {}}
       onEditField={noop}
       onToggleLock={noop}
@@ -108,5 +113,73 @@ describe('LeadDetailDrawer campaign touches', () => {
     ]);
     expect(screen.getByText(/No campaign touches recorded/i)).toBeTruthy();
     expect(screen.queryByText('2026-05-02')).toBeNull();
+  });
+});
+
+describe('LeadDetailDrawer touch-history query states', () => {
+  it('shows a neutral loading message while touches are loading', () => {
+    renderDrawer([], { loading: true });
+    expect(screen.getByText(/Loading campaign touches/i)).toBeTruthy();
+    // Must NOT claim the contact has no memberships while still loading.
+    expect(screen.queryByText(/No campaign touches recorded/i)).toBeNull();
+    // The rest of the drawer stays intact.
+    expect(screen.getByText('Campaign touches')).toBeTruthy();
+    expect(screen.getByText('Stage history')).toBeTruthy();
+    expect(screen.getByText('Bookkeeping')).toBeTruthy();
+  });
+
+  it('shows a non-destructive error message and never reports an empty history', () => {
+    renderDrawer([], { error: new Error('network unreachable') });
+    expect(
+      screen.getByText(/Campaign touches could not be loaded\. Try refreshing the page\./i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/No campaign touches recorded/i)).toBeNull();
+    expect(screen.queryByText(/Loading campaign touches/i)).toBeNull();
+    // Raw error detail never reaches the UI.
+    expect(screen.queryByText(/network unreachable/i)).toBeNull();
+    // The drawer is not hidden or closed by the failure.
+    expect(screen.getByText('Stage history')).toBeTruthy();
+    expect(screen.getByText('Bookkeeping')).toBeTruthy();
+  });
+
+  it('shows the empty state only after a successful load with zero touches', () => {
+    renderDrawer([], { loading: false, error: null });
+    expect(screen.getByText(/No campaign touches recorded/i)).toBeTruthy();
+    expect(screen.queryByText(/Loading campaign touches/i)).toBeNull();
+    expect(screen.queryByText(/could not be loaded/i)).toBeNull();
+  });
+
+  it('renders the history normally once loaded, with all existing affordances', () => {
+    renderDrawer(
+      [
+        touchRow({
+          id: 't1',
+          lead_id: 'L1',
+          channel_id: 'c-primary',
+          touch_date: '2026-01-05',
+          parent_campaign: '2026 - Content Syndication',
+          sub_campaign: '2026 - Pet Global',
+          source: 'import',
+          raw: { sfdc_touch_date: '2026-04-02' },
+        }),
+        touchRow({ id: 't2', lead_id: 'L1', channel_id: 'c-other', touch_date: null, source: 'backfill' }),
+      ],
+      { loading: false, error: null },
+    );
+    expect(screen.queryByText(/Loading campaign touches/i)).toBeNull();
+    expect(screen.queryByText(/could not be loaded/i)).toBeNull();
+    expect(screen.queryByText(/No campaign touches recorded/i)).toBeNull();
+    // Ordering (dated first), primary marker, provenance, seed badge,
+    // corrected-date tooltip, and the basis explanation all survive.
+    const section = screen.getByText('Campaign touches').closest('section')!;
+    const rows = within(section).getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByText('Content Syndication')).toBeTruthy();
+    expect(within(rows[0]).getByText('primary')).toBeTruthy();
+    expect(within(rows[1]).getByText('undated')).toBeTruthy();
+    expect(screen.getByText('2026 - Content Syndication / 2026 - Pet Global')).toBeTruthy();
+    expect(screen.getByText('seed')).toBeTruthy();
+    expect(screen.getByText('(corrected)').getAttribute('title')).toContain('2026-04-02');
+    expect(screen.getByText(/memberships, overlapping/i)).toBeTruthy();
   });
 });

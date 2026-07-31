@@ -55,7 +55,11 @@ function LeadsPageContent({ onNavigate }: LeadsPageProps) {
     setStageHistory,
     deleteLead,
   } = useLeads();
-  const { touches } = useLeadCampaignTouches();
+  const {
+    touches,
+    loading: touchesLoading,
+    error: touchesError,
+  } = useLeadCampaignTouches();
   const channels = useChannels();
 
   const [stageFilter, setStageFilter] = useState<Set<StageKey>>(
@@ -257,6 +261,8 @@ function LeadsPageContent({ onNavigate }: LeadsPageProps) {
           lead={selectedLead}
           channels={channels}
           touches={touches}
+          touchesLoading={touchesLoading}
+          touchesError={touchesError}
           onClose={() => setSelectedLeadId(null)}
           onEditField={(field, value) =>
             editField(selectedLead.id, field, value as never)

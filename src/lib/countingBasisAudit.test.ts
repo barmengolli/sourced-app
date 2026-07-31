@@ -51,12 +51,30 @@ describe('counting-basis audit completeness', () => {
     expect(unclassified, 'new lead-consuming pages must be added to docs/counting-basis-audit.md').toEqual([]);
   });
 
-  it('records the three basis vocabularies and the open Spend question', () => {
+  it('records the three basis vocabularies', () => {
     expect(AUDIT).toContain('Memberships (overlapping)');
     expect(AUDIT).toContain('Primary source');
     expect(AUDIT).toContain('Unique contacts');
-    expect(AUDIT).toContain('Open question');
-    // The hidden surfaces must stay flagged until classified.
+  });
+
+  it('records Spend as a LOCKED primary-source decision, not an open question', () => {
+    // Program section 2 locks primary source for spend/CPL math; the audit
+    // must state the decision rather than reopen it.
+    expect(AUDIT).toContain('Recorded decision: Spend stays primary-source-based');
+    expect(AUDIT).toContain('never become Spend');
+    // The intentional-divergence warning must survive.
+    expect(AUDIT).toContain('will not reconcile');
+    // No lingering "open question" framing for Spend.
+    expect(AUDIT).not.toContain('Open question for Benjamin');
+  });
+
+  it('keeps the hidden surfaces flagged and does not overclaim the headline', () => {
     expect(AUDIT).toContain('Hidden, unaudited, legacy basis');
+    expect(AUDIT).toContain('Follow-ups before any hidden surface returns');
+    // The headline must be scoped to visible, in-scope surfaces.
+    expect(AUDIT).toContain(
+      'No currently visible, in-scope surface required a calculation switch in',
+    );
+    expect(AUDIT).not.toMatch(/^No surface needed switching/m);
   });
 });

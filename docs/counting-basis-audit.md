@@ -18,6 +18,14 @@ models that must never silently mix:
 Every visible surface below carries a basis subtitle in the UI so a
 reader never has to guess which model produced a number.
 
+**No currently visible, in-scope surface required a calculation switch in
+Bite 4F**: every channel x lead/MQL count already flowed through the
+Bite 4E computation path, so this bite added labeling, the drawer touch
+history, and this classification. That statement covers visible, in-scope
+surfaces only. The hidden Funnel Flow Sankey and Funnel Compare page were
+NOT audited and are NOT approved; they remain classified as hidden legacy
+surfaces requiring a decision before restoration (see Follow-ups).
+
 ## Marketing Funnel: Leads & MQLs
 
 | Surface | Basis | Action (Bite 4F) |
@@ -37,7 +45,7 @@ reader never has to guess which model produced a number.
 | Data Entry grid (channel rows, totals) | Memberships | Switched in 4E; labeling verified (memberships subtitle + "Unique contacts" row present) |
 | Data Entry drilldown panel | Memberships | Added in 4E; lists one row per touch |
 | Events page (activation counts) | Primary source | Unchanged by design. `computeEventActivations` buckets each PERSON by their activation labels and primary channel; an event activation is a person-level fact, not a campaign membership. Basis subtitle added |
-| Spend page (CPL / CPMQL denominators) | Primary source | **Unchanged in this bite by instruction.** See "Open question" below. Basis subtitle added |
+| Spend page (CPL / CPMQL denominators) | Primary source | **Unchanged: locked by the program.** See "Recorded decision" below. Basis subtitle added |
 | Opportunities page (deal donuts, velocity) | Primary source (deal-side) | Unchanged by design: deals inherit one channel via primary-source resolution (program decision 1.4). Out of scope for membership counting |
 | Funnel Compare page | Primary source (legacy) | Hidden from the sidebar in `chore/sidebar-cleanup`; not audited. Must be classified before it is ever un-hidden |
 
@@ -52,18 +60,35 @@ reader never has to guess which model produced a number.
 | BDR dashboards / quotas | Deal-side only | Out of scope: no lead/MQL counting (HPP+ from attributions) |
 | 6sense, Outreach, LinkedIn Ads sections | Own sources | Out of scope: no `lead_campaign_touches` or `leads` consumption |
 
-## Open question for Benjamin (not decided in this bite)
+## Recorded decision: Spend stays primary-source-based
 
-**Should Spend/CPL denominators switch to memberships?** Today CPL and
-CPMQL divide a channel's spend by its PRIMARY-SOURCE lead/MQL count.
-Under membership counting the denominator would grow (a contact in three
-campaigns counts in each), so every channel's CPL would fall while the
-same contact is charged against several channels' budgets. That is a
-business decision about how acquisition efficiency is defined, not a
-technical one, so this bite deliberately leaves the math alone and only
-labels it. Decide before quoting CPL alongside the new membership lead
-counts, since the two numbers now come from different models.
+This is **not** an open question. `docs/lead-multi-attribution-program.md`
+section 2 already locks it: the primary-source model remains authoritative
+for "deal channel inheritance, acquisition-efficiency denominators,
+spend/CPL math, and any 'one number per person' reporting". Campaign
+memberships are overlapping influence counts and must never become Spend
+denominators.
 
-Related: the Sankey and Funnel Compare surfaces are hidden today. Both
-carry the legacy primary-source basis and must be classified (and
-switched, if they are to show channel counts) before being un-hidden.
+The reason is arithmetic. A membership denominator counts one contact once
+per campaign they joined, so a contact in three campaigns would be credited
+against three channel budgets at once. Every channel's CPL and CPMQL would
+fall without a cent of spend changing or a single new person being acquired,
+and the resulting efficiency figures would not sum to anything meaningful at
+the portfolio level. Acquisition efficiency is a per-person question, so it
+keeps a per-person denominator.
+
+Practical consequence, which the Spend page states in its own basis line:
+**Spend numbers and funnel membership totals come from different models on
+purpose and will not reconcile.** The funnel grid's lead count for a channel
+is expected to exceed the lead count behind that channel's CPL. That gap is
+the multi-campaign overlap, not an error. Quote CPL with its primary-source
+basis attached whenever it appears next to membership counts.
+
+## Follow-ups before any hidden surface returns
+
+The Funnel Flow Sankey and the Funnel Compare page are hidden today and
+were **not** audited in this bite. Both carry the legacy primary-source
+basis and neither is wired to the Bite 4E computation path. Before either
+is un-hidden it must be explicitly classified and then either switched to
+memberships or labeled primary-source; restoring one as-is would put an
+unlabeled, unswitched surface back in front of users.

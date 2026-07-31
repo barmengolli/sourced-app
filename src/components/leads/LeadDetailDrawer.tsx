@@ -19,6 +19,12 @@ interface LeadDetailDrawerProps {
   channels: Channel[];
   // Bite 4F: every campaign membership for this lead, read-only.
   touches?: LeadCampaignTouchRow[];
+  // Query status for the touches fetch. Kept explicit so the drawer can
+  // tell "still loading" and "failed to load" apart from a genuine empty
+  // history; treating either as "no touches" would silently misreport a
+  // contact's memberships. Defaults keep existing callers working.
+  touchesLoading?: boolean;
+  touchesError?: Error | null;
   onClose: () => void;
   onEditField: (
     field: EditableLeadField,
@@ -78,9 +84,29 @@ function SourceBadge({ source }: { source: LeadCampaignTouchRow['source'] }) {
 
 function TouchHistoryList({
   entries,
+  loading,
+  error,
 }: {
   entries: ReturnType<typeof computeLeadTouchHistory>;
+  loading: boolean;
+  error: Error | null;
 }) {
+  if (loading) {
+    return (
+      <p className="text-xs italic text-slate-muted">
+        Loading campaign touches…
+      </p>
+    );
+  }
+  // An error is NOT an empty history: say so plainly rather than implying
+  // this contact has no memberships. Nothing else in the drawer is hidden.
+  if (error) {
+    return (
+      <p className="text-xs text-danger">
+        Campaign touches could not be loaded. Try refreshing the page.
+      </p>
+    );
+  }
   if (entries.length === 0) {
     return (
       <p className="text-xs italic text-slate-muted">
@@ -137,6 +163,8 @@ export default function LeadDetailDrawer({
   lead,
   channels,
   touches = [],
+  touchesLoading = false,
+  touchesError = null,
   onClose,
   onEditField,
   onToggleLock,
@@ -257,6 +285,8 @@ export default function LeadDetailDrawer({
             primaryChannelId: lead.source_channel_id ?? null,
             channels,
           })}
+          loading={touchesLoading}
+          error={touchesError}
         />
       </section>
 
