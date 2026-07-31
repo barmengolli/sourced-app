@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { PageKey } from '../App';
 import { useLeads } from '../hooks/useLeads';
+import { useLeadCampaignTouches } from '../hooks/useLeadCampaignTouches';
 import { useChannels } from '../hooks/useChannels';
 import type { Lead, StageKey } from '../types/db';
 import { STAGE_ORDER } from '../constants/stages';
@@ -54,6 +55,7 @@ function LeadsPageContent({ onNavigate }: LeadsPageProps) {
     setStageHistory,
     deleteLead,
   } = useLeads();
+  const { touches } = useLeadCampaignTouches();
   const channels = useChannels();
 
   const [stageFilter, setStageFilter] = useState<Set<StageKey>>(
@@ -154,6 +156,10 @@ function LeadsPageContent({ onNavigate }: LeadsPageProps) {
                     leads.length === 1 ? 'lead' : 'leads'
                   }`}
             </p>
+            <p className="mt-1 text-xs text-slate-muted">
+              Basis: unique contacts, one row per person. A contact's
+              campaign memberships are listed in their detail drawer.
+            </p>
           </div>
           <div className="flex items-start gap-2">
             <LockLeadsButton />
@@ -250,6 +256,7 @@ function LeadsPageContent({ onNavigate }: LeadsPageProps) {
         <LeadDetailDrawer
           lead={selectedLead}
           channels={channels}
+          touches={touches}
           onClose={() => setSelectedLeadId(null)}
           onEditField={(field, value) =>
             editField(selectedLead.id, field, value as never)
