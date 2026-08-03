@@ -108,6 +108,39 @@ export interface CampaignMemberVolume {
   missingCampaignChannelMapping: MeasuredCount;
 }
 
+// Where an observed lifecycle label was seen. Historical labels matter
+// because Salesforce history can contain values the org no longer uses
+// today, and an unmapped historical value would silently misclassify a
+// transition.
+export type ValueSeenIn = 'current' | 'history_old' | 'history_new' | 'history_both';
+
+// One observed lifecycle label for ONE object. Labels are Salesforce
+// picklist vocabulary (schema, not customer data) and are safe to share;
+// record identifiers never accompany them.
+export interface ObservedLifecycleValue {
+  object: 'Lead' | 'Contact';
+  value: string;
+  count: number;
+  seenIn: ValueSeenIn;
+}
+
+// The sanitized union GUARD B emits and the evaluator consumes. Both read
+// the SAME inventory so the mapping the user is asked to build always
+// matches the evidence they were shown.
+export interface ObservedValueInventory {
+  currentLead: ObservedLifecycleValue[];
+  historicalLead: ObservedLifecycleValue[];
+  currentContact: ObservedLifecycleValue[];
+  historicalContact: ObservedLifecycleValue[];
+  // Distinct labels across all four lists: exactly what STAGE_VALUE_MAP
+  // must cover deliberately.
+  distinctValuesRequiringMapping: string[];
+  // True when a truncated history export means the historical inventory
+  // for that object may be missing labels.
+  leadHistoryInventoryPartial: boolean;
+  contactHistoryInventoryPartial: boolean;
+}
+
 export interface LifecycleValueObservation {
   // A raw picklist value as it appears in the org. Picklist values are
   // schema-level vocabulary, not person data.
@@ -260,6 +293,10 @@ export interface DiscoverySummary {
     becameLead: string[];
     becameMql: string[];
     campaignMemberDateFields: string[];
+    // Full metadata for human review: API name, label, data type, and
+    // history-tracking flag, plus the explicit unresolved list. No winner
+    // is chosen here.
+    detail: DateFieldCandidates;
   };
   history: {
     lead: HistoryFinding;
@@ -281,6 +318,10 @@ export interface DiscoverySummary {
   // Typed truncation state. When either object may be truncated the
   // transition totals are PARTIAL and must not be quoted as authoritative.
   truncation: HistoryTruncation & { transitionTotalsArePartial: boolean };
+  // Metrics the run did NOT measure, by name. Distinct from a measured
+  // zero: this list is how a reader knows a null is "never queried" rather
+  // than "queried and found nothing".
+  unmeasuredMetrics: string[];
   // Observed lifecycle values that the stage map does not deliberately
   // cover. Aggregate labels only; never record identifiers. A nonempty
   // list makes the run incomplete: an unmapped value cannot be classified,
@@ -295,10 +336,52 @@ export interface DiscoverySummary {
 // Candidate detection is a NAME heuristic used only to surface fields for a
 // human to confirm. It never maps a value to a lifecycle stage; that
 // remains the explicit configuration the 4B adapter validates.
-const LIFECYCLE_HINTS = ['lifecycle', 'lifecyclestage'];
-const BECAME_LEAD_HINTS = ['becamelead', 'becomealead', 'leaddate', 'sourceddate'];
-const BECAME_MQL_HINTS = ['becamemql', 'mqldate', 'marketingqualified'];
-const CM_DATE_HINTS = ['firstassociat', 'firstrespondeddate', 'createddate', 'lastmodifieddate', 'systemmodstamp'];
+export const LIFECYCLE_HINTS = ['lifecycle', 'lifecyclestage'];
+export const BECAME_LEAD_HINTS = ['becamelead', 'becomealead', 'leaddate', 'sourceddate'];
+export const BECAME_MQL_HINTS = ['becamemql', 'mqldate', 'marketingqualified'];
+export const CM_DATE_HINTS = [
+  'firstassociat',
+  'firstrespondeddate',
+  'createddate',
+  'lastmodifieddate',
+  'systemmodstamp',
+];
+
+// The candidate sets Pass A surfaces for HUMAN review. Discovery only: no
+// winner is selected, a single candidate is never treated as confirmed, and
+// nothing here feeds a lifecycle calculation.
+export interface DateFieldCandidates {
+  becameLead: DiscoveredField[];
+  becameMql: DiscoveredField[];
+  campaignMemberDate: DiscoveredField[];
+  // Every group with more than one candidate stays explicitly unresolved:
+  // a human must choose. Groups with exactly one candidate are ALSO
+  // unresolved, because one match is not confirmation.
+  unresolved: string[];
+}
+
+// Shared matcher. The n8n mirror of this logic is verified against these
+// exported hint lists by test, so the workflow and the module cannot drift.
+export function findDateFieldCandidates(
+  lead: ObjectFieldDiscovery,
+  contact: ObjectFieldDiscovery,
+  campaignMember: ObjectFieldDiscovery,
+): DateFieldCandidates {
+  const pick = (discovery: ObjectFieldDiscovery, hints: string[]): DiscoveredField[] =>
+    discovery.fields.filter((f) => matches(f, hints));
+  const becameLead = [...pick(lead, BECAME_LEAD_HINTS), ...pick(contact, BECAME_LEAD_HINTS)];
+  const becameMql = [...pick(lead, BECAME_MQL_HINTS), ...pick(contact, BECAME_MQL_HINTS)];
+  const campaignMemberDate = pick(campaignMember, CM_DATE_HINTS);
+  const unresolved: string[] = [];
+  const note = (label: string, list: DiscoveredField[]): void => {
+    if (list.length === 0) unresolved.push(`${label}: no candidate found`);
+    else unresolved.push(`${label}: ${list.length} candidate(s), human confirmation required`);
+  };
+  note('Became Lead date', becameLead);
+  note('Became MQL date', becameMql);
+  note('Member First Associated Date (CampaignMember)', campaignMemberDate);
+  return { becameLead, becameMql, campaignMemberDate, unresolved };
+}
 
 function normalize(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -377,6 +460,93 @@ function historyFinding(access: HistoryAccess): HistoryFinding {
     lifecycleRowCount: access.rowCount,
     earliestLifecycleTimestamp: access.earliest,
     latestLifecycleTimestamp: access.latest,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Observed lifecycle value inventory (Bite 4G1 final correction)
+// ---------------------------------------------------------------------------
+
+export interface HistoryValueRow {
+  parentObject: 'Lead' | 'Contact';
+  oldValue: string | null;
+  newValue: string | null;
+}
+
+export interface InventoryInput {
+  // Current nonblank values per object, from the Pass B GROUP BY queries.
+  currentLead: Array<{ value: string; count: number }>;
+  currentContact: Array<{ value: string; count: number }>;
+  // The lifecycle-filtered history rows already fetched in Pass B.
+  historyRows: HistoryValueRow[];
+  leadHistoryTruncated: boolean;
+  contactHistoryTruncated: boolean;
+}
+
+// Aggregate historical labels per object, tracking whether each was seen as
+// an old value, a new value, or both. Blank values are NOT labels: they are
+// counted by the adapter as blank transitions and must never enter the
+// mapping inventory.
+function historicalValues(
+  rows: HistoryValueRow[],
+  object: 'Lead' | 'Contact',
+): ObservedLifecycleValue[] {
+  const seen = new Map<string, { count: number; asOld: boolean; asNew: boolean }>();
+  const note = (raw: string | null, side: 'old' | 'new'): void => {
+    const value = (raw ?? '').trim();
+    if (value === '') return;
+    const entry = seen.get(value) ?? { count: 0, asOld: false, asNew: false };
+    entry.count += 1;
+    if (side === 'old') entry.asOld = true;
+    else entry.asNew = true;
+    seen.set(value, entry);
+  };
+  for (const row of rows) {
+    if (row.parentObject !== object) continue;
+    note(row.oldValue, 'old');
+    note(row.newValue, 'new');
+  }
+  return [...seen.entries()]
+    .map(([value, e]) => ({
+      object,
+      value,
+      count: e.count,
+      seenIn: (e.asOld && e.asNew ? 'history_both' : e.asOld ? 'history_old' : 'history_new') as ValueSeenIn,
+    }))
+    .sort((a, b) => a.value.localeCompare(b.value));
+}
+
+// Build the single sanitized inventory. Labels only; nothing here can carry
+// a record identifier because only picklist values are read.
+export function buildObservedValueInventory(input: InventoryInput): ObservedValueInventory {
+  const current = (
+    rows: Array<{ value: string; count: number }>,
+    object: 'Lead' | 'Contact',
+  ): ObservedLifecycleValue[] =>
+    rows
+      .map((r) => ({ object, value: (r.value ?? '').trim(), count: Number(r.count) || 0, seenIn: 'current' as ValueSeenIn }))
+      .filter((r) => r.value !== '')
+      .sort((a, b) => a.value.localeCompare(b.value));
+
+  const currentLead = current(input.currentLead, 'Lead');
+  const currentContact = current(input.currentContact, 'Contact');
+  const historicalLead = historicalValues(input.historyRows, 'Lead');
+  const historicalContact = historicalValues(input.historyRows, 'Contact');
+
+  const distinct = [
+    ...new Set(
+      [...currentLead, ...currentContact, ...historicalLead, ...historicalContact].map((v) => v.value),
+    ),
+  ].sort();
+
+  return {
+    currentLead,
+    currentContact,
+    historicalLead,
+    historicalContact,
+    distinctValuesRequiringMapping: distinct,
+    leadHistoryInventoryPartial: input.leadHistoryTruncated,
+    contactHistoryInventoryPartial: input.contactHistoryTruncated,
   };
 }
 
@@ -580,6 +750,28 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     incompleteReasons.push('ContactHistory export may be truncated; transition totals are PARTIAL.');
   }
 
+  // ISSUE 6: name every unmeasured metric explicitly. A null MeasuredCount
+  // is honest, but silence about WHY would let a reader assume it was zero.
+  const cmVolume = input.campaignMembers;
+  const unmeasuredMetrics: string[] = [];
+  const measuredCheck: Array<[string, MeasuredCount]> = [
+    ['campaignMember.incrementalWindowRows', cmVolume.incrementalWindowRows],
+    ['campaignMember.changedOrCreatedWindowRows', cmVolume.changedOrCreatedWindowRows],
+    ['campaignMember.fullReconciliationRows', cmVolume.fullReconciliationRows],
+    ['campaignMember.leadMemberRows', cmVolume.leadMemberRows],
+    ['campaignMember.contactMemberRows', cmVolume.contactMemberRows],
+    ['campaignMember.convertedLeadsWithContactLink', cmVolume.convertedLeadsWithContactLink],
+    ['campaignMember.convertedLeadsMissingContactLink', cmVolume.convertedLeadsMissingContactLink],
+    ['campaignMember.missingCampaignMemberId', cmVolume.missingCampaignMemberId],
+    ['campaignMember.missingCampaignId', cmVolume.missingCampaignId],
+    ['campaignMember.missingPersonIdentity', cmVolume.missingPersonIdentity],
+    ['campaignMember.missingTouchDate', cmVolume.missingTouchDate],
+    ['campaignMember.missingCampaignChannelMapping', cmVolume.missingCampaignChannelMapping],
+  ];
+  for (const [name, value] of measuredCheck) {
+    if (value === null) unmeasuredMetrics.push(name);
+  }
+
   return {
     dry_run: true,
     writes_attempted: 0,
@@ -604,6 +796,11 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
         ...fieldFinding(input.contactFields, BECAME_MQL_HINTS).apiNames,
       ],
       campaignMemberDateFields: fieldFinding(input.campaignMemberFields, CM_DATE_HINTS).apiNames,
+      detail: findDateFieldCandidates(
+        input.leadFields,
+        input.contactFields,
+        input.campaignMemberFields,
+      ),
     },
     history: {
       lead: historyFinding(input.leadHistory),
@@ -619,6 +816,7 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     incompleteReasons,
     truncation,
     unmappedLifecycleValues,
+    unmeasuredMetrics,
   };
 }
 

@@ -171,10 +171,14 @@ aggregate-only and safe to paste into this document.
    placeholder survived, `B0` stops the run on purpose.
 6. **Save the PRIVATE export** node's output to a local file, for example
    `pass-b-private.json`. **This file contains Salesforce record ids.**
-7. **Fill in the stage-value map.** Open the evaluator and map every
-   observed lifecycle value to `lead`, `mql`, or `out_of_scope`. Deal
-   stages are never lead lifecycle. An unmapped value is reported and
-   makes the result incomplete rather than being guessed.
+7. **Read the lifecycle-value inventory in GUARD B**, then fill in the
+   stage-value map. `GUARD B.values_requiring_mapping` lists every label
+   that needs a decision, covering current AND historical values for both
+   objects. Map each to `lead`, `mql`, or `out_of_scope`. Deal stages are
+   never lead lifecycle. If you run the evaluator with an empty map it
+   prints the exact labels with counts and a paste-ready template, then
+   stops. An unmapped value is reported and makes the result incomplete
+   rather than being guessed.
 8. **Run one command**, substituting your own paths:
 
    ```
@@ -189,16 +193,57 @@ aggregate-only and safe to paste into this document.
    value.
 10. **Delete the PRIVATE export file.** It has served its purpose.
 
+### Where lifecycle values come from
+
+Pass A **cannot** query lifecycle values: doing so requires the confirmed
+field API names, which is exactly what Pass A is discovering. It therefore
+does not report them at all, rather than reporting an empty list that would
+read as "measured, found none".
+
+Pass B collects them once the names are confirmed:
+
+- `B8` and `B9` query current nonblank values per object, each using its
+  own separately confirmed API name.
+- `B10` aggregates historical labels from the lifecycle-filtered history
+  rows already fetched, tracking whether each label appeared as an old
+  value, a new value, or both. This matters because Salesforce history can
+  contain labels the org no longer uses today, and an unmapped historical
+  label would silently misclassify a transition.
+- `B10` emits one sanitized inventory: current Lead, historical Lead,
+  current Contact, historical Contact, and the distinct union requiring a
+  deliberate mapping. If a history export was truncated, that object's
+  historical inventory is flagged partial.
+
+GUARD B displays that inventory and the PRIVATE export carries the same
+object, so the mapping you are asked to build always matches the evidence
+you were shown. Picklist labels are Salesforce vocabulary and are safe to
+share; no record identifiers accompany them.
+
 ### What the evaluator consumes
 
-Real evidence only, from both passes. Pass A supplies the lifecycle-field
+Real evidence only. Pass A supplies lifecycle-field candidates, date-field
 candidates, CampaignMember volumes and their scope, converted-linkage
-coverage, and the unresolved-decision list. Pass B supplies the confirmed
-field names, per-object query status (rows, zero rows, or failure) with
-the real earliest/latest bounds, the history rows themselves, the identity
-pairs, and per-object truncation flags. A metric that was never measured is
-reported as `null` (unknown) and never as `0`, so an unmeasured volume can
-never masquerade as an empty one.
+coverage, and unresolved decisions. Pass B supplies the confirmed field
+names, per-object query status (rows, zero rows, or failure) with real
+earliest/latest bounds, history rows, identity pairs, per-object truncation
+flags, and the observed-value inventory.
+
+### What 4G1 measures, and what it does not
+
+Measured by this bite: lifecycle field candidates and history-tracking
+flags for both objects; date-field candidates for Became Lead, Became MQL,
+and the CampaignMember association date; lifecycle-filtered history
+coverage per object; observed lifecycle values, current and historical;
+CampaignMember incremental, changed-or-created, and full reconciliation
+volumes (organization-wide); and converted-Lead linkage coverage.
+
+**Not measured by this bite**, and reported as unknown rather than zero:
+Lead-versus-Contact membership split, converted-leads-missing-link count,
+and the CampaignMember quality gaps (missing CampaignMember Id, missing
+Campaign Id, missing person identity, missing touch date, missing
+campaign-to-channel mapping). The workflow does not query these, so the
+evaluator lists them under `unmeasured_metrics`. Sizing those gaps needs a
+per-row scan that belongs with the rebuild, not with discovery.
 
 ### How Lead and Contact stay one chronology
 
@@ -322,7 +367,7 @@ into this block.
     },
     {
       "parameters": {
-        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// Empty required results FAIL. A silent zero here would make every\n// downstream 'field not found' finding meaningless: absence of\n// evidence would be read as evidence of absence.\nconst sources = [\n  ['Lead', realRows($('A1: Lead fields (FieldDefinition)').all())],\n  ['Contact', realRows($('A1: Contact fields (FieldDefinition)').all())],\n  ['CampaignMember', realRows($('A1: CampaignMember fields (FieldDefinition)').all())]\n];\nconst out = {};\nconst lifecycleCandidates = {};\nfor (const [obj, rows] of sources) {\n  const named = rows.filter((r) => r.QualifiedApiName);\n  if (named.length === 0) {\n    throw new Error('DISCOVERY FAILED: FieldDefinition returned no rows for ' + obj\n      + '. Check the integration user metadata read access. Do NOT treat this as \"field absent\".');\n  }\n  out[obj] = named.length;\n  // Candidate surfacing only. This NEVER maps a value to a stage and\n  // never picks a winner; a human confirms the API name for Pass B.\n  lifecycleCandidates[obj] = named\n    .filter((r) => /lifecycle/i.test(String(r.QualifiedApiName)) || /lifecycle/i.test(String(r.Label || '')))\n    .map((r) => ({ apiName: r.QualifiedApiName, label: r.Label, historyTracked: r.IsFieldHistoryTracked === true }));\n}\nreturn [{ json: { dry_run: true, writes_attempted: 0, field_rows_by_object: out, lifecycle_candidates: lifecycleCandidates } }];"
+        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// Empty required results FAIL. A silent zero here would make every\n// downstream 'field not found' finding meaningless: absence of\n// evidence would be read as evidence of absence.\nconst sources = [\n  ['Lead', realRows($('A1: Lead fields (FieldDefinition)').all())],\n  ['Contact', realRows($('A1: Contact fields (FieldDefinition)').all())],\n  ['CampaignMember', realRows($('A1: CampaignMember fields (FieldDefinition)').all())]\n];\nconst out = {};\nconst lifecycleCandidates = {};\nfor (const [obj, rows] of sources) {\n  const named = rows.filter((r) => r.QualifiedApiName);\n  if (named.length === 0) {\n    throw new Error('DISCOVERY FAILED: FieldDefinition returned no rows for ' + obj\n      + '. Check the integration user metadata read access. Do NOT treat this as \"field absent\".');\n  }\n  out[obj] = named.length;\n  // Candidate surfacing only. This NEVER maps a value to a stage and\n  // never picks a winner; a human confirms the API name for Pass B.\n  lifecycleCandidates[obj] = named\n    .filter((r) => /lifecycle/i.test(String(r.QualifiedApiName)) || /lifecycle/i.test(String(r.Label || '')))\n    .map((r) => ({ apiName: r.QualifiedApiName, label: r.Label, historyTracked: r.IsFieldHistoryTracked === true }));\n}\n// Date-field candidates for HUMAN review. These hint lists mirror the\n// exported constants in src/lib/leadSyncDiscovery.ts; a test compares\n// them mechanically so the two cannot drift apart. Discovery only: no\n// winner is selected, and one match is never treated as confirmation.\nconst HINTS = {\n  becameLead: ['becamelead', 'becomealead', 'leaddate', 'sourceddate'],\n  becameMql: ['becamemql', 'mqldate', 'marketingqualified'],\n  campaignMemberDate: ['firstassociat', 'firstrespondeddate', 'createddate', 'lastmodifieddate', 'systemmodstamp']\n};\nconst norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');\nconst pick = (rows, hints) => rows.filter((r) => {\n  const n = norm(r.QualifiedApiName); const l = norm(r.Label);\n  return hints.some((h) => n.includes(h) || l.includes(h));\n}).map((r) => ({ apiName: r.QualifiedApiName, label: r.Label, dataType: r.DataType,\n  historyTracked: r.IsFieldHistoryTracked === true }));\nconst leadRows = realRows($('A1: Lead fields (FieldDefinition)').all()).filter((r) => r.QualifiedApiName);\nconst contactRows = realRows($('A1: Contact fields (FieldDefinition)').all()).filter((r) => r.QualifiedApiName);\nconst cmRows = realRows($('A1: CampaignMember fields (FieldDefinition)').all()).filter((r) => r.QualifiedApiName);\nconst dateCandidates = {\n  becameLead: [...pick(leadRows, HINTS.becameLead), ...pick(contactRows, HINTS.becameLead)],\n  becameMql: [...pick(leadRows, HINTS.becameMql), ...pick(contactRows, HINTS.becameMql)],\n  campaignMemberDate: pick(cmRows, HINTS.campaignMemberDate)\n};\n// Every group stays UNRESOLVED: zero candidates needs investigation and\n// one candidate still needs a human to confirm it.\ndateCandidates.unresolved = [\n  'Became Lead date: ' + dateCandidates.becameLead.length + ' candidate(s), human confirmation required',\n  'Became MQL date: ' + dateCandidates.becameMql.length + ' candidate(s), human confirmation required',\n  'Member First Associated Date (CampaignMember): ' + dateCandidates.campaignMemberDate.length + ' candidate(s), human confirmation required'\n];\nreturn [{ json: { dry_run: true, writes_attempted: 0, field_rows_by_object: out,\n  lifecycle_candidates: lifecycleCandidates, date_field_candidates: dateCandidates } }];"
       },
       "id": "a2-validate-field-discovery-returned-rows",
       "name": "A2: VALIDATE field discovery returned rows",
@@ -421,7 +466,7 @@ into this block.
     },
     {
       "parameters": {
-        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// Pass A terminal. It reports what was discovered and states plainly\n// that Pass A is NOT a complete 4G1 result: no lifecycle field is\n// confirmed yet, so no transition evidence exists.\nconst cfg = $('CONFIG A: discovery settings').first().json;\nif (cfg.dry_run !== true || cfg.writes_attempted !== 0) {\n  throw new Error('GUARD A: discovery must be dry_run with zero writes.');\n}\nconst v = $('A2: VALIDATE field discovery returned rows').first().json;\nconst scalar = (node, key) => {\n  const rows = realRows($(node).all());\n  if (rows.length === 0) return { queried: true, rows_returned: 0, value: null };\n  const raw = rows[0][key] ?? rows[0].expr0 ?? rows[0].total ?? null;\n  return { queried: true, rows_returned: rows.length, value: raw === null ? null : Number(raw) };\n};\nconst summary = {\n  pass: 'A',\n  dry_run: true,\n  writes_attempted: 0,\n  complete: false,\n  incomplete_reasons: ['Pass A discovers field names and scope only. Run Pass B with the confirmed Lead and Contact lifecycle field API names to obtain transition evidence.'],\n  future_schedule_timezone: cfg.future_schedule_timezone,\n  field_rows_by_object: v.field_rows_by_object,\n  lifecycle_candidates: v.lifecycle_candidates,\n  campaign_member_volumes: {\n    incremental_2day_created: scalar('A3: CampaignMember incremental volume (org-wide, 2-day CreatedDate)', 'total'),\n    changed_or_created_2day: scalar('A4: CampaignMember changed-or-created volume (org-wide, future strategy)', 'total'),\n    full_reconciliation: scalar('A5: CampaignMember reconciliation volume (org-wide)', 'total'),\n    scope: 'organization_wide'\n  },\n  converted_lead_linkage: scalar('A6: converted-Lead linkage coverage (org-wide)', 'total'),\n  observed_lead_lifecycle_values: [],\n  observed_contact_lifecycle_values: [],\n  unresolved_decisions: ['Member First Associated Date API field unconfirmed', 'Campaign scope not yet approved; all volumes are organization-wide'],\n  current_workflow_row_limit: cfg.current_workflow_row_limit,\n  next_step: 'Enter the confirmed Lead and Contact lifecycle API names into CONFIG B, then run Pass B.'\n};\nconst s = JSON.stringify(summary);\nif (/\\b(001|003|00Q|00v|701|005|006)[A-Za-z0-9]{12}([A-Za-z0-9]{3})?\\b/.test(s)) {\n  throw new Error('GUARD A: summary contains a Salesforce-record-id-shaped value.');\n}\nif (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/.test(s)) {\n  throw new Error('GUARD A: summary contains an email-shaped value.');\n}\nreturn [{ json: summary }];"
+        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// Pass A terminal. It reports what was discovered and states plainly\n// that Pass A is NOT a complete 4G1 result: no lifecycle field is\n// confirmed yet, so no transition evidence exists.\nconst cfg = $('CONFIG A: discovery settings').first().json;\nif (cfg.dry_run !== true || cfg.writes_attempted !== 0) {\n  throw new Error('GUARD A: discovery must be dry_run with zero writes.');\n}\nconst v = $('A2: VALIDATE field discovery returned rows').first().json;\nconst scalar = (node, key) => {\n  const rows = realRows($(node).all());\n  if (rows.length === 0) return { queried: true, rows_returned: 0, value: null };\n  const raw = rows[0][key] ?? rows[0].expr0 ?? rows[0].total ?? null;\n  return { queried: true, rows_returned: rows.length, value: raw === null ? null : Number(raw) };\n};\nconst summary = {\n  pass: 'A',\n  dry_run: true,\n  writes_attempted: 0,\n  complete: false,\n  incomplete_reasons: ['Pass A discovers field names and scope only. Run Pass B with the confirmed Lead and Contact lifecycle field API names to obtain transition evidence.'],\n  future_schedule_timezone: cfg.future_schedule_timezone,\n  field_rows_by_object: v.field_rows_by_object,\n  lifecycle_candidates: v.lifecycle_candidates,\n  campaign_member_volumes: {\n    incremental_2day_created: scalar('A3: CampaignMember incremental volume (org-wide, 2-day CreatedDate)', 'total'),\n    changed_or_created_2day: scalar('A4: CampaignMember changed-or-created volume (org-wide, future strategy)', 'total'),\n    full_reconciliation: scalar('A5: CampaignMember reconciliation volume (org-wide)', 'total'),\n    scope: 'organization_wide'\n  },\n  converted_lead_linkage: scalar('A6: converted-Lead linkage coverage (org-wide)', 'total'),\n  date_field_candidates: v.date_field_candidates,\n  // Lifecycle VALUES are deliberately NOT reported here: they require\n  // the confirmed field API names, which is precisely what Pass A is\n  // discovering. Pass B collects them. Claiming an empty list here\n  // would look like 'measured, found none'.\n  observed_lifecycle_values_measured_in: 'Pass B',\n  unresolved_decisions: ['Member First Associated Date API field unconfirmed', 'Campaign scope not yet approved; all volumes are organization-wide'],\n  current_workflow_row_limit: cfg.current_workflow_row_limit,\n  next_step: 'Enter the confirmed Lead and Contact lifecycle API names into CONFIG B, then run Pass B.'\n};\nconst s = JSON.stringify(summary);\nif (/\\b(001|003|00Q|00v|701|005|006)[A-Za-z0-9]{12}([A-Za-z0-9]{3})?\\b/.test(s)) {\n  throw new Error('GUARD A: summary contains a Salesforce-record-id-shaped value.');\n}\nif (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/.test(s)) {\n  throw new Error('GUARD A: summary contains an email-shaped value.');\n}\nreturn [{ json: summary }];"
       },
       "id": "guard-a-pass-a-summary-shared-aggregate-only",
       "name": "GUARD A: Pass A summary (shared, aggregate only)",
@@ -607,7 +652,55 @@ into this block.
     },
     {
       "parameters": {
-        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// PRIVATE (n8n only): DO NOT SHARE.\n// Raw history rows and identity pairs for the AUTHORITATIVE local\n// evaluator. n8n cannot run the repository TypeScript, and the program\n// forbids a second competing lifecycle calculation, so classification\n// happens locally against the real adapter instead.\n//\n// Copy this node's output to a local file, run the evaluator described\n// in docs/lead-sync-discovery.md, then DELETE the file. These rows\n// contain Salesforce record ids and must never be committed, pasted\n// into a PR, or folded into the Guard summary.\nconst cfg = $('B2: VERIFY configured fields exist').first().json;\nconst leadRows = realRows($('B5: LeadHistory lifecycle rows (page 1)').all());\nconst contactRows = realRows($('B6: ContactHistory lifecycle rows (page 1)').all());\nconst identityRows = realRows($('B7: converted-Lead identity rows (for person mapping)').all());\nconst PAGE = Number(cfg.history_page_size) || 2000;\n// A FULL page means there is very likely another page. Truncation is\n// reported PER OBJECT and as a typed boolean, never as prose, because\n// totals computed from a truncated export are only partial.\nconst leadTruncated = leadRows.length >= PAGE;\nconst contactTruncated = contactRows.length >= PAGE;\n// Query STATUS per object, taken from the coverage nodes. The evaluator\n// must never assume a query succeeded: zero rows, a real failure, and\n// rows-present are three different facts.\nconst status = (node, field) => {\n  const rows = realRows($(node).all());\n  if (rows.length === 0) return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  const r = rows[0];\n  const count = Number(r.rows ?? r.expr2 ?? 0);\n  if (!count) return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  return { outcome: 'succeeded_with_rows', lifecycle_field: field, row_count: count,\n    earliest: r.earliest ?? r.expr0 ?? null, latest: r.latest ?? r.expr1 ?? null };\n};\nreturn [{ json: {\n  PRIVATE: 'DO NOT SHARE. Delete after running the local evaluator.',\n  lead_lifecycle_field: cfg.lead_lifecycle_field,\n  contact_lifecycle_field: cfg.contact_lifecycle_field,\n  page_size: PAGE,\n  lead_possibly_truncated: leadTruncated,\n  contact_possibly_truncated: contactTruncated,\n  possibly_truncated: leadTruncated || contactTruncated,\n  lead_history_status: status('B3: LeadHistory lifecycle coverage (field-filtered)', cfg.lead_lifecycle_field),\n  contact_history_status: status('B4: ContactHistory lifecycle coverage (field-filtered)', cfg.contact_lifecycle_field),\n  lead_history_rows: leadRows,\n  contact_history_rows: contactRows,\n  converted_identity_rows: identityRows\n} }];"
+        "resource": "search",
+        "query": "SELECT {{ $('B2: VERIFY configured fields exist').first().json.lead_lifecycle_field }} value, COUNT(Id) total FROM Lead WHERE {{ $('B2: VERIFY configured fields exist').first().json.lead_lifecycle_field }} != null GROUP BY {{ $('B2: VERIFY configured fields exist').first().json.lead_lifecycle_field }}"
+      },
+      "id": "b8-current-lead-lifecycle-values-aggregate",
+      "name": "B8: current Lead lifecycle values (aggregate)",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        800
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "notes": "READ ONLY aggregate. Current nonblank LEAD lifecycle labels and counts, using the separately confirmed Lead field. Labels are Salesforce picklist vocabulary; no record identifiers are selected."
+    },
+    {
+      "parameters": {
+        "resource": "search",
+        "query": "SELECT {{ $('B2: VERIFY configured fields exist').first().json.contact_lifecycle_field }} value, COUNT(Id) total FROM Contact WHERE {{ $('B2: VERIFY configured fields exist').first().json.contact_lifecycle_field }} != null GROUP BY {{ $('B2: VERIFY configured fields exist').first().json.contact_lifecycle_field }}"
+      },
+      "id": "b9-current-contact-lifecycle-values-aggregat",
+      "name": "B9: current Contact lifecycle values (aggregate)",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        640
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "notes": "READ ONLY aggregate. Current nonblank CONTACT lifecycle labels and counts, using the separately confirmed Contact field. The two objects are queried independently: their API names may differ."
+    },
+    {
+      "parameters": {
+        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// Build the ONE sanitized inventory that GUARD B shows the user and the\n// PRIVATE export hands the evaluator, so the mapping they are asked to\n// build always matches the evidence they were shown.\n//\n// Current values alone are insufficient: Salesforce history can carry\n// labels the org no longer uses, and an unmapped historical label would\n// silently misclassify a transition. So historical OldValue/NewValue\n// labels are aggregated per object too. Nothing is fuzzy-matched or\n// classified here; classification is the repository adapter's job.\nconst cfg = $('B2: VERIFY configured fields exist').first().json;\nconst current = (node, object) => realRows($(node).all())\n  .map((r) => ({ object, value: String(r.value ?? r.expr0 ?? '').trim(),\n    count: Number(r.total ?? r.expr1 ?? 0), seenIn: 'current' }))\n  .filter((r) => r.value !== '')\n  .sort((a, b) => a.value.localeCompare(b.value));\nconst historical = (node, object) => {\n  const seen = new Map();\n  const note = (raw, side) => {\n    const value = String(raw ?? '').trim();\n    if (value === '') return; // blank is not a label\n    const e = seen.get(value) || { count: 0, asOld: false, asNew: false };\n    e.count += 1; if (side === 'old') e.asOld = true; else e.asNew = true;\n    seen.set(value, e);\n  };\n  for (const row of realRows($(node).all())) { note(row.OldValue, 'old'); note(row.NewValue, 'new'); }\n  return [...seen.entries()].map(([value, e]) => ({ object, value, count: e.count,\n    seenIn: e.asOld && e.asNew ? 'history_both' : e.asOld ? 'history_old' : 'history_new' }))\n    .sort((a, b) => a.value.localeCompare(b.value));\n};\nconst PAGE = Number(cfg.history_page_size) || 2000;\nconst leadRows = realRows($('B5: LeadHistory lifecycle rows (page 1)').all());\nconst contactRows = realRows($('B6: ContactHistory lifecycle rows (page 1)').all());\nconst inventory = {\n  currentLead: current('B8: current Lead lifecycle values (aggregate)', 'Lead'),\n  currentContact: current('B9: current Contact lifecycle values (aggregate)', 'Contact'),\n  historicalLead: historical('B5: LeadHistory lifecycle rows (page 1)', 'Lead'),\n  historicalContact: historical('B6: ContactHistory lifecycle rows (page 1)', 'Contact'),\n  leadHistoryInventoryPartial: leadRows.length >= PAGE,\n  contactHistoryInventoryPartial: contactRows.length >= PAGE\n};\ninventory.distinctValuesRequiringMapping = [...new Set([\n  ...inventory.currentLead, ...inventory.currentContact,\n  ...inventory.historicalLead, ...inventory.historicalContact\n].map((v) => v.value))].sort();\nreturn [{ json: { dry_run: true, writes_attempted: 0, observed_value_inventory: inventory } }];"
+      },
+      "id": "b10-observed-lifecycle-value-inventory-aggre",
+      "name": "B10: observed lifecycle value inventory (aggregate)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        720
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// PRIVATE (n8n only): DO NOT SHARE.\n// Raw history rows and identity pairs for the AUTHORITATIVE local\n// evaluator. n8n cannot run the repository TypeScript, and the program\n// forbids a second competing lifecycle calculation, so classification\n// happens locally against the real adapter instead.\n//\n// Copy this node's output to a local file, run the evaluator described\n// in docs/lead-sync-discovery.md, then DELETE the file. These rows\n// contain Salesforce record ids and must never be committed, pasted\n// into a PR, or folded into the Guard summary.\nconst cfg = $('B2: VERIFY configured fields exist').first().json;\nconst leadRows = realRows($('B5: LeadHistory lifecycle rows (page 1)').all());\nconst contactRows = realRows($('B6: ContactHistory lifecycle rows (page 1)').all());\nconst identityRows = realRows($('B7: converted-Lead identity rows (for person mapping)').all());\nconst PAGE = Number(cfg.history_page_size) || 2000;\n// A FULL page means there is very likely another page. Truncation is\n// reported PER OBJECT and as a typed boolean, never as prose, because\n// totals computed from a truncated export are only partial.\nconst leadTruncated = leadRows.length >= PAGE;\nconst contactTruncated = contactRows.length >= PAGE;\n// Query STATUS per object, taken from the coverage nodes. The evaluator\n// must never assume a query succeeded: zero rows, a real failure, and\n// rows-present are three different facts.\nconst status = (node, field) => {\n  const rows = realRows($(node).all());\n  if (rows.length === 0) return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  const r = rows[0];\n  const count = Number(r.rows ?? r.expr2 ?? 0);\n  if (!count) return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  return { outcome: 'succeeded_with_rows', lifecycle_field: field, row_count: count,\n    earliest: r.earliest ?? r.expr0 ?? null, latest: r.latest ?? r.expr1 ?? null };\n};\nreturn [{ json: {\n  PRIVATE: 'DO NOT SHARE. Delete after running the local evaluator.',\n  lead_lifecycle_field: cfg.lead_lifecycle_field,\n  contact_lifecycle_field: cfg.contact_lifecycle_field,\n  page_size: PAGE,\n  lead_possibly_truncated: leadTruncated,\n  contact_possibly_truncated: contactTruncated,\n  possibly_truncated: leadTruncated || contactTruncated,\n  lead_history_status: status('B3: LeadHistory lifecycle coverage (field-filtered)', cfg.lead_lifecycle_field),\n  contact_history_status: status('B4: ContactHistory lifecycle coverage (field-filtered)', cfg.contact_lifecycle_field),\n  lead_history_rows: leadRows,\n  contact_history_rows: contactRows,\n  converted_identity_rows: identityRows,\n  // The SAME inventory GUARD B displays, so the evaluator validates the\n  // mapping against exactly the evidence the user was shown.\n  observed_value_inventory: $('B10: observed lifecycle value inventory (aggregate)').first().json.observed_value_inventory\n} }];"
       },
       "id": "private-n8n-only-do-not-share---raw-export-f",
       "name": "PRIVATE (n8n only): DO NOT SHARE - raw export for local evaluator",
@@ -621,7 +714,7 @@ into this block.
     },
     {
       "parameters": {
-        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// The ONLY successful terminal of the shared Pass B path.\n// It asserts dry-run/zero-writes, that no placeholder survived, and\n// that every required discovery section completed. It reports\n// lifecycle-FILTERED history coverage and row COUNTS only.\n//\n// It deliberately does NOT compute transitions: the authoritative\n// classification is the repository adapter, run by the local evaluator\n// over the PRIVATE export. This summary names that evaluator's output\n// as the final 4G1 result rather than pretending to be comprehensive.\nconst cfg = $('B2: VERIFY configured fields exist').first().json;\nif (cfg.dry_run !== true || cfg.writes_attempted !== 0) {\n  throw new Error('GUARD B: discovery must be dry_run with zero writes.');\n}\nconst PLACEHOLDERS = ['FIELD_API_NAME','LEAD_LIFECYCLE_FIELD','CONTACT_LIFECYCLE_FIELD','REPLACE_ME','TODO'];\nfor (const [label, value] of [['lead', cfg.lead_lifecycle_field], ['contact', cfg.contact_lifecycle_field]]) {\n  const v = String(value ?? '').trim();\n  if (v === '' || PLACEHOLDERS.includes(v.toUpperCase())) {\n    throw new Error('GUARD B: unresolved placeholder for ' + label + ' lifecycle field.');\n  }\n}\n// Lifecycle coverage: distinguish a successful zero-row result from a\n// failed query. An empty sentinel is not a row.\nconst coverage = (node, field) => {\n  const rows = realRows($(node).all());\n  if (rows.length === 0) {\n    return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  }\n  const r = rows[0];\n  const count = Number(r.rows ?? r.expr2 ?? 0);\n  if (!count) {\n    return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  }\n  return { outcome: 'succeeded_with_rows', lifecycle_field: field, row_count: count,\n    earliest: r.earliest ?? r.expr0 ?? null, latest: r.latest ?? r.expr1 ?? null };\n};\nconst priv = $('PRIVATE (n8n only): DO NOT SHARE - raw export for local evaluator').first().json;\nconst summary = {\n  pass: 'B',\n  dry_run: true,\n  writes_attempted: 0,\n  lifecycle_fields: { lead: cfg.lead_lifecycle_field, contact: cfg.contact_lifecycle_field,\n    api_names_match: cfg.lead_lifecycle_field === cfg.contact_lifecycle_field,\n    lead_history_tracked: cfg.lead_field.historyTracked,\n    contact_history_tracked: cfg.contact_field.historyTracked },\n  lifecycle_history_coverage: {\n    lead: coverage('B3: LeadHistory lifecycle coverage (field-filtered)', cfg.lead_lifecycle_field),\n    contact: coverage('B4: ContactHistory lifecycle coverage (field-filtered)', cfg.contact_lifecycle_field)\n  },\n  history_rows_exported: {\n    lead: priv.lead_history_rows.length,\n    contact: priv.contact_history_rows.length,\n    identity_pairs: priv.converted_identity_rows.length,\n    page_size: priv.page_size,\n    possibly_truncated: priv.possibly_truncated\n  },\n  transitions: 'NOT COMPUTED HERE. Run the local evaluator over the PRIVATE export; its aggregate output is the authoritative 4G1 transition evidence.',\n  complete: priv.possibly_truncated !== true,\n  incomplete_reasons: priv.possibly_truncated === true\n    ? ['A history page returned a full page, so rows may be truncated. Raise OFFSET and re-run until a page returns fewer rows than the page size.']\n    : [],\n  next_step: 'Run the local evaluator (docs/lead-sync-discovery.md), paste its AGGREGATE output into the doc, then delete the raw export.'\n};\nconst s = JSON.stringify(summary);\nif (/\\b(001|003|00Q|00v|701|005|006)[A-Za-z0-9]{12}([A-Za-z0-9]{3})?\\b/.test(s)) {\n  throw new Error('GUARD B: summary contains a Salesforce-record-id-shaped value.');\n}\nif (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/.test(s)) {\n  throw new Error('GUARD B: summary contains an email-shaped value.');\n}\nreturn [{ json: summary }];"
+        "jsCode": "// alwaysOutputData makes a zero-row query emit ONE empty {} sentinel.\n// Counting that as a record would turn 'no rows' into 'one row', so\n// every real row must have at least one own key.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n// The ONLY successful terminal of the shared Pass B path.\n// It asserts dry-run/zero-writes, that no placeholder survived, and\n// that every required discovery section completed. It reports\n// lifecycle-FILTERED history coverage and row COUNTS only.\n//\n// It deliberately does NOT compute transitions: the authoritative\n// classification is the repository adapter, run by the local evaluator\n// over the PRIVATE export. This summary names that evaluator's output\n// as the final 4G1 result rather than pretending to be comprehensive.\nconst cfg = $('B2: VERIFY configured fields exist').first().json;\nif (cfg.dry_run !== true || cfg.writes_attempted !== 0) {\n  throw new Error('GUARD B: discovery must be dry_run with zero writes.');\n}\nconst PLACEHOLDERS = ['FIELD_API_NAME','LEAD_LIFECYCLE_FIELD','CONTACT_LIFECYCLE_FIELD','REPLACE_ME','TODO'];\nfor (const [label, value] of [['lead', cfg.lead_lifecycle_field], ['contact', cfg.contact_lifecycle_field]]) {\n  const v = String(value ?? '').trim();\n  if (v === '' || PLACEHOLDERS.includes(v.toUpperCase())) {\n    throw new Error('GUARD B: unresolved placeholder for ' + label + ' lifecycle field.');\n  }\n}\n// Lifecycle coverage: distinguish a successful zero-row result from a\n// failed query. An empty sentinel is not a row.\nconst coverage = (node, field) => {\n  const rows = realRows($(node).all());\n  if (rows.length === 0) {\n    return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  }\n  const r = rows[0];\n  const count = Number(r.rows ?? r.expr2 ?? 0);\n  if (!count) {\n    return { outcome: 'succeeded_zero_rows', lifecycle_field: field, row_count: 0, earliest: null, latest: null };\n  }\n  return { outcome: 'succeeded_with_rows', lifecycle_field: field, row_count: count,\n    earliest: r.earliest ?? r.expr0 ?? null, latest: r.latest ?? r.expr1 ?? null };\n};\nconst priv = $('PRIVATE (n8n only): DO NOT SHARE - raw export for local evaluator').first().json;\nconst summary = {\n  pass: 'B',\n  dry_run: true,\n  writes_attempted: 0,\n  lifecycle_fields: { lead: cfg.lead_lifecycle_field, contact: cfg.contact_lifecycle_field,\n    api_names_match: cfg.lead_lifecycle_field === cfg.contact_lifecycle_field,\n    lead_history_tracked: cfg.lead_field.historyTracked,\n    contact_history_tracked: cfg.contact_field.historyTracked },\n  lifecycle_history_coverage: {\n    lead: coverage('B3: LeadHistory lifecycle coverage (field-filtered)', cfg.lead_lifecycle_field),\n    contact: coverage('B4: ContactHistory lifecycle coverage (field-filtered)', cfg.contact_lifecycle_field)\n  },\n  history_rows_exported: {\n    lead: priv.lead_history_rows.length,\n    contact: priv.contact_history_rows.length,\n    identity_pairs: priv.converted_identity_rows.length,\n    page_size: priv.page_size,\n    possibly_truncated: priv.possibly_truncated\n  },\n  observed_value_inventory: priv.observed_value_inventory,\n  values_requiring_mapping: priv.observed_value_inventory.distinctValuesRequiringMapping,\n  transitions: 'NOT COMPUTED HERE. Run the local evaluator over the PRIVATE export; its aggregate output is the authoritative 4G1 transition evidence.',\n  complete: priv.possibly_truncated !== true,\n  incomplete_reasons: priv.possibly_truncated === true\n    ? ['A history page returned a full page, so rows may be truncated. Raise OFFSET and re-run until a page returns fewer rows than the page size.']\n    : [],\n  next_step: 'Run the local evaluator (docs/lead-sync-discovery.md), paste its AGGREGATE output into the doc, then delete the raw export.'\n};\nconst s = JSON.stringify(summary);\nif (/\\b(001|003|00Q|00v|701|005|006)[A-Za-z0-9]{12}([A-Za-z0-9]{3})?\\b/.test(s)) {\n  throw new Error('GUARD B: summary contains a Salesforce-record-id-shaped value.');\n}\nif (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/.test(s)) {\n  throw new Error('GUARD B: summary contains an email-shaped value.');\n}\nreturn [{ json: summary }];"
       },
       "id": "guard-b-pass-b-summary-shared-aggregate-only",
       "name": "GUARD B: Pass B summary (shared, aggregate only)",
@@ -867,6 +960,39 @@ into this block.
       ]
     },
     "B7: converted-Lead identity rows (for person mapping)": {
+      "main": [
+        [
+          {
+            "node": "B8: current Lead lifecycle values (aggregate)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B8: current Lead lifecycle values (aggregate)": {
+      "main": [
+        [
+          {
+            "node": "B9: current Contact lifecycle values (aggregate)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B9: current Contact lifecycle values (aggregate)": {
+      "main": [
+        [
+          {
+            "node": "B10: observed lifecycle value inventory (aggregate)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B10: observed lifecycle value inventory (aggregate)": {
       "main": [
         [
           {

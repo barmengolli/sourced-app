@@ -10,8 +10,13 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
+  BECAME_LEAD_HINTS,
+  BECAME_MQL_HINTS,
   CANONICAL_LIFECYCLE_FIELD,
+  CM_DATE_HINTS,
   assertNoIdentifierLeakage,
+  buildObservedValueInventory,
+  findDateFieldCandidates,
   normalizeLifecycleHistoryRows,
   summarizeDiscovery,
 } from './leadSyncDiscovery';
@@ -1030,6 +1035,15 @@ describe('generated local evaluator (external module resolution)', () => {
           lead_history_rows: [],
           contact_history_rows: [],
           converted_identity_rows: [],
+          observed_value_inventory: {
+            currentLead: [{ object: 'Lead', value: 'Synth Lead', count: 5, seenIn: 'current' }],
+            currentContact: [],
+            historicalLead: [],
+            historicalContact: [],
+            distinctValuesRequiringMapping: ['Synth Lead'],
+            leadHistoryInventoryPartial: false,
+            contactHistoryInventoryPartial: false,
+          },
         }),
       );
       let stderr = '';
@@ -1110,5 +1124,407 @@ describe('generated local evaluator (external module resolution)', () => {
     const src = readFileSync(EVALUATOR, 'utf8');
     expect(src).toMatch(/DELETE the private export/);
     expect(src).toMatch(/Salesforce record ids/);
+  });
+});
+
+// --- observed lifecycle value inventory (final correction) ----------------
+
+describe('observed lifecycle value inventory', () => {
+  const rows = [
+    { parentObject: 'Lead' as const, oldValue: 'Synth Lead', newValue: 'Synth MQL' },
+    { parentObject: 'Lead' as const, oldValue: 'Synth MQL', newValue: 'Synth Retired Label' },
+    { parentObject: 'Contact' as const, oldValue: null, newValue: 'Synth Customer' },
+    { parentObject: 'Contact' as const, oldValue: '   ', newValue: 'Synth MQL' },
+  ];
+
+  it('keeps Lead and Contact values distinguishable', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [{ value: 'Synth Lead', count: 10 }],
+      currentContact: [{ value: 'Synth Customer', count: 4 }],
+      historyRows: rows,
+      leadHistoryTruncated: false,
+      contactHistoryTruncated: false,
+    });
+    expect(inv.currentLead.every((v) => v.object === 'Lead')).toBe(true);
+    expect(inv.currentContact.every((v) => v.object === 'Contact')).toBe(true);
+    expect(inv.historicalLead.every((v) => v.object === 'Lead')).toBe(true);
+    expect(inv.historicalContact.every((v) => v.object === 'Contact')).toBe(true);
+    // A Contact-only historical label must not appear under Lead.
+    expect(inv.historicalLead.map((v) => v.value)).not.toContain('Synth Customer');
+  });
+
+  it('classifies old-only, new-only, and both-side labels', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [],
+      currentContact: [],
+      historyRows: rows,
+      leadHistoryTruncated: false,
+      contactHistoryTruncated: false,
+    });
+    const lead = Object.fromEntries(inv.historicalLead.map((v) => [v.value, v.seenIn]));
+    // 'Synth Lead' only ever an old value; 'Synth Retired Label' only new;
+    // 'Synth MQL' appears on both sides.
+    expect(lead['Synth Lead']).toBe('history_old');
+    expect(lead['Synth Retired Label']).toBe('history_new');
+    expect(lead['Synth MQL']).toBe('history_both');
+  });
+
+  it('ignores blank and whitespace-only values as labels', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [{ value: '  ', count: 3 }],
+      currentContact: [],
+      historyRows: rows,
+      leadHistoryTruncated: false,
+      contactHistoryTruncated: false,
+    });
+    expect(inv.currentLead).toEqual([]);
+    expect(inv.distinctValuesRequiringMapping).not.toContain('');
+    expect(inv.distinctValuesRequiringMapping).not.toContain('   ');
+  });
+
+  it('surfaces historical labels no longer in current use', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [{ value: 'Synth Lead', count: 10 }],
+      currentContact: [],
+      historyRows: rows,
+      leadHistoryTruncated: false,
+      contactHistoryTruncated: false,
+    });
+    // Current values alone would miss this retired label entirely.
+    expect(inv.distinctValuesRequiringMapping).toContain('Synth Retired Label');
+  });
+
+  it('combines all four lists into the distinct mapping set', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [{ value: 'Synth Lead', count: 10 }],
+      currentContact: [{ value: 'Synth Customer', count: 4 }],
+      historyRows: rows,
+      leadHistoryTruncated: false,
+      contactHistoryTruncated: false,
+    });
+    expect(inv.distinctValuesRequiringMapping).toEqual([
+      'Synth Customer',
+      'Synth Lead',
+      'Synth MQL',
+      'Synth Retired Label',
+    ]);
+  });
+
+  it('marks the affected object partial when its history was truncated', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [],
+      currentContact: [],
+      historyRows: rows,
+      leadHistoryTruncated: true,
+      contactHistoryTruncated: false,
+    });
+    expect(inv.leadHistoryInventoryPartial).toBe(true);
+    expect(inv.contactHistoryInventoryPartial).toBe(false);
+  });
+
+  it('carries labels and counts only, never identifiers', () => {
+    const inv = buildObservedValueInventory({
+      currentLead: [{ value: 'Synth Lead', count: 10 }],
+      currentContact: [],
+      historyRows: rows,
+      leadHistoryTruncated: false,
+      contactHistoryTruncated: false,
+    });
+    const serialized = JSON.stringify(inv);
+    expect(serialized).not.toMatch(/\b(001|003|00Q|005|006)[A-Za-z0-9]{12}\b/);
+    expect(serialized).not.toMatch(/@/);
+  });
+});
+
+// --- date-field candidates (issue 5) --------------------------------------
+
+describe('date-field candidates are surfaced, never chosen', () => {
+  const leadFields = fields('Lead', [
+    field({ apiName: 'Became_A_Lead_Date__c', label: 'Became A Lead Date', dataType: 'Date' }),
+    field({ apiName: 'Became_MQL_Date__c', label: 'Became MQL Date', dataType: 'Date' }),
+    field({ apiName: 'Unrelated__c', label: 'Unrelated' }),
+  ]);
+  const contactFields = fields('Contact', [
+    field({ apiName: 'Contact_Became_MQL_Date__c', label: 'Became MQL Date', dataType: 'Date' }),
+  ]);
+  const cmFields = fields('CampaignMember', [
+    field({ apiName: 'FirstRespondedDate', label: 'First Responded Date', dataType: 'Date' }),
+    field({ apiName: 'CreatedDate', label: 'Created Date', dataType: 'DateTime' }),
+  ]);
+
+  it('finds Became Lead candidates', () => {
+    const c = findDateFieldCandidates(leadFields, contactFields, cmFields);
+    expect(c.becameLead.map((f) => f.apiName)).toContain('Became_A_Lead_Date__c');
+  });
+
+  it('finds Became MQL candidates on both objects', () => {
+    const c = findDateFieldCandidates(leadFields, contactFields, cmFields);
+    const names = c.becameMql.map((f) => f.apiName);
+    expect(names).toContain('Became_MQL_Date__c');
+    expect(names).toContain('Contact_Became_MQL_Date__c');
+  });
+
+  it('finds CampaignMember date candidates with metadata', () => {
+    const c = findDateFieldCandidates(leadFields, contactFields, cmFields);
+    const first = c.campaignMemberDate.find((f) => f.apiName === 'FirstRespondedDate')!;
+    expect(first.label).toBe('First Responded Date');
+    expect(first.dataType).toBe('Date');
+    expect(typeof first.isHistoryTracked).toBe('boolean');
+  });
+
+  it('leaves every group explicitly unresolved, even with exactly one match', () => {
+    const single = findDateFieldCandidates(
+      fields('Lead', [field({ apiName: 'Became_A_Lead_Date__c', label: 'Became A Lead Date' })]),
+      fields('Contact', []),
+      fields('CampaignMember', [field({ apiName: 'FirstRespondedDate', label: 'First Responded Date' })]),
+    );
+    expect(single.becameLead).toHaveLength(1);
+    // One candidate is NOT confirmation.
+    expect(single.unresolved.join(' ')).toContain('Became Lead date');
+    expect(single.unresolved.join(' ')).toContain('human confirmation required');
+    expect(single.unresolved).toHaveLength(3);
+  });
+
+  it('records a no-candidate group as unresolved rather than silently empty', () => {
+    const none = findDateFieldCandidates(
+      fields('Lead', []),
+      fields('Contact', []),
+      fields('CampaignMember', []),
+    );
+    expect(none.unresolved.join(' ')).toContain('no candidate found');
+  });
+
+  it('exposes candidates through the summary without picking a winner', () => {
+    const s = summarizeDiscovery(
+      input({ leadFields, contactFields, campaignMemberFields: cmFields }),
+    );
+    expect(s.candidateDateFields.detail.becameMql.length).toBeGreaterThan(1);
+    expect(s.candidateDateFields.detail.unresolved.length).toBe(3);
+  });
+});
+
+// --- unmeasured vs measured-zero (issue 6) --------------------------------
+
+describe('unmeasured metrics are disclosed, never implied as zero', () => {
+  it('lists every null metric by name', () => {
+    const s = summarizeDiscovery(
+      input({
+        campaignMembers: {
+          ...VOLUME,
+          missingCampaignMemberId: null,
+          missingCampaignId: null,
+          missingTouchDate: null,
+        },
+      }),
+    );
+    expect(s.unmeasuredMetrics).toContain('campaignMember.missingCampaignMemberId');
+    expect(s.unmeasuredMetrics).toContain('campaignMember.missingCampaignId');
+    expect(s.unmeasuredMetrics).toContain('campaignMember.missingTouchDate');
+  });
+
+  it('distinguishes a MEASURED zero from not measured', () => {
+    const s = summarizeDiscovery(
+      input({ campaignMembers: { ...VOLUME, missingCampaignId: 0, missingTouchDate: null } }),
+    );
+    // Measured zero: a real finding, not listed as unmeasured.
+    expect(s.volume.missingCampaignId).toBe(0);
+    expect(s.unmeasuredMetrics).not.toContain('campaignMember.missingCampaignId');
+    // Never measured: disclosed.
+    expect(s.volume.missingTouchDate).toBeNull();
+    expect(s.unmeasuredMetrics).toContain('campaignMember.missingTouchDate');
+  });
+
+  it('reports an empty list when everything was measured', () => {
+    const measured = Object.fromEntries(
+      Object.entries(VOLUME).map(([k, v]) => [k, v === null ? 0 : v]),
+    ) as typeof VOLUME;
+    const s = summarizeDiscovery(input({ campaignMembers: measured }));
+    expect(s.unmeasuredMetrics).toEqual([]);
+  });
+});
+
+// --- evaluator mapping behavior against the REAL inventory ----------------
+
+describe('generated evaluator: STAGE_VALUE_MAP validation', () => {
+  const EVALUATOR = '/Users/barmengolli/Downloads/4g1-local-evaluator.mjs';
+  const repoRoot = process.cwd();
+  const evaluatorExists = (() => {
+    try {
+      readFileSync(EVALUATOR, 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  const INVENTORY = {
+    currentLead: [{ object: 'Lead', value: 'Synth Lead', count: 12, seenIn: 'current' }],
+    currentContact: [{ object: 'Contact', value: 'Synth MQL', count: 3, seenIn: 'current' }],
+    historicalLead: [{ object: 'Lead', value: 'Synth Retired Label', count: 2, seenIn: 'history_old' }],
+    historicalContact: [],
+    distinctValuesRequiringMapping: ['Synth Lead', 'Synth MQL', 'Synth Retired Label'],
+    leadHistoryInventoryPartial: false,
+    contactHistoryInventoryPartial: false,
+  };
+
+  function runEvaluator(mapEntries: string | null): { out: string; failed: boolean } {
+    const dir = mkdtempSync(resolve(tmpdir(), '4g1-map-'));
+    try {
+      let src = readFileSync(EVALUATOR, 'utf8');
+      if (mapEntries !== null) {
+        src = src.replace(
+          /const STAGE_VALUE_MAP = \{[\s\S]*?\n\};/,
+          `const STAGE_VALUE_MAP = {\n${mapEntries}\n};`,
+        );
+      }
+      const copied = resolve(dir, 'evaluator.mjs');
+      writeFileSync(copied, src);
+      const guardA = resolve(dir, 'guard-a.json');
+      const passB = resolve(dir, 'pass-b.json');
+      writeFileSync(guardA, JSON.stringify({ pass: 'A', campaign_member_volumes: {} }));
+      writeFileSync(
+        passB,
+        JSON.stringify({
+          lead_lifecycle_field: 'Synth_Lead_Lifecycle__c',
+          contact_lifecycle_field: 'Synth_Contact_Lifecycle__c',
+          lead_history_status: { outcome: 'succeeded_zero_rows' },
+          contact_history_status: { outcome: 'succeeded_zero_rows' },
+          lead_history_rows: [],
+          contact_history_rows: [],
+          converted_identity_rows: [],
+          observed_value_inventory: INVENTORY,
+        }),
+      );
+      try {
+        const out = execFileSync('npx', ['tsx', copied, repoRoot, guardA, passB], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return { out, failed: false };
+      } catch (err) {
+        const e = err as { stderr?: string; stdout?: string };
+        return { out: String(e.stdout ?? '') + String(e.stderr ?? ''), failed: true };
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.runIf(evaluatorExists)('an empty map prints the exact labels to map, safely', () => {
+    const { out, failed } = runEvaluator(null);
+    expect(failed).toBe(true);
+    // Every observed label, current and historical, is offered for mapping.
+    expect(out).toContain('Synth Lead');
+    expect(out).toContain('Synth MQL');
+    expect(out).toContain('Synth Retired Label');
+    expect(out).toContain('lead | mql | out_of_scope');
+    // Aggregate vocabulary only: no ids, no emails, no raw rows.
+    expect(out).not.toMatch(/\b(001|003|00Q|005|006)[A-Za-z0-9]{12}\b/);
+    expect(out).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  }, 60_000);
+
+  it.runIf(evaluatorExists)('rejects an illegal target stage', () => {
+    const { out, failed } = runEvaluator("  'Synth Lead': 'hpp',");
+    expect(failed).toBe(true);
+    expect(out).toContain('illegal STAGE_VALUE_MAP target');
+    expect(out).toContain('Deal stages');
+  }, 60_000);
+
+  it.runIf(evaluatorExists)('an incomplete map runs but reports NOT AUTHORITATIVE', () => {
+    const { out } = runEvaluator("  'Synth Lead': 'lead',");
+    expect(out).toContain('NOT AUTHORITATIVE');
+    expect(out).toContain('unmapped_lifecycle_values');
+    // The two unmapped labels are named.
+    expect(out).toContain('Synth MQL');
+    expect(out).toContain('Synth Retired Label');
+  }, 60_000);
+
+  it.runIf(evaluatorExists)('a complete map proceeds and discloses unmeasured metrics', () => {
+    const { out } = runEvaluator(
+      "  'Synth Lead': 'lead',\n  'Synth MQL': 'mql',\n  'Synth Retired Label': 'out_of_scope',",
+    );
+    expect(out).toContain('unmeasured_metrics');
+    expect(out).toContain('campaignMember.');
+    expect(out).toContain('DELETE the private export');
+    expect(out).not.toMatch(/\b(001|003|00Q|005|006)[A-Za-z0-9]{12}\b/);
+  }, 60_000);
+});
+
+// --- workflow mirrors the module's candidate hints ------------------------
+
+describe('workflow candidate hints mirror the module (no silent drift)', () => {
+  const doc = readFileSync(resolve(process.cwd(), 'docs/lead-sync-discovery.md'), 'utf8');
+  const template = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(doc)![1]) as {
+    nodes: Array<{ name: string; parameters: Record<string, unknown> }>;
+  };
+  const a2 = String(
+    (template.nodes.find((n) => n.name.startsWith('A2: VALIDATE'))!.parameters as { jsCode: string })
+      .jsCode,
+  );
+
+  it('uses the same hint lists the module exports', () => {
+    for (const hint of BECAME_LEAD_HINTS) {
+      expect(a2, `missing becameLead hint: ${hint}`).toContain(`'${hint}'`);
+    }
+    for (const hint of BECAME_MQL_HINTS) {
+      expect(a2, `missing becameMql hint: ${hint}`).toContain(`'${hint}'`);
+    }
+    for (const hint of CM_DATE_HINTS) {
+      expect(a2, `missing campaignMemberDate hint: ${hint}`).toContain(`'${hint}'`);
+    }
+  });
+
+  it('Pass A surfaces candidates and never claims it measured lifecycle values', () => {
+    const guardA = String(
+      (template.nodes.find((n) => n.name.startsWith('GUARD A'))!.parameters as { jsCode: string })
+        .jsCode,
+    );
+    expect(guardA).toContain('date_field_candidates');
+    // The fabricated empty arrays are gone; the guard says where values come from.
+    expect(guardA).not.toContain('observed_lead_lifecycle_values: []');
+    expect(guardA).toContain("observed_lifecycle_values_measured_in: 'Pass B'");
+  });
+
+  it('Pass B queries current values per object with the confirmed field names', () => {
+    const lead = template.nodes.find((n) => n.name.startsWith('B8'))!;
+    const contact = template.nodes.find((n) => n.name.startsWith('B9'))!;
+    const leadQ = String((lead.parameters as { query: string }).query);
+    const contactQ = String((contact.parameters as { query: string }).query);
+    expect(leadQ).toContain('FROM Lead');
+    expect(leadQ).toContain('lead_lifecycle_field');
+    expect(leadQ).toContain('GROUP BY');
+    expect(contactQ).toContain('FROM Contact');
+    expect(contactQ).toContain('contact_lifecycle_field');
+    // Each object uses its OWN confirmed field.
+    expect(leadQ).not.toContain('contact_lifecycle_field');
+    expect(contactQ).not.toContain('lead_lifecycle_field');
+  });
+
+  it('GUARD B and the PRIVATE export share one inventory', () => {
+    const guardB = String(
+      (template.nodes.find((n) => n.name.startsWith('GUARD B'))!.parameters as { jsCode: string })
+        .jsCode,
+    );
+    const priv = String(
+      (template.nodes.find((n) => n.name.includes('raw export'))!.parameters as { jsCode: string })
+        .jsCode,
+    );
+    // Both read from B10, so the user's evidence and the evaluator's agree.
+    expect(priv).toContain("$('B10: observed lifecycle value inventory (aggregate)')");
+    expect(guardB).toContain('priv.observed_value_inventory');
+    expect(guardB).toContain('values_requiring_mapping');
+  });
+
+  it('the inventory node aggregates history labels and ignores blanks', () => {
+    const b10 = String(
+      (template.nodes.find((n) => n.name.startsWith('B10'))!.parameters as { jsCode: string })
+        .jsCode,
+    );
+    expect(b10).toContain('OldValue');
+    expect(b10).toContain('NewValue');
+    expect(b10).toContain('history_both');
+    expect(b10).toContain("if (value === '') return");
+    expect(b10).toContain('InventoryPartial');
   });
 });
