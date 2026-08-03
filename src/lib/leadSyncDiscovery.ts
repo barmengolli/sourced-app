@@ -72,15 +72,20 @@ export type HistoryAccess =
 // campaign filter was actually applied to the query that produced it.
 export type VolumeScope = 'organization_wide' | 'approved_campaign_scope';
 
+// A measured count, or an explicit statement that it was never measured.
+// `null` here means UNKNOWN, never zero: reporting an unmeasured volume as 0
+// would understate scope and could size the rebuild wrongly.
+export type MeasuredCount = number | null;
+
 export interface CampaignMemberVolume {
   // Rows the CURRENT nightly window (rolling CreatedDate, 2 days) returns.
-  incrementalWindowRows: number;
+  incrementalWindowRows: MeasuredCount;
   // Rows a FUTURE changed-or-created strategy would return
   // (LastModifiedDate/SystemModstamp based), when the field discovery makes
   // it determinable. null means the org did not expose what is needed.
   changedOrCreatedWindowRows: number | null;
   // Rows a full reconciliation returns.
-  fullReconciliationRows: number;
+  fullReconciliationRows: MeasuredCount;
   // Scope of each number above. The current queries are organization-wide;
   // labeling them otherwise would overstate what was measured.
   incrementalScope: VolumeScope;
@@ -88,19 +93,19 @@ export interface CampaignMemberVolume {
   // The ceiling the current production workflow assumes.
   currentRowLimit: number;
   // Rows whose parent is a Lead vs a Contact.
-  leadMemberRows: number;
-  contactMemberRows: number;
+  leadMemberRows: MeasuredCount;
+  contactMemberRows: MeasuredCount;
   // Converted leads whose ConvertedContactId is populated, and those where
   // it is missing (the linkage gap that would orphan a membership).
-  convertedLeadsWithContactLink: number;
-  convertedLeadsMissingContactLink: number;
+  convertedLeadsWithContactLink: MeasuredCount;
+  convertedLeadsMissingContactLink: MeasuredCount;
   // Touch-identity completeness, in the Bite 4D vocabulary.
-  missingCampaignMemberId: number;
-  missingCampaignId: number;
-  missingPersonIdentity: number;
-  missingTouchDate: number;
+  missingCampaignMemberId: MeasuredCount;
+  missingCampaignId: MeasuredCount;
+  missingPersonIdentity: MeasuredCount;
+  missingTouchDate: MeasuredCount;
   // Rows whose campaign cannot be mapped to a Sourced channel.
-  missingCampaignChannelMapping: number;
+  missingCampaignChannelMapping: MeasuredCount;
 }
 
 export interface LifecycleValueObservation {
@@ -142,9 +147,22 @@ const PLACEHOLDERS: ReadonlySet<string> = new Set([
   'TODO',
 ]);
 
+// Whether a paged history export may have been cut short. This is a TYPED
+// signal, never inferred from prose: a full page strongly suggests more rows
+// exist, and totals computed from a truncated export are partial.
+export interface HistoryTruncation {
+  leadPossiblyTruncated: boolean;
+  contactPossiblyTruncated: boolean;
+}
+
 export interface DiscoveryInput {
   // Pass B only. Omit during Pass A, when field names are not yet known.
   lifecycleFieldConfig?: LifecycleFieldConfig;
+  // Pass B only. Omitted means "no paged export was involved".
+  historyTruncation?: HistoryTruncation;
+  // Observed nonblank lifecycle values per object, for mapping validation.
+  observedLeadLifecycleValues?: string[];
+  observedContactLifecycleValues?: string[];
   leadFields: ObjectFieldDiscovery;
   contactFields: ObjectFieldDiscovery;
   campaignMemberFields: ObjectFieldDiscovery;
@@ -213,8 +231,9 @@ export interface VolumeFinding extends CampaignMemberVolume {
   //    the rebuild, not a bug).
   incrementalCanExceedRowLimit: boolean;
   reconciliationRequiresPagination: boolean;
-  estimatedIncrementalBatches: number;
-  estimatedReconciliationBatches: number;
+  // null when the underlying volume was never measured.
+  estimatedIncrementalBatches: MeasuredCount;
+  estimatedReconciliationBatches: MeasuredCount;
   // True when a future changed-or-created window could not be sized.
   changedOrCreatedStrategyUndetermined: boolean;
 }
@@ -259,6 +278,14 @@ export interface DiscoverySummary {
   complete: boolean;
   // Human-readable reasons the run is not complete. Empty when complete.
   incompleteReasons: string[];
+  // Typed truncation state. When either object may be truncated the
+  // transition totals are PARTIAL and must not be quoted as authoritative.
+  truncation: HistoryTruncation & { transitionTotalsArePartial: boolean };
+  // Observed lifecycle values that the stage map does not deliberately
+  // cover. Aggregate labels only; never record identifiers. A nonempty
+  // list makes the run incomplete: an unmapped value cannot be classified,
+  // and guessing it is forbidden.
+  unmappedLifecycleValues: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +381,64 @@ function historyFinding(access: HistoryAccess): HistoryFinding {
 }
 
 // ---------------------------------------------------------------------------
+// Lead/Contact field normalization (Bite 4G1 hardening)
+// ---------------------------------------------------------------------------
+
+// The one internal field token the adapter sees after normalization. Lead and
+// Contact may use DIFFERENT API names in the org; the adapter takes a single
+// lifecycleFieldApiName, so both source fields are normalized to this token
+// before ONE chronological run. Using the Lead name for Contact rows (or vice
+// versa) would silently drop every row from the other object.
+export const CANONICAL_LIFECYCLE_FIELD = '__sourced_canonical_lifecycle__';
+
+export interface NormalizationInput {
+  rows: SalesforceHistoryRow[];
+  leadLifecycleField: string;
+  contactLifecycleField: string;
+}
+
+export interface NormalizationResult {
+  // Rows retained, with `field` rewritten to the canonical token and every
+  // OTHER property (including the original values) preserved untouched.
+  rows: SalesforceHistoryRow[];
+  keptLeadRows: number;
+  keptContactRows: number;
+  // Rows dropped because their field is not the confirmed lifecycle field
+  // for their own object (e.g. Status, Owner, or the OTHER object's
+  // lifecycle field appearing on this object).
+  ignoredOtherFieldRows: number;
+}
+
+// Keep only rows whose field matches the confirmed lifecycle field FOR THEIR
+// OWN OBJECT, then rewrite that field to the canonical token so a single
+// adapter run sees one coherent chronology per person. The original field
+// name is not mutated in the caller's array, and exported evidence keeps the
+// real value: normalization is an in-memory view for calculation only.
+export function normalizeLifecycleHistoryRows(
+  input: NormalizationInput,
+): NormalizationResult {
+  const lead = input.leadLifecycleField.trim();
+  const contact = input.contactLifecycleField.trim();
+  const rows: SalesforceHistoryRow[] = [];
+  let keptLeadRows = 0;
+  let keptContactRows = 0;
+  let ignoredOtherFieldRows = 0;
+
+  for (const row of input.rows) {
+    const expected = row.parentObject === 'Lead' ? lead : contact;
+    if (expected === '' || row.field !== expected) {
+      ignoredOtherFieldRows += 1;
+      continue;
+    }
+    if (row.parentObject === 'Lead') keptLeadRows += 1;
+    else keptContactRows += 1;
+    // Copy, never mutate: the caller's evidence keeps the original field.
+    rows.push({ ...row, field: CANONICAL_LIFECYCLE_FIELD });
+  }
+  return { rows, keptLeadRows, keptContactRows, ignoredOtherFieldRows };
+}
+
+// ---------------------------------------------------------------------------
 // Transition counting (delegates to the Bite 4B adapter)
 // ---------------------------------------------------------------------------
 
@@ -434,8 +519,12 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     }
   }
 
-  const batches = (rows: number, size: number): number =>
-    size > 0 ? Math.ceil(rows / size) : 0;
+  // Unknown in, unknown out: an unmeasured volume can never be reported as
+  // zero batches, which would read as "nothing to page".
+  const batches = (rows: MeasuredCount, size: number): MeasuredCount =>
+    rows === null ? null : size > 0 ? Math.ceil(rows / size) : 0;
+  const exceeds = (value: MeasuredCount, limit: number): boolean =>
+    value !== null && value > limit;
 
   const cm = input.campaignMembers;
   const volume: VolumeFinding = {
@@ -444,17 +533,52 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     // truncation. The changed-or-created window, when known, is the same
     // risk for the future strategy and is folded in here.
     incrementalCanExceedRowLimit:
-      cm.incrementalWindowRows > cm.currentRowLimit ||
-      (cm.changedOrCreatedWindowRows !== null &&
-        cm.changedOrCreatedWindowRows > cm.currentRowLimit),
+      exceeds(cm.incrementalWindowRows, cm.currentRowLimit) ||
+      exceeds(cm.changedOrCreatedWindowRows, cm.currentRowLimit),
     // Reconciliation is expected to be large; the question is only whether
     // it must page, which it must whenever it exceeds one batch.
     reconciliationRequiresPagination:
-      input.plannedBatchSize > 0 && cm.fullReconciliationRows > input.plannedBatchSize,
+      input.plannedBatchSize > 0 && exceeds(cm.fullReconciliationRows, input.plannedBatchSize),
     estimatedIncrementalBatches: batches(cm.incrementalWindowRows, input.plannedBatchSize),
     estimatedReconciliationBatches: batches(cm.fullReconciliationRows, input.plannedBatchSize),
     changedOrCreatedStrategyUndetermined: cm.changedOrCreatedWindowRows === null,
   };
+
+  // ISSUE 6: every observed nonblank value must be deliberately mapped or
+  // explicitly reported unknown. Never fuzzy-matched, and only lead / mql /
+  // out_of_scope are legal targets (the adapter rejects anything else).
+  const mapped = new Set(Object.keys(input.historyConfig.stageValueMap ?? {}));
+  const observed = [
+    ...(input.observedLeadLifecycleValues ?? []),
+    ...(input.observedContactLifecycleValues ?? []),
+  ];
+  const unmappedLifecycleValues = [
+    ...new Set(
+      observed
+        .map((v) => (v ?? '').trim())
+        .filter((v) => v !== '' && !mapped.has(v)),
+    ),
+  ].sort();
+  if (unmappedLifecycleValues.length > 0) {
+    incompleteReasons.push(
+      `${unmappedLifecycleValues.length} observed lifecycle value(s) are not mapped: ${unmappedLifecycleValues.join(', ')}. Map each to lead, mql, or out_of_scope; never guess.`,
+    );
+  }
+
+  // ISSUE 4: truncation makes the run incomplete and the totals partial.
+  const truncation = {
+    leadPossiblyTruncated: input.historyTruncation?.leadPossiblyTruncated === true,
+    contactPossiblyTruncated: input.historyTruncation?.contactPossiblyTruncated === true,
+    transitionTotalsArePartial: false,
+  };
+  truncation.transitionTotalsArePartial =
+    truncation.leadPossiblyTruncated || truncation.contactPossiblyTruncated;
+  if (truncation.leadPossiblyTruncated) {
+    incompleteReasons.push('LeadHistory export may be truncated; transition totals are PARTIAL.');
+  }
+  if (truncation.contactPossiblyTruncated) {
+    incompleteReasons.push('ContactHistory export may be truncated; transition totals are PARTIAL.');
+  }
 
   return {
     dry_run: true,
@@ -493,6 +617,8 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     pass,
     complete: pass === 'B' && incompleteReasons.length === 0,
     incompleteReasons,
+    truncation,
+    unmappedLifecycleValues,
   };
 }
 

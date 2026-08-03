@@ -6,8 +6,13 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
+  CANONICAL_LIFECYCLE_FIELD,
   assertNoIdentifierLeakage,
+  normalizeLifecycleHistoryRows,
   summarizeDiscovery,
 } from './leadSyncDiscovery';
 import type {
@@ -760,5 +765,350 @@ describe('discovery workflow template safety (static)', () => {
     expect(raw).not.toMatch(/documentId"\s*:\s*"[^"]+"/);
     expect(raw.toLowerCase()).not.toMatch(/"credentials"\s*:\s*\{\s*"/);
     expect(raw).not.toMatch(/api[_-]?key|bearer |secret/i);
+  });
+});
+
+// --- Lead/Contact normalization (evaluator correction, issue 2) ------------
+
+describe('lifecycle field normalization across Lead and Contact', () => {
+  const LEAD_FIELD = 'Synth_Lead_Lifecycle__c';
+  const CONTACT_FIELD = 'Synth_Contact_Lifecycle__c';
+
+  it('keeps each object\'s own field, rewrites both to one canonical token', () => {
+    const result = normalizeLifecycleHistoryRows({
+      rows: [
+        historyRow({ historyId: 'L1', parentObject: 'Lead', parentId: 'SYNTH-LEAD-1', field: LEAD_FIELD }),
+        historyRow({ historyId: 'C1', parentObject: 'Contact', parentId: 'SYNTH-CONTACT-1', field: CONTACT_FIELD }),
+      ],
+      leadLifecycleField: LEAD_FIELD,
+      contactLifecycleField: CONTACT_FIELD,
+    });
+    expect(result.keptLeadRows).toBe(1);
+    expect(result.keptContactRows).toBe(1);
+    expect(result.rows.every((r) => r.field === CANONICAL_LIFECYCLE_FIELD)).toBe(true);
+  });
+
+  it('ignores unrelated fields, including the other object\'s lifecycle field', () => {
+    const result = normalizeLifecycleHistoryRows({
+      rows: [
+        historyRow({ historyId: 'L1', parentObject: 'Lead', field: LEAD_FIELD }),
+        historyRow({ historyId: 'L2', parentObject: 'Lead', field: 'Status' }),
+        // The CONTACT field appearing on a Lead row is not that Lead's
+        // lifecycle field and must be dropped, not silently accepted.
+        historyRow({ historyId: 'L3', parentObject: 'Lead', field: CONTACT_FIELD }),
+      ],
+      leadLifecycleField: LEAD_FIELD,
+      contactLifecycleField: CONTACT_FIELD,
+    });
+    expect(result.keptLeadRows).toBe(1);
+    expect(result.ignoredOtherFieldRows).toBe(2);
+  });
+
+  it('never mutates the caller\'s rows: exported evidence keeps real field names', () => {
+    const original = historyRow({ historyId: 'L1', parentObject: 'Lead', field: LEAD_FIELD });
+    const rows = [original];
+    normalizeLifecycleHistoryRows({ rows, leadLifecycleField: LEAD_FIELD, contactLifecycleField: CONTACT_FIELD });
+    expect(original.field).toBe(LEAD_FIELD);
+    expect(rows[0].field).toBe(LEAD_FIELD);
+  });
+
+  it('counts transitions correctly when the two API names DIFFER', () => {
+    const normalized = normalizeLifecycleHistoryRows({
+      rows: [
+        historyRow({ historyId: 'L1', parentObject: 'Lead', parentId: 'SYNTH-LEAD-1', field: LEAD_FIELD,
+          oldValue: 'Synth Lead', newValue: 'Synth MQL', changedAt: '2026-01-10T09:00:00.000Z' }),
+        historyRow({ historyId: 'C1', parentObject: 'Contact', parentId: 'SYNTH-CONTACT-1', field: CONTACT_FIELD,
+          oldValue: 'Synth MQL', newValue: 'Synth Lead', changedAt: '2026-03-10T09:00:00.000Z' }),
+      ],
+      leadLifecycleField: LEAD_FIELD,
+      contactLifecycleField: CONTACT_FIELD,
+    });
+    const s = summarizeDiscovery(
+      input({
+        historyRows: normalized.rows,
+        historyConfig: { ...CONFIG, lifecycleFieldApiName: CANONICAL_LIFECYCLE_FIELD },
+      }),
+    );
+    // Both objects' rows counted; neither dropped.
+    expect(s.transitions.leadToMql).toBe(1);
+    expect(s.transitions.mqlToLead).toBe(1);
+  });
+
+  it('keeps a converted person as ONE chronology across the conversion', () => {
+    // Lead row then Contact row for the SAME person, via the identity map.
+    const normalized = normalizeLifecycleHistoryRows({
+      rows: [
+        historyRow({ historyId: 'L1', parentObject: 'Lead', parentId: 'SYNTH-LEAD-1', field: LEAD_FIELD,
+          oldValue: 'Synth Lead', newValue: 'Synth MQL', changedAt: '2026-01-10T09:00:00.000Z' }),
+        historyRow({ historyId: 'C1', parentObject: 'Contact', parentId: 'SYNTH-CONTACT-1', field: CONTACT_FIELD,
+          oldValue: 'Synth MQL', newValue: 'Synth Lead', changedAt: '2026-03-10T09:00:00.000Z' }),
+        historyRow({ historyId: 'C2', parentObject: 'Contact', parentId: 'SYNTH-CONTACT-1', field: CONTACT_FIELD,
+          oldValue: 'Synth Lead', newValue: 'Synth MQL', changedAt: '2026-09-10T09:00:00.000Z' }),
+      ],
+      leadLifecycleField: LEAD_FIELD,
+      contactLifecycleField: CONTACT_FIELD,
+    });
+    const s = summarizeDiscovery(
+      input({
+        historyRows: normalized.rows,
+        historyConfig: { ...CONFIG, lifecycleFieldApiName: CANONICAL_LIFECYCLE_FIELD },
+      }),
+    );
+    // One person: qualify, demote, requalify. Two separate calculations
+    // would lose the demotion that spans the conversion boundary.
+    expect(s.transitions.leadToMql).toBe(2);
+    expect(s.transitions.mqlToLead).toBe(1);
+  });
+
+  it('still works when both objects share the SAME API name', () => {
+    const normalized = normalizeLifecycleHistoryRows({
+      rows: [
+        historyRow({ historyId: 'L1', parentObject: 'Lead', field: LIFECYCLE_FIELD }),
+        historyRow({ historyId: 'C1', parentObject: 'Contact', parentId: 'SYNTH-CONTACT-1', field: LIFECYCLE_FIELD }),
+      ],
+      leadLifecycleField: LIFECYCLE_FIELD,
+      contactLifecycleField: LIFECYCLE_FIELD,
+    });
+    expect(normalized.keptLeadRows).toBe(1);
+    expect(normalized.keptContactRows).toBe(1);
+    expect(normalized.ignoredOtherFieldRows).toBe(0);
+  });
+});
+
+// --- truncation and unknown-vs-zero (issues 4 and 5) ----------------------
+
+describe('truncation makes a run incomplete', () => {
+  it('Lead-only truncation marks totals partial and the run incomplete', () => {
+    const s = summarizeDiscovery(
+      input({ historyTruncation: { leadPossiblyTruncated: true, contactPossiblyTruncated: false } }),
+    );
+    expect(s.truncation.transitionTotalsArePartial).toBe(true);
+    expect(s.complete).toBe(false);
+    expect(s.incompleteReasons.join(' ')).toContain('LeadHistory export may be truncated');
+  });
+
+  it('Contact-only truncation is identified by object', () => {
+    const s = summarizeDiscovery(
+      input({ historyTruncation: { leadPossiblyTruncated: false, contactPossiblyTruncated: true } }),
+    );
+    expect(s.complete).toBe(false);
+    expect(s.incompleteReasons.join(' ')).toContain('ContactHistory export may be truncated');
+    expect(s.incompleteReasons.join(' ')).not.toContain('LeadHistory export');
+  });
+
+  it('both truncated reports both objects', () => {
+    const s = summarizeDiscovery(
+      input({ historyTruncation: { leadPossiblyTruncated: true, contactPossiblyTruncated: true } }),
+    );
+    expect(s.truncation.transitionTotalsArePartial).toBe(true);
+    expect(s.incompleteReasons.filter((r) => r.includes('truncated'))).toHaveLength(2);
+  });
+
+  it('no truncation leaves a valid run complete', () => {
+    const s = summarizeDiscovery(
+      input({ historyTruncation: { leadPossiblyTruncated: false, contactPossiblyTruncated: false } }),
+    );
+    expect(s.truncation.transitionTotalsArePartial).toBe(false);
+    expect(s.complete).toBe(true);
+  });
+});
+
+describe('unmeasured metrics are unknown, never zero', () => {
+  it('a null volume stays null and yields null batch estimates', () => {
+    const s = summarizeDiscovery(
+      input({
+        campaignMembers: {
+          ...VOLUME,
+          incrementalWindowRows: null,
+          fullReconciliationRows: null,
+          leadMemberRows: null,
+          convertedLeadsMissingContactLink: null,
+        },
+      }),
+    );
+    expect(s.volume.incrementalWindowRows).toBeNull();
+    expect(s.volume.estimatedIncrementalBatches).toBeNull();
+    expect(s.volume.estimatedReconciliationBatches).toBeNull();
+    expect(s.volume.leadMemberRows).toBeNull();
+    // An unmeasured volume must not be read as "safely under the limit".
+    expect(s.volume.incrementalCanExceedRowLimit).toBe(false);
+    expect(s.volume.reconciliationRequiresPagination).toBe(false);
+  });
+
+  it('real Pass A volumes propagate unchanged', () => {
+    const s = summarizeDiscovery(
+      input({
+        campaignMembers: { ...VOLUME, incrementalWindowRows: 137, fullReconciliationRows: 2612, leadMemberRows: 903 },
+      }),
+    );
+    expect(s.volume.incrementalWindowRows).toBe(137);
+    expect(s.volume.fullReconciliationRows).toBe(2612);
+    expect(s.volume.leadMemberRows).toBe(903);
+    expect(s.volume.estimatedReconciliationBatches).toBe(2); // ceil(2612/2000)
+  });
+});
+
+describe('lifecycle value mapping must be deliberate', () => {
+  it('an unmapped observed value makes the run incomplete and is reported', () => {
+    const s = summarizeDiscovery(
+      input({
+        observedLeadLifecycleValues: ['Synth Lead', 'Synth Unmapped Value'],
+        observedContactLifecycleValues: ['Synth MQL'],
+      }),
+    );
+    expect(s.unmappedLifecycleValues).toEqual(['Synth Unmapped Value']);
+    expect(s.complete).toBe(false);
+    expect(s.incompleteReasons.join(' ')).toContain('not mapped');
+  });
+
+  it('blank values are not treated as unmapped', () => {
+    const s = summarizeDiscovery(
+      input({ observedLeadLifecycleValues: ['Synth Lead', '', '   '] }),
+    );
+    expect(s.unmappedLifecycleValues).toEqual([]);
+    expect(s.complete).toBe(true);
+  });
+
+  it('fully mapped values leave the run complete', () => {
+    const s = summarizeDiscovery(
+      input({
+        observedLeadLifecycleValues: ['Synth Lead', 'Synth MQL'],
+        observedContactLifecycleValues: ['Synth Customer'],
+      }),
+    );
+    expect(s.unmappedLifecycleValues).toEqual([]);
+    expect(s.complete).toBe(true);
+  });
+
+  it('reports unmapped labels without record identifiers', () => {
+    const s = summarizeDiscovery(input({ observedLeadLifecycleValues: ['Synth Unmapped Value'] }));
+    expect(() => assertNoIdentifierLeakage(s)).not.toThrow();
+  });
+});
+
+// --- generated evaluator: end-to-end from OUTSIDE the repository ----------
+//
+// The evaluator lives outside the repo (Downloads). ES module specifiers
+// resolve relative to the evaluator FILE, not the terminal's cwd, so a
+// relative './src/...' import silently pointed at Downloads/src. These tests
+// copy the generated evaluator into a temp directory well away from the
+// repository and prove it still loads the REAL repository module.
+
+describe('generated local evaluator (external module resolution)', () => {
+  const EVALUATOR = '/Users/barmengolli/Downloads/4g1-local-evaluator.mjs';
+  const repoRoot = process.cwd();
+
+  const evaluatorExists = (() => {
+    try {
+      readFileSync(EVALUATOR, 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.runIf(evaluatorExists)('resolves the repository module from a temp dir via an explicit repo-root argument', () => {
+    const dir = mkdtempSync(resolve(tmpdir(), '4g1-eval-'));
+    try {
+      // Copy the evaluator OUT of Downloads so nothing about its location
+      // can accidentally make a relative path work.
+      const copied = resolve(dir, 'evaluator.mjs');
+      writeFileSync(copied, readFileSync(EVALUATOR, 'utf8'));
+      // Minimal valid inputs; STAGE_VALUE_MAP is intentionally unfilled, so
+      // the run must stop at that guard AFTER successfully importing the
+      // module. That is precisely what proves resolution worked.
+      const guardA = resolve(dir, 'guard-a.json');
+      const passB = resolve(dir, 'pass-b.json');
+      writeFileSync(guardA, JSON.stringify({ pass: 'A', campaign_member_volumes: {} }));
+      writeFileSync(
+        passB,
+        JSON.stringify({
+          lead_lifecycle_field: 'Synth_Lead_Lifecycle__c',
+          contact_lifecycle_field: 'Synth_Contact_Lifecycle__c',
+          lead_history_status: { outcome: 'succeeded_zero_rows' },
+          contact_history_status: { outcome: 'succeeded_zero_rows' },
+          lead_history_rows: [],
+          contact_history_rows: [],
+          converted_identity_rows: [],
+        }),
+      );
+      let stderr = '';
+      let importFailed = false;
+      try {
+        execFileSync('npx', ['tsx', copied, repoRoot, guardA, passB], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        const e = err as { stderr?: string; stdout?: string };
+        stderr = String(e.stderr ?? '') + String(e.stdout ?? '');
+        importFailed = /Could not load the repository module/.test(stderr);
+      }
+      // The module MUST have loaded: the only expected stop is the
+      // deliberate stage-map guard, never a resolution failure.
+      expect(importFailed, `module resolution failed:\n${stderr}`).toBe(false);
+      expect(stderr).toMatch(/STAGE_VALUE_MAP/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it.runIf(evaluatorExists)('fails clearly when the repo root argument is wrong', () => {
+    const dir = mkdtempSync(resolve(tmpdir(), '4g1-eval-bad-'));
+    try {
+      const copied = resolve(dir, 'evaluator.mjs');
+      writeFileSync(copied, readFileSync(EVALUATOR, 'utf8'));
+      const guardA = resolve(dir, 'guard-a.json');
+      const passB = resolve(dir, 'pass-b.json');
+      writeFileSync(guardA, '{}');
+      writeFileSync(passB, '{}');
+      let combined = '';
+      try {
+        execFileSync('npx', ['tsx', copied, dir, guardA, passB], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        const e = err as { stderr?: string; stdout?: string };
+        combined = String(e.stderr ?? '') + String(e.stdout ?? '');
+      }
+      expect(combined).toMatch(/Could not load the repository module|sourced-4g1 worktree/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it.runIf(evaluatorExists)('takes an explicit repo root and hardcodes no absolute worktree path', () => {
+    const src = readFileSync(EVALUATOR, 'utf8');
+    expect(src).toContain('pathToFileURL');
+    expect(src).toContain('process.argv.slice(2)');
+    // No relative './src/...' import, and no hardcoded worktree path.
+    expect(src).not.toMatch(/from '\.\/src\/lib/);
+    expect(src).not.toMatch(/\/Users\/[^/]+\/Desktop/);
+  });
+
+  it.runIf(evaluatorExists)('requires query status and never assumes success', () => {
+    const src = readFileSync(EVALUATOR, 'utf8');
+    expect(src).toContain('lead_history_status');
+    expect(src).toContain('contact_history_status');
+    expect(src).toContain('succeeded_zero_rows');
+    expect(src).toContain('query_failed');
+    // The old always-success construction must be gone.
+    expect(src).not.toMatch(/outcome: 'succeeded_with_rows', lifecycleField: payload/);
+  });
+
+  it.runIf(evaluatorExists)('uses the canonical token, not one object\'s raw API name', () => {
+    const src = readFileSync(EVALUATOR, 'utf8');
+    expect(src).toContain('normalizeLifecycleHistoryRows');
+    expect(src).toContain('CANONICAL_LIFECYCLE_FIELD');
+    expect(src).not.toMatch(/lifecycleFieldApiName: payload\.lead_lifecycle_field/);
+  });
+
+  it.runIf(evaluatorExists)('warns about deleting the identifier-bearing export', () => {
+    const src = readFileSync(EVALUATOR, 'utf8');
+    expect(src).toMatch(/DELETE the private export/);
+    expect(src).toMatch(/Salesforce record ids/);
   });
 });
