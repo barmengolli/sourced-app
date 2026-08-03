@@ -70,7 +70,10 @@ function historyRow(over: Partial<SalesforceHistoryRow> = {}): SalesforceHistory
 
 const VOLUME: CampaignMemberVolume = {
   incrementalWindowRows: 120,
+  changedOrCreatedWindowRows: 180,
   fullReconciliationRows: 2600,
+  incrementalScope: 'organization_wide',
+  fullReconciliationScope: 'organization_wide',
   currentRowLimit: 5000,
   leadMemberRows: 900,
   contactMemberRows: 1700,
@@ -95,8 +98,9 @@ function input(over: Partial<DiscoveryInput> = {}): DiscoveryInput {
       field({ apiName: 'CreatedDate', label: 'Created Date', dataType: 'DateTime' }),
       field({ apiName: 'FirstRespondedDate', label: 'First Responded Date', dataType: 'Date' }),
     ]),
-    leadHistory: { queryable: true, rowsSampled: 1, oldest: '2025-02-01T00:00:00.000Z', newest: '2026-07-01T00:00:00.000Z' },
-    contactHistory: { queryable: true, rowsSampled: 1, oldest: '2025-03-01T00:00:00.000Z', newest: '2026-07-15T00:00:00.000Z' },
+    lifecycleFieldConfig: { leadLifecycleField: LIFECYCLE_FIELD, contactLifecycleField: LIFECYCLE_FIELD },
+    leadHistory: { outcome: 'succeeded_with_rows', lifecycleField: LIFECYCLE_FIELD, rowCount: 40, earliest: '2025-02-01T00:00:00.000Z', latest: '2026-07-01T00:00:00.000Z' },
+    contactHistory: { outcome: 'succeeded_with_rows', lifecycleField: LIFECYCLE_FIELD, rowCount: 90, earliest: '2025-03-01T00:00:00.000Z', latest: '2026-07-15T00:00:00.000Z' },
     lifecycleValues: [
       { value: 'Synth Lead', count: 1800 },
       { value: 'Synth MQL', count: 400 },
@@ -178,23 +182,34 @@ describe('lifecycle field discovery', () => {
 // --- history access --------------------------------------------------------
 
 describe('history access', () => {
-  it('records granted access with window bounds', () => {
+  it('reports lifecycle-FILTERED coverage, tied to the confirmed field', () => {
     const s = summarizeDiscovery(input());
-    expect(s.history.lead.queryable).toBe(true);
-    expect(s.history.lead.oldestTimestamp).toBe('2025-02-01T00:00:00.000Z');
-    expect(s.history.contact.newestTimestamp).toBe('2026-07-15T00:00:00.000Z');
-    expect(s.history.lead.deniedReason).toBeNull();
+    expect(s.history.lead.querySucceeded).toBe(true);
+    expect(s.history.lead.hasLifecycleRows).toBe(true);
+    expect(s.history.lead.lifecycleField).toBe(LIFECYCLE_FIELD);
+    expect(s.history.lead.lifecycleRowCount).toBe(40);
+    expect(s.history.lead.earliestLifecycleTimestamp).toBe('2025-02-01T00:00:00.000Z');
+    expect(s.history.contact.latestLifecycleTimestamp).toBe('2026-07-15T00:00:00.000Z');
   });
 
-  it('records denied access distinctly from an empty result', () => {
-    const s = summarizeDiscovery(
-      input({ leadHistory: { queryable: false, reason: 'permission_denied' } }),
+  it('distinguishes a successful ZERO-ROW result from a failed query', () => {
+    const zero = summarizeDiscovery(
+      input({ leadHistory: { outcome: 'succeeded_zero_rows', lifecycleField: LIFECYCLE_FIELD } }),
     );
-    expect(s.history.lead.queryable).toBe(false);
-    expect(s.history.lead.deniedReason).toBe('permission_denied');
-    expect(s.history.lead.oldestTimestamp).toBeNull();
-    // Denied is not the same as "no history exists".
-    expect(s.history.lead.rowsSampled).toBe(0);
+    expect(zero.history.lead.querySucceeded).toBe(true);
+    expect(zero.history.lead.hasLifecycleRows).toBe(false);
+    expect(zero.history.lead.failureReason).toBeNull();
+    expect(zero.history.lead.lifecycleRowCount).toBe(0);
+
+    const failed = summarizeDiscovery(
+      input({ leadHistory: { outcome: 'query_failed', reason: 'permission_denied' } }),
+    );
+    expect(failed.history.lead.querySucceeded).toBe(false);
+    expect(failed.history.lead.failureReason).toBe('permission_denied');
+    // A failure is NOT "no history exists".
+    expect(failed.history.lead.lifecycleField).toBeNull();
+    expect(failed.complete).toBe(false);
+    expect(failed.incompleteReasons.join(' ')).toContain('LeadHistory not queryable');
   });
 });
 
@@ -326,14 +341,47 @@ describe('volume and touch-identity gaps', () => {
     expect(s.volume.missingCampaignChannelMapping).toBe(9);
   });
 
-  it('flags a feed that would exceed the current 5,000-row assumption', () => {
-    const under = summarizeDiscovery(input());
-    expect(under.volume.exceedsCurrentRowLimit).toBe(false);
-    const over = summarizeDiscovery(
-      input({ campaignMembers: { ...VOLUME, fullReconciliationRows: 7400 } }),
+  it('separates incremental truncation risk from reconciliation pagination', () => {
+    const base = summarizeDiscovery(input());
+    // 120 incremental rows: no truncation risk. 2600 reconciliation rows at
+    // a 2000 batch size: pagination IS required. One flag could not say both.
+    expect(base.volume.incrementalCanExceedRowLimit).toBe(false);
+    expect(base.volume.reconciliationRequiresPagination).toBe(true);
+
+    const bigIncremental = summarizeDiscovery(
+      input({ campaignMembers: { ...VOLUME, incrementalWindowRows: 6200 } }),
     );
-    expect(over.volume.exceedsCurrentRowLimit).toBe(true);
-    expect(over.volume.estimatedReconciliationBatches).toBe(4); // ceil(7400 / 2000)
+    expect(bigIncremental.volume.incrementalCanExceedRowLimit).toBe(true);
+
+    // A future changed-or-created window can breach the limit on its own.
+    const bigChanged = summarizeDiscovery(
+      input({ campaignMembers: { ...VOLUME, changedOrCreatedWindowRows: 5200 } }),
+    );
+    expect(bigChanged.volume.incrementalCanExceedRowLimit).toBe(true);
+  });
+
+  it('labels volumes organization-wide unless a campaign scope was applied', () => {
+    const orgWide = summarizeDiscovery(input());
+    expect(orgWide.volume.incrementalScope).toBe('organization_wide');
+    expect(orgWide.volume.fullReconciliationScope).toBe('organization_wide');
+    const scoped = summarizeDiscovery(
+      input({
+        campaignMembers: {
+          ...VOLUME,
+          incrementalScope: 'approved_campaign_scope',
+          fullReconciliationScope: 'approved_campaign_scope',
+        },
+      }),
+    );
+    expect(scoped.volume.fullReconciliationScope).toBe('approved_campaign_scope');
+  });
+
+  it('flags an undetermined changed-or-created strategy instead of assuming zero', () => {
+    const s = summarizeDiscovery(
+      input({ campaignMembers: { ...VOLUME, changedOrCreatedWindowRows: null } }),
+    );
+    expect(s.volume.changedOrCreatedStrategyUndetermined).toBe(true);
+    expect(s.volume.changedOrCreatedWindowRows).toBeNull();
   });
 
   it('estimates pagination batches from the planned batch size', () => {
@@ -383,6 +431,89 @@ describe('summary output contract', () => {
   });
 });
 
+// --- two-pass validation (issues 1, 2, 5) ---------------------------------
+
+describe('two-pass execution model', () => {
+  it('Pass A (no field config) is never complete and says why', () => {
+    const { lifecycleFieldConfig, ...passA } = input();
+    void lifecycleFieldConfig;
+    const s = summarizeDiscovery(passA as DiscoveryInput);
+    expect(s.pass).toBe('A');
+    expect(s.complete).toBe(false);
+    expect(s.lifecycleField.validation).toEqual([]);
+    expect(s.lifecycleField.configurationValid).toBe(false);
+    expect(s.incompleteReasons.join(' ')).toContain('Pass B is required');
+  });
+
+  it('Pass B with valid config for BOTH objects is complete', () => {
+    const s = summarizeDiscovery(input());
+    expect(s.pass).toBe('B');
+    expect(s.lifecycleField.configurationValid).toBe(true);
+    expect(s.complete).toBe(true);
+    expect(s.incompleteReasons).toEqual([]);
+  });
+
+  it('validates Lead and Contact INDEPENDENTLY, including different API names', () => {
+    const s = summarizeDiscovery(
+      input({
+        contactFields: fields('Contact', [
+          field({ apiName: 'Contact_Lifecycle__c', label: 'Lifecycle Stage', isHistoryTracked: true }),
+        ]),
+        lifecycleFieldConfig: {
+          leadLifecycleField: LIFECYCLE_FIELD,
+          contactLifecycleField: 'Contact_Lifecycle__c',
+        },
+      }),
+    );
+    expect(s.lifecycleField.configurationValid).toBe(true);
+    expect(s.lifecycleField.apiNamesMatch).toBe(false);
+    const [lead, contact] = s.lifecycleField.validation;
+    expect(lead.configured).toBe(LIFECYCLE_FIELD);
+    expect(contact.configured).toBe('Contact_Lifecycle__c');
+    expect(s.complete).toBe(true);
+  });
+
+  it('rejects an unreplaced placeholder on either object', () => {
+    for (const placeholder of ['LEAD_LIFECYCLE_FIELD', 'FIELD_API_NAME', 'REPLACE_ME']) {
+      const s = summarizeDiscovery(
+        input({
+          lifecycleFieldConfig: { leadLifecycleField: placeholder, contactLifecycleField: LIFECYCLE_FIELD },
+        }),
+      );
+      expect(s.lifecycleField.configurationValid, placeholder).toBe(false);
+      expect(s.lifecycleField.validation[0].rejection).toBe('placeholder_not_replaced');
+      // A run with a placeholder can NEVER be complete.
+      expect(s.complete).toBe(false);
+    }
+  });
+
+  it('rejects a blank field name', () => {
+    const s = summarizeDiscovery(
+      input({ lifecycleFieldConfig: { leadLifecycleField: '  ', contactLifecycleField: LIFECYCLE_FIELD } }),
+    );
+    expect(s.lifecycleField.validation[0].rejection).toBe('blank');
+    expect(s.complete).toBe(false);
+  });
+
+  it('rejects a name FieldDefinition never returned, and never falls back to the other object', () => {
+    const s = summarizeDiscovery(
+      input({
+        lifecycleFieldConfig: { leadLifecycleField: 'Invented_Field__c', contactLifecycleField: LIFECYCLE_FIELD },
+      }),
+    );
+    expect(s.lifecycleField.validation[0].rejection).toBe('not_returned_by_field_definition');
+    expect(s.complete).toBe(false);
+  });
+
+  it('rejects a field whose history is not queryable', () => {
+    const s = summarizeDiscovery(
+      input({ leadHistory: { outcome: 'query_failed', reason: 'permission_denied' } }),
+    );
+    expect(s.lifecycleField.validation[0].rejection).toBe('not_history_queryable');
+    expect(s.complete).toBe(false);
+  });
+});
+
 // --- static workflow-template safety --------------------------------------
 
 describe('discovery workflow template safety (static)', () => {
@@ -398,6 +529,7 @@ describe('discovery workflow template safety (static)', () => {
       executeOnce?: boolean;
       credentials?: Record<string, unknown>;
       parameters: Record<string, unknown>;
+      notes?: string;
     }>;
     connections: Record<string, { main: Array<Array<{ node: string }>> }>;
   };
@@ -405,7 +537,13 @@ describe('discovery workflow template safety (static)', () => {
 
   it('is disabled and manual-trigger only, with no schedule trigger', () => {
     expect(template.active).toBe(false);
-    expect(template.nodes.filter((n) => n.type === 'n8n-nodes-base.manualTrigger')).toHaveLength(1);
+    // Two manual triggers: one per pass. Neither is a schedule.
+    const triggers = template.nodes.filter((n) => n.type === 'n8n-nodes-base.manualTrigger');
+    expect(triggers).toHaveLength(2);
+    expect(triggers.map((t) => t.name).sort()).toEqual([
+      'PASS A: click Execute (manual only)',
+      'PASS B: click Execute (manual only)',
+    ]);
     expect(template.nodes.some((n) => n.type.toLowerCase().includes('scheduletrigger'))).toBe(false);
     expect(template.nodes.some((n) => n.type.toLowerCase().includes('cron'))).toBe(false);
   });
@@ -455,48 +593,155 @@ describe('discovery workflow template safety (static)', () => {
     }
   });
 
-  it('every referenced node is an executed ancestor', () => {
-    // Build the ancestor set by walking the linear chain from the trigger.
+  it('every referenced node is an executed ancestor within its own pass', () => {
     const nextOf = (name: string): string[] =>
       (template.connections[name]?.main?.[0] ?? []).map((c) => c.node);
-    const order: string[] = [];
-    let cursor: string | undefined = 'When clicking Execute (manual only)';
-    const guard = new Set<string>();
-    while (cursor && !guard.has(cursor)) {
-      guard.add(cursor);
-      order.push(cursor);
-      cursor = nextOf(cursor)[0];
-    }
-    const indexOf = (name: string) => order.indexOf(name);
+    // Each pass is its own linear chain from its own manual trigger.
+    const chains = [
+      'PASS A: click Execute (manual only)',
+      'PASS B: click Execute (manual only)',
+    ].map((start) => {
+      const order: string[] = [];
+      let cursor: string | undefined = start;
+      const seen = new Set<string>();
+      while (cursor && !seen.has(cursor)) {
+        seen.add(cursor);
+        order.push(cursor);
+        cursor = nextOf(cursor)[0];
+      }
+      return order;
+    });
     for (const node of template.nodes) {
       const js = String((node.parameters as { jsCode?: string }).jsCode ?? '');
-      for (const m of js.matchAll(/\$\(\s*['"`]([^'"`]+)['"`]\s*\)/g)) {
-        const referenced = m[1];
-        expect(indexOf(referenced), `${node.name} references non-ancestor ${referenced}`)
-          .toBeGreaterThanOrEqual(0);
-        expect(indexOf(referenced), `${node.name} references later node ${referenced}`)
-          .toBeLessThan(indexOf(node.name));
+      const query = String((node.parameters as { query?: string }).query ?? '');
+      const chain = chains.find((c) => c.includes(node.name));
+      expect(chain, `${node.name} belongs to no pass chain`).toBeTruthy();
+      const idx = chain!.indexOf(node.name);
+      for (const source of [js, query]) {
+        for (const m of source.matchAll(/\$\(\s*['"`]([^'"`]+)['"`]\s*\)/g)) {
+          const referenced = m[1];
+          const refIdx = chain!.indexOf(referenced);
+          expect(refIdx, `${node.name} references non-ancestor ${referenced}`)
+            .toBeGreaterThanOrEqual(0);
+          expect(refIdx, `${node.name} references later node ${referenced}`).toBeLessThan(idx);
+        }
       }
     }
   });
 
-  it('the guard is the only successful terminal node', () => {
+  it('a guard is the only successful terminal of each pass', () => {
     const terminals = template.nodes
       .map((n) => n.name)
-      .filter((name) => (template.connections[name]?.main?.[0] ?? []).length === 0);
-    expect(terminals).toEqual(['GUARD: dry-run summary (shared, aggregate only)']);
-    const guard = template.nodes.find((n) => n.name.startsWith('GUARD'))!;
-    const js = String((guard.parameters as { jsCode: string }).jsCode);
-    expect(js).toContain('dry_run');
-    expect(js).toContain('writes_attempted');
-    expect(js).toContain('throw new Error');
+      .filter((name) => (template.connections[name]?.main?.[0] ?? []).length === 0)
+      .sort();
+    expect(terminals).toEqual([
+      'GUARD A: Pass A summary (shared, aggregate only)',
+      'GUARD B: Pass B summary (shared, aggregate only)',
+    ]);
+    for (const guard of template.nodes.filter((n) => n.name.startsWith('GUARD'))) {
+      const js = String((guard.parameters as { jsCode: string }).jsCode);
+      expect(js).toContain('dry_run');
+      expect(js).toContain('writes_attempted');
+      expect(js).toContain('throw new Error');
+    }
+    // Pass B's guard must additionally refuse any surviving placeholder.
+    const guardB = template.nodes.find((n) => n.name.startsWith('GUARD B'))!;
+    const jsB = String((guardB.parameters as { jsCode: string }).jsCode);
+    expect(jsB).toContain('unresolved placeholder');
   });
 
   it('fails loudly on empty required results rather than passing silently', () => {
-    const validate = template.nodes.find((n) => n.name.startsWith('VALIDATE'))!;
+    const validate = template.nodes.find((n) => n.name.startsWith('A2: VALIDATE'))!;
     const js = String((validate.parameters as { jsCode: string }).jsCode);
     expect(js).toContain('throw new Error');
     expect(js).toContain('DISCOVERY FAILED');
+  });
+
+  it('rejects placeholders BEFORE any Pass B query runs', () => {
+    const reject = template.nodes.find((n) => n.name.startsWith('B0: REJECT'))!;
+    const js = String((reject.parameters as { jsCode: string }).jsCode);
+    expect(js).toContain('PASS B FAILED');
+    expect(js).toContain('LEAD_LIFECYCLE_FIELD');
+    expect(js).toContain('CONTACT_LIFECYCLE_FIELD');
+    // B0 must sit before every Pass B Salesforce query.
+    const order: string[] = [];
+    let cursor: string | undefined = 'PASS B: click Execute (manual only)';
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      order.push(cursor);
+      cursor = (template.connections[cursor]?.main?.[0] ?? []).map((c) => c.node)[0];
+    }
+    const rejectIdx = order.indexOf(reject.name);
+    const firstQuery = order.findIndex(
+      (name) => template.nodes.find((n) => n.name === name)?.type === 'n8n-nodes-base.salesforce',
+    );
+    expect(rejectIdx).toBeLessThan(firstQuery);
+  });
+
+  it('filters history coverage queries to the confirmed lifecycle field', () => {
+    for (const name of [
+      'B3: LeadHistory lifecycle coverage (field-filtered)',
+      'B4: ContactHistory lifecycle coverage (field-filtered)',
+    ]) {
+      const node = template.nodes.find((n) => n.name === name)!;
+      const q = String((node.parameters as { query: string }).query);
+      // Whole-object history is NOT lifecycle coverage.
+      expect(q).toContain('WHERE Field =');
+      expect(q).toMatch(/lifecycle_field/);
+    }
+  });
+
+  it('fetches actual history ROWS with values and timestamps, paginated', () => {
+    for (const name of [
+      'B5: LeadHistory lifecycle rows (page 1)',
+      'B6: ContactHistory lifecycle rows (page 1)',
+    ]) {
+      const node = template.nodes.find((n) => n.name === name)!;
+      const q = String((node.parameters as { query: string }).query);
+      expect(q).toContain('OldValue');
+      expect(q).toContain('NewValue');
+      expect(q).toContain('CreatedDate');
+      expect(q).toContain('WHERE Field =');
+      // Explicit pagination, so truncation is visible rather than silent.
+      expect(q).toMatch(/LIMIT \d+ OFFSET \d+/);
+    }
+  });
+
+  it('never counts an alwaysOutputData empty sentinel as a row', () => {
+    const codeNodes = template.nodes.filter((n) => n.type === 'n8n-nodes-base.code');
+    const counting = codeNodes.filter((n) =>
+      String((n.parameters as { jsCode: string }).jsCode).includes('.all()'),
+    );
+    expect(counting.length).toBeGreaterThan(0);
+    for (const n of counting) {
+      const js = String((n.parameters as { jsCode: string }).jsCode);
+      expect(js, `${n.name} must filter empty sentinels`).toContain('Object.keys');
+    }
+  });
+
+  it('keeps campaign names in the PRIVATE node and out of every guard', () => {
+    const priv = template.nodes.find((n) => n.name.includes('campaign scope'))!;
+    const q = String((priv.parameters as { query: string }).query);
+    // Names are deliberately present here to support the scope decision.
+    expect(q).toContain('Campaign.Name');
+    expect(priv.name).toContain('DO NOT SHARE');
+    for (const guard of template.nodes.filter((n) => n.name.startsWith('GUARD'))) {
+      const js = String((guard.parameters as { jsCode: string }).jsCode);
+      expect(js).not.toContain('Campaign.Name');
+      expect(js).not.toContain("$('PRIVATE (n8n only): DO NOT SHARE - campaign scope");
+    }
+  });
+
+  it('labels CampaignMember volume queries organization-wide', () => {
+    for (const name of [
+      'A3: CampaignMember incremental volume (org-wide, 2-day CreatedDate)',
+      'A5: CampaignMember reconciliation volume (org-wide)',
+    ]) {
+      const node = template.nodes.find((n) => n.name === name)!;
+      expect(node.name).toContain('org-wide');
+      expect(String(node.notes ?? '')).toMatch(/ORGANIZATION-WIDE/);
+    }
   });
 
   it('labels the private diagnostic and keeps it out of the shared summary', () => {

@@ -47,15 +47,44 @@ export interface ObjectFieldDiscovery {
   fields: DiscoveredField[];
 }
 
+// Lifecycle-history coverage for ONE object, measured against the CONFIRMED
+// lifecycle field only. Whole-object history is a different (larger) number
+// and must never be reported as lifecycle coverage.
+//
+// The three outcomes are deliberately distinct: a successful query that
+// returned zero lifecycle rows is NOT the same as an inaccessible object,
+// and neither is the same as rows being present. Salesforce nodes running
+// with alwaysOutputData emit an empty {} sentinel on a zero-row result, so
+// 'succeeded_zero_rows' is what an honest empty looks like.
 export type HistoryAccess =
-  | { queryable: true; rowsSampled: number; oldest: string | null; newest: string | null }
-  | { queryable: false; reason: 'permission_denied' | 'not_attempted' };
+  | {
+      outcome: 'succeeded_with_rows';
+      lifecycleField: string;
+      rowCount: number;
+      earliest: string | null;
+      latest: string | null;
+    }
+  | { outcome: 'succeeded_zero_rows'; lifecycleField: string }
+  | { outcome: 'query_failed'; reason: 'permission_denied' | 'not_attempted' | 'query_error' };
+
+// Whether a count covers the WHOLE Salesforce org or only an explicitly
+// approved campaign scope. A number is never labeled "in scope" unless a
+// campaign filter was actually applied to the query that produced it.
+export type VolumeScope = 'organization_wide' | 'approved_campaign_scope';
 
 export interface CampaignMemberVolume {
-  // Rows the CURRENT nightly window (rolling CreatedDate) would return.
+  // Rows the CURRENT nightly window (rolling CreatedDate, 2 days) returns.
   incrementalWindowRows: number;
-  // Rows a full reconciliation over the in-scope campaigns would return.
+  // Rows a FUTURE changed-or-created strategy would return
+  // (LastModifiedDate/SystemModstamp based), when the field discovery makes
+  // it determinable. null means the org did not expose what is needed.
+  changedOrCreatedWindowRows: number | null;
+  // Rows a full reconciliation returns.
   fullReconciliationRows: number;
+  // Scope of each number above. The current queries are organization-wide;
+  // labeling them otherwise would overstate what was measured.
+  incrementalScope: VolumeScope;
+  fullReconciliationScope: VolumeScope;
   // The ceiling the current production workflow assumes.
   currentRowLimit: number;
   // Rows whose parent is a Lead vs a Contact.
@@ -81,7 +110,41 @@ export interface LifecycleValueObservation {
   count: number;
 }
 
+// The confirmed lifecycle field API names, entered by a human after Pass A
+// and validated in Pass B. Lead and Contact are INDEPENDENT: nothing here
+// assumes they share an API name, and neither may be guessed.
+export interface LifecycleFieldConfig {
+  leadLifecycleField: string;
+  contactLifecycleField: string;
+}
+
+// Why a configured lifecycle field is unusable. Every one of these must
+// fail the run loudly rather than letting Pass B "succeed" on a guess.
+export type LifecycleFieldRejection =
+  | 'placeholder_not_replaced'
+  | 'blank'
+  | 'not_returned_by_field_definition'
+  | 'not_history_queryable';
+
+export interface LifecycleFieldValidation {
+  object: 'Lead' | 'Contact';
+  configured: string;
+  valid: boolean;
+  rejection: LifecycleFieldRejection | null;
+}
+
+// Values that mean "the user never filled this in".
+const PLACEHOLDERS: ReadonlySet<string> = new Set([
+  'FIELD_API_NAME',
+  'LEAD_LIFECYCLE_FIELD',
+  'CONTACT_LIFECYCLE_FIELD',
+  'REPLACE_ME',
+  'TODO',
+]);
+
 export interface DiscoveryInput {
+  // Pass B only. Omit during Pass A, when field names are not yet known.
+  lifecycleFieldConfig?: LifecycleFieldConfig;
   leadFields: ObjectFieldDiscovery;
   contactFields: ObjectFieldDiscovery;
   campaignMemberFields: ObjectFieldDiscovery;
@@ -115,11 +178,17 @@ export interface FieldFinding {
 }
 
 export interface HistoryFinding {
-  queryable: boolean;
-  deniedReason: 'permission_denied' | 'not_attempted' | null;
-  rowsSampled: number;
-  oldestTimestamp: string | null;
-  newestTimestamp: string | null;
+  // True only when the query itself succeeded, whether or not it found rows.
+  querySucceeded: boolean;
+  // True when the query succeeded AND returned at least one lifecycle row.
+  hasLifecycleRows: boolean;
+  failureReason: 'permission_denied' | 'not_attempted' | 'query_error' | null;
+  // The confirmed lifecycle field this coverage was measured against; null
+  // when the query never ran.
+  lifecycleField: string | null;
+  lifecycleRowCount: number;
+  earliestLifecycleTimestamp: string | null;
+  latestLifecycleTimestamp: string | null;
 }
 
 export interface TransitionCounts {
@@ -137,10 +206,17 @@ export interface TransitionCounts {
 }
 
 export interface VolumeFinding extends CampaignMemberVolume {
-  // True when either scope exceeds the current workflow's assumption.
-  exceedsCurrentRowLimit: boolean;
+  // Two DIFFERENT risks, never conflated into one flag:
+  //  - the nightly incremental query silently truncating at the current
+  //    5,000-row limit (a correctness bug today), and
+  //  - a full reconciliation needing pagination (a design requirement for
+  //    the rebuild, not a bug).
+  incrementalCanExceedRowLimit: boolean;
+  reconciliationRequiresPagination: boolean;
   estimatedIncrementalBatches: number;
   estimatedReconciliationBatches: number;
+  // True when a future changed-or-created window could not be sized.
+  changedOrCreatedStrategyUndetermined: boolean;
 }
 
 export interface DiscoverySummary {
@@ -151,8 +227,15 @@ export interface DiscoverySummary {
     contact: FieldFinding;
     // True when both objects expose a lifecycle field under the SAME api
     // name; false when they differ (which the current workflow's code
-    // assumes away).
+    // assumes away). Informational only: nothing downstream may rely on
+    // them matching.
     apiNamesMatch: boolean;
+    // Pass B validation of the human-entered names, per object. Empty
+    // during Pass A, when no names have been confirmed yet.
+    validation: LifecycleFieldValidation[];
+    // True only when BOTH configured names passed validation. A run with
+    // this false must not be treated as a completed discovery.
+    configurationValid: boolean;
   };
   candidateDateFields: {
     becameLead: string[];
@@ -168,6 +251,14 @@ export interface DiscoverySummary {
   transitions: TransitionCounts;
   volume: VolumeFinding;
   unresolvedDecisions: string[];
+  // Which pass produced this summary, and whether it is complete enough to
+  // design Bite 4G2 against. Pass A is field/scope discovery only and is
+  // NEVER complete; Pass B is complete only with valid field configuration
+  // and queryable lifecycle history for both objects.
+  pass: 'A' | 'B';
+  complete: boolean;
+  // Human-readable reasons the run is not complete. Empty when complete.
+  incompleteReasons: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -202,22 +293,63 @@ function fieldFinding(discovery: ObjectFieldDiscovery, hints: string[]): FieldFi
   };
 }
 
+// Validate ONE object's configured lifecycle field against what
+// FieldDefinition actually returned and whether its history is queryable.
+// Never guesses, never falls back to the other object's name.
+export function validateLifecycleField(
+  object: 'Lead' | 'Contact',
+  configured: string,
+  discovery: ObjectFieldDiscovery,
+  history: HistoryAccess,
+): LifecycleFieldValidation {
+  const trimmed = (configured ?? '').trim();
+  const reject = (rejection: LifecycleFieldRejection): LifecycleFieldValidation => ({
+    object,
+    configured: trimmed,
+    valid: false,
+    rejection,
+  });
+  if (trimmed === '') return reject('blank');
+  if (PLACEHOLDERS.has(trimmed.toUpperCase())) return reject('placeholder_not_replaced');
+  const known = discovery.fields.some((f) => f.apiName === trimmed);
+  if (!known) return reject('not_returned_by_field_definition');
+  // History must be QUERYABLE. A successful zero-row result still proves
+  // access; only an outright query failure disqualifies the field.
+  if (history.outcome === 'query_failed') return reject('not_history_queryable');
+  return { object, configured: trimmed, valid: true, rejection: null };
+}
+
 function historyFinding(access: HistoryAccess): HistoryFinding {
-  if (!access.queryable) {
+  if (access.outcome === 'query_failed') {
     return {
-      queryable: false,
-      deniedReason: access.reason,
-      rowsSampled: 0,
-      oldestTimestamp: null,
-      newestTimestamp: null,
+      querySucceeded: false,
+      hasLifecycleRows: false,
+      failureReason: access.reason,
+      lifecycleField: null,
+      lifecycleRowCount: 0,
+      earliestLifecycleTimestamp: null,
+      latestLifecycleTimestamp: null,
+    };
+  }
+  if (access.outcome === 'succeeded_zero_rows') {
+    return {
+      querySucceeded: true,
+      hasLifecycleRows: false,
+      failureReason: null,
+      lifecycleField: access.lifecycleField,
+      lifecycleRowCount: 0,
+      earliestLifecycleTimestamp: null,
+      latestLifecycleTimestamp: null,
     };
   }
   return {
-    queryable: true,
-    deniedReason: null,
-    rowsSampled: access.rowsSampled,
-    oldestTimestamp: access.oldest,
-    newestTimestamp: access.newest,
+    querySucceeded: true,
+    hasLifecycleRows: access.rowCount > 0,
+    failureReason: null,
+    lifecycleField: access.lifecycleField,
+    lifecycleRowCount: access.rowCount,
+    earliestLifecycleTimestamp: access.earliest,
+    latestLifecycleTimestamp: access.latest,
   };
 }
 
@@ -276,22 +408,52 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
   const lead = fieldFinding(input.leadFields, LIFECYCLE_HINTS);
   const contact = fieldFinding(input.contactFields, LIFECYCLE_HINTS);
 
+  // Pass A has no confirmed field names yet; Pass B must validate both.
+  const config = input.lifecycleFieldConfig;
+  const pass: 'A' | 'B' = config ? 'B' : 'A';
+  const validation: LifecycleFieldValidation[] = config
+    ? [
+        validateLifecycleField('Lead', config.leadLifecycleField, input.leadFields, input.leadHistory),
+        validateLifecycleField('Contact', config.contactLifecycleField, input.contactFields, input.contactHistory),
+      ]
+    : [];
+  const configurationValid = validation.length === 2 && validation.every((v) => v.valid);
+
+  const incompleteReasons: string[] = [];
+  if (pass === 'A') {
+    incompleteReasons.push('Pass A discovers field names and scope only; Pass B is required for transition evidence.');
+  } else {
+    for (const v of validation) {
+      if (!v.valid) incompleteReasons.push(`${v.object} lifecycle field rejected: ${v.rejection}`);
+    }
+    if (input.leadHistory.outcome === 'query_failed') {
+      incompleteReasons.push(`LeadHistory not queryable: ${input.leadHistory.reason}`);
+    }
+    if (input.contactHistory.outcome === 'query_failed') {
+      incompleteReasons.push(`ContactHistory not queryable: ${input.contactHistory.reason}`);
+    }
+  }
+
   const batches = (rows: number, size: number): number =>
     size > 0 ? Math.ceil(rows / size) : 0;
 
+  const cm = input.campaignMembers;
   const volume: VolumeFinding = {
-    ...input.campaignMembers,
-    exceedsCurrentRowLimit:
-      input.campaignMembers.incrementalWindowRows > input.campaignMembers.currentRowLimit ||
-      input.campaignMembers.fullReconciliationRows > input.campaignMembers.currentRowLimit,
-    estimatedIncrementalBatches: batches(
-      input.campaignMembers.incrementalWindowRows,
-      input.plannedBatchSize,
-    ),
-    estimatedReconciliationBatches: batches(
-      input.campaignMembers.fullReconciliationRows,
-      input.plannedBatchSize,
-    ),
+    ...cm,
+    // The nightly query carries a hard LIMIT, so exceeding it means silent
+    // truncation. The changed-or-created window, when known, is the same
+    // risk for the future strategy and is folded in here.
+    incrementalCanExceedRowLimit:
+      cm.incrementalWindowRows > cm.currentRowLimit ||
+      (cm.changedOrCreatedWindowRows !== null &&
+        cm.changedOrCreatedWindowRows > cm.currentRowLimit),
+    // Reconciliation is expected to be large; the question is only whether
+    // it must page, which it must whenever it exceeds one batch.
+    reconciliationRequiresPagination:
+      input.plannedBatchSize > 0 && cm.fullReconciliationRows > input.plannedBatchSize,
+    estimatedIncrementalBatches: batches(cm.incrementalWindowRows, input.plannedBatchSize),
+    estimatedReconciliationBatches: batches(cm.fullReconciliationRows, input.plannedBatchSize),
+    changedOrCreatedStrategyUndetermined: cm.changedOrCreatedWindowRows === null,
   };
 
   return {
@@ -300,6 +462,8 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     lifecycleField: {
       lead,
       contact,
+      validation,
+      configurationValid,
       apiNamesMatch:
         lead.found &&
         contact.found &&
@@ -326,6 +490,9 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     transitions: countTransitions(input.historyRows, input.historyConfig, input.identity),
     volume,
     unresolvedDecisions: [...input.unresolvedDecisions],
+    pass,
+    complete: pass === 'B' && incompleteReasons.length === 0,
+    incompleteReasons,
   };
 }
 
