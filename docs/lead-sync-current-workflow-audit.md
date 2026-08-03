@@ -81,7 +81,10 @@ Schedule trigger -> Salesforce search -> Code transform
 ### History, demotion, and dates
 
 11. **It never queries LeadHistory or ContactHistory.** There is no
-    field-history source anywhere in the workflow.
+    field-history source anywhere in the workflow. The Bite 4G1 live run
+    (2026-08-03) showed this is moot for now: the org holds ZERO
+    lifecycle-history rows on either object, so adding such a query today
+    would return nothing. See `docs/lead-sync-discovery.md`.
 12. **It cannot observe demotions or requalifications reliably.** With no
     history query and a create-window-only scope, a person who moves MQL
     back to Lead, or requalifies later, produces no signal. The program's

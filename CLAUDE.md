@@ -750,7 +750,14 @@ Do not turn a focused task into one of these projects without approval:
   its DISABLED manual workflow template are in
   `docs/lead-sync-discovery.md`; the pure summary module is
   `src/lib/leadSyncDiscovery.ts`. No rebuild, schedule, or write path
-  exists yet.
+  exists yet. DECISIVE 4G1 FINDING (live run 2026-08-03): Salesforce holds
+  ZERO lifecycle-history rows for the confirmed field on either object, so
+  no lifecycle transition can be reconstructed from the org today. Lead
+  Status history is not a substitute, date-field edits cannot express
+  repeated movement, and enabling tracking later backfills nothing. Bite
+  4G2 must therefore build an append-only observation ledger going
+  forward; current lifecycle values are snapshot evidence only and must
+  never be reported as transitions.
 - Real authentication and restrictive role-based RLS are not implemented.
 - `Channel.year` is used by the application and listed as applied in the
   migration ledger, but `SCHEMA.sql` lacks the column and the named

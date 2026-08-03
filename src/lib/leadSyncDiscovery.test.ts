@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
+  APPROVED_LIFECYCLE_VALUE_MAP,
   BECAME_LEAD_HINTS,
   BECAME_MQL_HINTS,
   CANONICAL_LIFECYCLE_FIELD,
@@ -19,6 +20,7 @@ import {
   findDateFieldCandidates,
   normalizeLifecycleHistoryRows,
   summarizeDiscovery,
+  unmappedAgainstApprovedMap,
 } from './leadSyncDiscovery';
 import type {
   CampaignMemberVolume,
@@ -1526,5 +1528,262 @@ describe('workflow candidate hints mirror the module (no silent drift)', () => {
     expect(b10).toContain('history_both');
     expect(b10).toContain("if (value === '') return");
     expect(b10).toContain('InventoryPartial');
+  });
+});
+
+// --- 4G1 closeout: live-run defects and evidence ---------------------------
+
+describe('runtime defects exposed by the live run', () => {
+  const doc = readFileSync(resolve(process.cwd(), 'docs/lead-sync-discovery.md'), 'utf8');
+  const template = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(doc)![1]) as {
+    nodes: Array<{ name: string; parameters: Record<string, unknown>; type: string }>;
+  };
+  const node = (prefix: string) => template.nodes.find((n) => n.name.startsWith(prefix))!;
+  const query = (prefix: string) => String((node(prefix).parameters as { query: string }).query);
+
+  it('the private campaign query cannot produce a duplicate alias', () => {
+    const q = query('PRIVATE (n8n only): DO NOT SHARE - campaign scope');
+    // Campaign.Name and Campaign.Parent.Name both alias to "Name" in an
+    // aggregate query, which Salesforce rejects outright.
+    expect(q).not.toContain('Campaign.Parent.Name');
+    expect(q).toContain('Campaign.Name campaignName');
+    const selected = q.slice(q.indexOf('SELECT'), q.indexOf('FROM'));
+    expect(selected.match(/Name/g)?.length ?? 0).toBeLessThanOrEqual(2);
+  });
+
+  it('every query containing an expression is in n8n expression mode', () => {
+    for (const n of template.nodes) {
+      const q = String((n.parameters as { query?: string }).query ?? '');
+      if (!q.includes('{{')) continue;
+      // Without the '=' prefix n8n sends the braces literally, which is
+      // what produced MALFORMED_QUERY on the live run.
+      expect(q.startsWith('='), `${n.name} must be expression mode`).toBe(true);
+    }
+  });
+
+  it('no literal {{ $(...) }} text can reach Salesforce', () => {
+    const nonExpression = template.nodes.filter((n) => {
+      const q = String((n.parameters as { query?: string }).query ?? '');
+      return q.includes('{{') && !q.startsWith('=');
+    });
+    expect(nonExpression.map((n) => n.name)).toEqual([]);
+  });
+
+  it('Lead and Contact queries each use their OWN confirmed configuration value', () => {
+    const leadCoverage = query('B3');
+    const contactCoverage = query('B4');
+    const leadRows = query('B5');
+    const contactRows = query('B6');
+    const leadValues = query('B8');
+    const contactValues = query('B9');
+    for (const q of [leadCoverage, leadRows, leadValues]) {
+      expect(q).toContain('lead_lifecycle_field');
+      expect(q).not.toContain('contact_lifecycle_field');
+    }
+    for (const q of [contactCoverage, contactRows, contactValues]) {
+      expect(q).toContain('contact_lifecycle_field');
+      expect(q).not.toContain('lead_lifecycle_field');
+    }
+  });
+
+  it('does not hardcode a live org API name into the reusable template', () => {
+    const raw = JSON.stringify(template);
+    // The template ships placeholders so it stays reusable in any org.
+    expect(raw).not.toContain('Hubspot_lead_lifecycle__c');
+    expect(String((node('CONFIG B').parameters as { jsCode: string }).jsCode)).toContain(
+      "'LEAD_LIFECYCLE_FIELD'",
+    );
+  });
+
+  it('B0 validates the incoming item rather than a fragile node reference', () => {
+    const js = String((node('B0: REJECT').parameters as { jsCode: string }).jsCode);
+    expect(js).toContain('$input.first().json');
+    // Placeholder rejection survives.
+    expect(js).toContain('PASS B FAILED');
+    expect(js).toContain('LEAD_LIFECYCLE_FIELD');
+    expect(js).toContain('CONTACT_LIFECYCLE_FIELD');
+  });
+
+  it('tracks identity truncation separately from history truncation', () => {
+    const priv = String((node('PRIVATE (n8n only): DO NOT SHARE - raw export').parameters as { jsCode: string }).jsCode);
+    expect(priv).toContain('identityTruncated');
+    expect(priv).toContain('identity_possibly_truncated');
+    // Independent of the history flags.
+    expect(priv).toContain('identityRows.length >= PAGE');
+    const guardB = String((node('GUARD B').parameters as { jsCode: string }).jsCode);
+    expect(guardB).toContain('identity_possibly_truncated');
+  });
+
+  it('GUARD B derives completeness from evidence, not truncation alone', () => {
+    const js = String((node('GUARD B').parameters as { jsCode: string }).jsCode);
+    expect(js).toContain('No lifecycle transition history is available');
+    expect(js).toContain('SNAPSHOT evidence only');
+    expect(js).toContain('complete: reasons.length === 0');
+  });
+});
+
+describe('zero lifecycle history makes the result incomplete', () => {
+  it('both objects zero-row: transition discovery unavailable, run incomplete', () => {
+    const s = summarizeDiscovery(
+      input({
+        leadHistory: { outcome: 'succeeded_zero_rows', lifecycleField: LIFECYCLE_FIELD },
+        contactHistory: { outcome: 'succeeded_zero_rows', lifecycleField: LIFECYCLE_FIELD },
+      }),
+    );
+    expect(s.transitionDiscoveryAvailable).toBe(false);
+    expect(s.complete).toBe(false);
+    expect(s.incompleteReasons.join(' ')).toContain('No lifecycle transition history is available');
+    expect(s.incompleteReasons.join(' ')).toContain('snapshot evidence only');
+  });
+
+  it('names the affected object when only one is empty', () => {
+    const leadOnly = summarizeDiscovery(
+      input({ leadHistory: { outcome: 'succeeded_zero_rows', lifecycleField: LIFECYCLE_FIELD } }),
+    );
+    expect(leadOnly.incompleteReasons.join(' ')).toContain('No Lead lifecycle transition history');
+    expect(leadOnly.transitionDiscoveryAvailable).toBe(true); // Contact still has rows
+  });
+
+  it('current-value snapshot evidence survives a zero-history run', () => {
+    const s = summarizeDiscovery(
+      input({
+        leadHistory: { outcome: 'succeeded_zero_rows', lifecycleField: LIFECYCLE_FIELD },
+        contactHistory: { outcome: 'succeeded_zero_rows', lifecycleField: LIFECYCLE_FIELD },
+        lifecycleValues: [
+          { value: 'Lead', count: 1800 },
+          { value: 'Marketing Qualified Lead', count: 400 },
+        ],
+      }),
+    );
+    // The snapshot remains usable; it is simply not transition evidence.
+    expect(s.distinctLifecycleValueCount).toBe(2);
+    expect(s.lifecycleValues.find((v) => v.value === 'Lead')?.count).toBe(1800);
+    expect(s.transitionDiscoveryAvailable).toBe(false);
+  });
+});
+
+describe('converted-identity truncation is its own axis', () => {
+  it('identity truncation alone blocks person-level conclusions', () => {
+    const s = summarizeDiscovery(
+      input({
+        historyTruncation: {
+          leadPossiblyTruncated: false,
+          contactPossiblyTruncated: false,
+          identityPossiblyTruncated: true,
+        },
+      }),
+    );
+    expect(s.truncation.personLevelConclusionsUnavailable).toBe(true);
+    // History itself is NOT partial: the two axes stay separate.
+    expect(s.truncation.transitionTotalsArePartial).toBe(false);
+    expect(s.complete).toBe(false);
+    expect(s.incompleteReasons.join(' ')).toContain('person-level conclusions are NOT authoritative');
+  });
+
+  it('history truncation does not imply identity truncation', () => {
+    const s = summarizeDiscovery(
+      input({
+        historyTruncation: {
+          leadPossiblyTruncated: true,
+          contactPossiblyTruncated: false,
+          identityPossiblyTruncated: false,
+        },
+      }),
+    );
+    expect(s.truncation.transitionTotalsArePartial).toBe(true);
+    expect(s.truncation.personLevelConclusionsUnavailable).toBe(false);
+  });
+
+  it('a full identity page is treated as possibly truncated (live: 2,000 of 12,986)', () => {
+    const PAGE = 2000;
+    const identityRowCount = 2000;
+    // The workflow's rule: a FULL page means more rows very likely exist.
+    expect(identityRowCount >= PAGE).toBe(true);
+    const s = summarizeDiscovery(
+      input({
+        historyTruncation: {
+          leadPossiblyTruncated: false,
+          contactPossiblyTruncated: false,
+          identityPossiblyTruncated: identityRowCount >= PAGE,
+        },
+      }),
+    );
+    expect(s.truncation.identityPossiblyTruncated).toBe(true);
+    expect(s.complete).toBe(false);
+  });
+});
+
+describe('pagination requirements from the live volumes', () => {
+  it('103,070 reconciliation rows require pagination and breach the 5,000 assumption', () => {
+    const s = summarizeDiscovery(
+      input({
+        campaignMembers: {
+          ...VOLUME,
+          incrementalWindowRows: 10,
+          changedOrCreatedWindowRows: 10,
+          fullReconciliationRows: 103_070,
+        },
+        plannedBatchSize: 2000,
+      }),
+    );
+    expect(s.volume.reconciliationRequiresPagination).toBe(true);
+    expect(s.volume.estimatedReconciliationBatches).toBe(52); // ceil(103070/2000)
+    // The nightly incremental window is small, so it is NOT at risk: two
+    // different questions, two different flags.
+    expect(s.volume.incrementalCanExceedRowLimit).toBe(false);
+    expect(s.volume.fullReconciliationRows! > 5000).toBe(true);
+  });
+});
+
+describe('approved lifecycle mapping (live evidence)', () => {
+  it('records the exact approved mapping', () => {
+    expect(APPROVED_LIFECYCLE_VALUE_MAP).toEqual({
+      Lead: 'lead',
+      'Marketing Qualified Lead': 'mql',
+      Customer: 'out_of_scope',
+      Internal: 'out_of_scope',
+      Opportunity: 'out_of_scope',
+      Other: 'out_of_scope',
+      Partner: 'out_of_scope',
+      Prospect: 'out_of_scope',
+      'Sales Qualified Lead': 'out_of_scope',
+      Subscriber: 'out_of_scope',
+    });
+  });
+
+  it('uses only legal targets: no deal stage is ever lead lifecycle', () => {
+    const legal = new Set(['lead', 'mql', 'out_of_scope']);
+    for (const [value, target] of Object.entries(APPROVED_LIFECYCLE_VALUE_MAP)) {
+      expect(legal.has(target), `${value} -> ${target}`).toBe(true);
+    }
+    // Sales Qualified Lead and Opportunity are deal-side and must NOT be
+    // mapped to hpp/opp; they are out_of_scope for lead lifecycle.
+    expect(APPROVED_LIFECYCLE_VALUE_MAP['Sales Qualified Lead']).toBe('out_of_scope');
+    expect(APPROVED_LIFECYCLE_VALUE_MAP['Opportunity']).toBe('out_of_scope');
+  });
+
+  it('covers every observed live value', () => {
+    const observed = [
+      'Customer', 'Internal', 'Lead', 'Marketing Qualified Lead', 'Opportunity',
+      'Other', 'Partner', 'Prospect', 'Sales Qualified Lead', 'Subscriber',
+    ];
+    expect(unmappedAgainstApprovedMap(observed)).toEqual([]);
+  });
+
+  it('a future org value stays unmapped and reviewable, never guessed', () => {
+    expect(unmappedAgainstApprovedMap(['Lead', 'Newly Added Stage'])).toEqual(['Newly Added Stage']);
+    // Blank is not a reviewable label.
+    expect(unmappedAgainstApprovedMap(['', '   '])).toEqual([]);
+  });
+
+  it('an unmapped value makes a run incomplete', () => {
+    const s = summarizeDiscovery(
+      input({
+        historyConfig: { ...CONFIG, stageValueMap: APPROVED_LIFECYCLE_VALUE_MAP },
+        observedLeadLifecycleValues: ['Lead', 'Newly Added Stage'],
+      }),
+    );
+    expect(s.unmappedLifecycleValues).toEqual(['Newly Added Stage']);
+    expect(s.complete).toBe(false);
   });
 });

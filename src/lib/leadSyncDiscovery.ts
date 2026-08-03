@@ -23,6 +23,7 @@
 import { adaptLifecycleHistory } from './salesforceLifecycleHistory';
 import type {
   LifecycleHistoryConfig,
+  LifecycleValueMapping,
   PersonIdentityMap,
   SalesforceHistoryRow,
 } from './salesforceLifecycleHistory';
@@ -186,6 +187,13 @@ const PLACEHOLDERS: ReadonlySet<string> = new Set([
 export interface HistoryTruncation {
   leadPossiblyTruncated: boolean;
   contactPossiblyTruncated: boolean;
+  // Converted Lead-to-Contact identity pagination, tracked SEPARATELY from
+  // lifecycle history. The live 4G1 run returned exactly one full page of
+  // 2,000 identity pairs against 12,986 known converted links: history was
+  // untruncated (it was empty), so a shared flag reported nothing wrong.
+  // Incomplete identity mapping invalidates person-level conclusions even
+  // when history itself is complete.
+  identityPossiblyTruncated?: boolean;
 }
 
 export interface DiscoveryInput {
@@ -317,11 +325,19 @@ export interface DiscoverySummary {
   incompleteReasons: string[];
   // Typed truncation state. When either object may be truncated the
   // transition totals are PARTIAL and must not be quoted as authoritative.
-  truncation: HistoryTruncation & { transitionTotalsArePartial: boolean };
+  truncation: HistoryTruncation & {
+    transitionTotalsArePartial: boolean;
+    // True when the identity map is incomplete: person-level conclusions
+    // (distinct persons, cross-conversion chronology) cannot be trusted.
+    personLevelConclusionsUnavailable: boolean;
+  };
   // Metrics the run did NOT measure, by name. Distinct from a measured
   // zero: this list is how a reader knows a null is "never queried" rather
   // than "queried and found nothing".
   unmeasuredMetrics: string[];
+  // True when neither object yields lifecycle-history rows, so no
+  // transition can be reconstructed from this dataset at all.
+  transitionDiscoveryAvailable: boolean;
   // Observed lifecycle values that the stage map does not deliberately
   // cover. Aggregate labels only; never record identifiers. A nonempty
   // list makes the run incomplete: an unmapped value cannot be classified,
@@ -461,6 +477,42 @@ function historyFinding(access: HistoryAccess): HistoryFinding {
     earliestLifecycleTimestamp: access.earliest,
     latestLifecycleTimestamp: access.latest,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Approved lifecycle mapping (Bite 4G1 closeout, live evidence 2026-08-03)
+// ---------------------------------------------------------------------------
+
+// The exact deliberate mapping approved after the live discovery run, over
+// the ten current lifecycle values observed in the org. Only lead, mql, and
+// out_of_scope are legal: HPP and later stages are deal-side and tracked in
+// attributions, never as lead lifecycle. Nothing here is fuzzy-matched, and
+// any value NOT in this map must be routed to human review rather than
+// guessed (see assertLifecycleValuesMapped).
+export const APPROVED_LIFECYCLE_VALUE_MAP: Readonly<Record<string, LifecycleValueMapping>> = {
+  Lead: 'lead',
+  'Marketing Qualified Lead': 'mql',
+  Customer: 'out_of_scope',
+  Internal: 'out_of_scope',
+  Opportunity: 'out_of_scope',
+  Other: 'out_of_scope',
+  Partner: 'out_of_scope',
+  Prospect: 'out_of_scope',
+  'Sales Qualified Lead': 'out_of_scope',
+  Subscriber: 'out_of_scope',
+};
+
+// Values observed against the approved map that require review. A future
+// org value (a new picklist entry) surfaces here rather than defaulting to
+// any stage.
+export function unmappedAgainstApprovedMap(observed: string[]): string[] {
+  return [
+    ...new Set(
+      observed
+        .map((v) => (v ?? '').trim())
+        .filter((v) => v !== '' && !(v in APPROVED_LIFECYCLE_VALUE_MAP)),
+    ),
+  ].sort();
 }
 
 // ---------------------------------------------------------------------------
@@ -687,6 +739,23 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     if (input.contactHistory.outcome === 'query_failed') {
       incompleteReasons.push(`ContactHistory not queryable: ${input.contactHistory.reason}`);
     }
+    // A successful query returning ZERO lifecycle-history rows is a valid
+    // answer to "is history available", and a definitive NO to "can we
+    // reconstruct transitions". The live 4G1 run hit exactly this: both
+    // objects queryable, both zero rows, so no transition can be derived.
+    // Current-value snapshots remain valid evidence, but they are a
+    // photograph of today, never a record of movement.
+    const noLeadHistory = input.leadHistory.outcome === 'succeeded_zero_rows';
+    const noContactHistory = input.contactHistory.outcome === 'succeeded_zero_rows';
+    if (noLeadHistory && noContactHistory) {
+      incompleteReasons.push(
+        'No lifecycle transition history is available: LeadHistory and ContactHistory both returned zero rows for the confirmed lifecycle field. Transition discovery is UNAVAILABLE; current-value counts are snapshot evidence only and must never be described as transitions.',
+      );
+    } else if (noLeadHistory) {
+      incompleteReasons.push('No Lead lifecycle transition history is available (zero rows).');
+    } else if (noContactHistory) {
+      incompleteReasons.push('No Contact lifecycle transition history is available (zero rows).');
+    }
   }
 
   // Unknown in, unknown out: an unmeasured volume can never be reported as
@@ -739,10 +808,18 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
   const truncation = {
     leadPossiblyTruncated: input.historyTruncation?.leadPossiblyTruncated === true,
     contactPossiblyTruncated: input.historyTruncation?.contactPossiblyTruncated === true,
+    identityPossiblyTruncated: input.historyTruncation?.identityPossiblyTruncated === true,
     transitionTotalsArePartial: false,
+    personLevelConclusionsUnavailable: false,
   };
   truncation.transitionTotalsArePartial =
     truncation.leadPossiblyTruncated || truncation.contactPossiblyTruncated;
+  truncation.personLevelConclusionsUnavailable = truncation.identityPossiblyTruncated;
+  if (truncation.identityPossiblyTruncated) {
+    incompleteReasons.push(
+      'Converted-identity export may be truncated; person-level conclusions are NOT authoritative. Page further before trusting distinct-person counts or cross-conversion chronology.',
+    );
+  }
   if (truncation.leadPossiblyTruncated) {
     incompleteReasons.push('LeadHistory export may be truncated; transition totals are PARTIAL.');
   }
@@ -817,6 +894,9 @@ export function summarizeDiscovery(input: DiscoveryInput): DiscoverySummary {
     truncation,
     unmappedLifecycleValues,
     unmeasuredMetrics,
+    transitionDiscoveryAvailable:
+      input.leadHistory.outcome === 'succeeded_with_rows' ||
+      input.contactHistory.outcome === 'succeeded_with_rows',
   };
 }
 
