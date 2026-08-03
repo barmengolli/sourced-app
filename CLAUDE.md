@@ -736,7 +736,21 @@ Do not turn a focused task into one of these projects without approval:
 
 - Standardized Month, Quarter, Year, delta, comparison, and reporting controls
   are specified here but not yet implemented across the app.
-- A complete n8n audit awaits sanitized workflow exports.
+- A complete n8n audit awaits sanitized workflow exports. The LEAD-SYNC
+  workflow is now audited (Bite 4G1,
+  `docs/lead-sync-current-workflow-audit.md`): it is live, nightly at
+  hour 3 with no explicit timezone, create-window-only with no
+  watermark, discards the CampaignMember Id, never selects the
+  lifecycle field it reads (so every synced person defaults to
+  `lead`), queries no field history, writes through an unversioned RPC
+  that continues on error, and logs person-level data to a Sheet with
+  no failure alerting. It cannot maintain `lead_campaign_touches`, so
+  until the rebuild ships, new memberships reach reporting only
+  through the manual report import. The read-only discovery plan and
+  its DISABLED manual workflow template are in
+  `docs/lead-sync-discovery.md`; the pure summary module is
+  `src/lib/leadSyncDiscovery.ts`. No rebuild, schedule, or write path
+  exists yet.
 - Real authentication and restrictive role-based RLS are not implemented.
 - `Channel.year` is used by the application and listed as applied in the
   migration ledger, but `SCHEMA.sql` lacks the column and the named
