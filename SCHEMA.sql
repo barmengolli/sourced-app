@@ -1629,13 +1629,38 @@ ALTER TABLE sf_lifecycle_observations
 ALTER TABLE sf_lifecycle_observations
   ADD CONSTRAINT sf_lifecycle_observation_key_unique UNIQUE (observation_key);
 
+-- public.sf_lifecycle_resolve_person(p_ref JSONB, p_handle_map JSONB)
+--   RETURNS UUID
+--
+-- Typed person resolution. A reference states its own kind, so nothing is
+-- guessed from an untyped string:
+--   new_handle -> resolves ONLY through the batch handle map
+--   person_id  -> an existing UUID, validated and confirmed to exist
+--   alias      -> the COMPLETE (source_object, source_record_id) identity,
+--                 so a Lead and a Contact sharing an id string can never
+--                 collide through an id-only lookup
+-- Returns NULL when unresolvable; callers raise a sanitized LC005.
+--
 -- public.sf_apply_lifecycle_observations(
 --   p_run JSONB, p_persons JSONB, p_aliases JSONB, p_observations JSONB,
 --   p_events JSONB, p_projections JSONB, p_issues JSONB
 -- ) RETURNS JSONB
 --
--- SECURITY DEFINER, SET search_path = pg_catalog, every reference
--- schema-qualified. Revoked from PUBLIC, anon, and authenticated;
--- EXECUTE granted only to service_role. See the migration for the full
--- body, the LC001..LC005 SQLSTATE vocabulary, and the sanitized failure
--- contract (SQLSTATE plus an allowlisted category, never SQLERRM).
+-- Applies one serialized batch atomically. The run row is inserted FIRST
+-- from server-generated and constant values only, with every
+-- caller-controlled cast and validation deferred into the protected block,
+-- so a malformed payload still records exactly one failed run row instead
+-- of aborting with none. Observation, event, and issue key conflicts
+-- verify the COMPLETE canonical identity before being accepted as an exact
+-- retry (sync_run_id and created_at excluded under first-observation-wins;
+-- issues additionally exclude review_state and detail); differing content
+-- raises LC002 and no version is chosen. The projection follows a full
+-- ordering truth table in which undated evidence never overwrites a known
+-- timestamp and an unprovable order with differing content is a conflict.
+--
+-- Both functions: SECURITY DEFINER, SET search_path = pg_catalog, every
+-- reference schema-qualified. Revoked from PUBLIC, anon, and
+-- authenticated; EXECUTE granted only to service_role. See the migration
+-- for the full body, the LC001..LC005 SQLSTATE vocabulary, and the
+-- sanitized failure contract (SQLSTATE plus an allowlisted category,
+-- never SQLERRM).

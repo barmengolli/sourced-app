@@ -111,6 +111,77 @@ END $$;
 -- 2. Atomic apply function
 -- -------------------------------------------------------------
 
+-- -------------------------------------------------------------
+-- Typed person resolution helper.
+--
+-- A person reference states its own kind, so resolution is never a guess
+-- from an untyped string:
+--
+--   new_handle -> resolves ONLY through this batch's handle map. A handle
+--                 that is not in the map is an error, never a lookup.
+--   person_id  -> an existing internal UUID, validated and loaded directly.
+--   alias      -> the COMPLETE (source_object, source_record_id) identity.
+--                 Never source_record_id alone, so a Lead and a Contact
+--                 sharing an id string can never collide.
+--
+-- Returns NULL when the reference cannot be resolved. Callers turn that
+-- into a sanitized LC005 and fail the batch; nothing is ever guessed.
+-- -------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.sf_lifecycle_resolve_person(
+  p_ref JSONB,
+  p_handle_map JSONB
+) RETURNS UUID
+LANGUAGE plpgsql
+IMMUTABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $resolve$
+DECLARE
+  v_kind TEXT;
+  v_id UUID;
+BEGIN
+  IF p_ref IS NULL OR jsonb_typeof(p_ref) <> 'object' THEN
+    RETURN NULL;
+  END IF;
+  v_kind := p_ref ->> 'kind';
+
+  IF v_kind = 'new_handle' THEN
+    -- Batch-local only. No fallback to any table lookup.
+    RETURN NULLIF(p_handle_map ->> (p_ref ->> 'handle'), '')::UUID;
+  END IF;
+
+  IF v_kind = 'person_id' THEN
+    BEGIN
+      v_id := (p_ref ->> 'personId')::UUID;
+    EXCEPTION WHEN OTHERS THEN
+      RETURN NULL;  -- not a valid UUID: refuse rather than guess
+    END;
+    PERFORM 1 FROM public.sf_lifecycle_persons WHERE id = v_id;
+    IF NOT FOUND THEN
+      RETURN NULL;
+    END IF;
+    RETURN v_id;
+  END IF;
+
+  IF v_kind = 'alias' THEN
+    -- COMPLETE identity: both columns, and no LIMIT, because the unique
+    -- constraint already guarantees at most one row.
+    SELECT person_id INTO v_id
+    FROM public.sf_lifecycle_person_aliases
+    WHERE source_object = (p_ref ->> 'sourceObject')
+      AND source_record_id = (p_ref ->> 'sourceRecordId');
+    RETURN v_id;
+  END IF;
+
+  RETURN NULL;
+END;
+$resolve$;
+
+REVOKE ALL ON FUNCTION public.sf_lifecycle_resolve_person(JSONB, JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.sf_lifecycle_resolve_person(JSONB, JSONB) FROM anon;
+REVOKE ALL ON FUNCTION public.sf_lifecycle_resolve_person(JSONB, JSONB) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.sf_lifecycle_resolve_person(JSONB, JSONB) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.sf_apply_lifecycle_observations(
   p_run JSONB,
   p_persons JSONB,
@@ -127,6 +198,11 @@ AS $$
 DECLARE
   v_run_id UUID;
   v_sync_run_id TEXT;
+  v_started_at TIMESTAMPTZ;
+  v_lc_expected INT;
+  v_lc_completed INT;
+  v_id_expected INT;
+  v_id_completed INT;
   v_watermark TIMESTAMPTZ;
   v_lifecycle_complete BOOLEAN;
   v_identity_complete BOOLEAN;
@@ -137,6 +213,9 @@ DECLARE
   v_obs_id UUID;
   v_obs_map JSONB := '{}'::JSONB;
   v_existing_state RECORD;
+  v_existing_obs RECORD;
+  v_existing_evt RECORD;
+  v_existing_iss RECORD;
   v_counts JSONB := '{}'::JSONB;
   v_persons_created INT := 0;
   v_aliases_created INT := 0;
@@ -148,15 +227,18 @@ DECLARE
   v_category TEXT;
 BEGIN
   -- ---------------------------------------------------------
-  -- Run row FIRST, from server-generated values only, so it survives a
-  -- malformed payload and a failure always has a row to record against.
+  -- Run row GENUINELY first: server-generated and constant values ONLY.
+  --
+  -- Nothing caller-controlled is read, validated, or cast before this
+  -- INSERT. That ordering is the whole point: a malformed payload (a
+  -- blank syncRunId, an unparseable timestamp, a non-integer page count)
+  -- must still leave exactly ONE run row recording the failed attempt.
+  -- If any caller value were cast here, a bad cast would abort the
+  -- function with zero rows and the attempt would vanish silently.
+  --
+  -- Page counts and started_at are corrected from the payload INSIDE the
+  -- protected block below, once they have been safely validated.
   -- ---------------------------------------------------------
-  v_sync_run_id := p_run ->> 'syncRunId';
-  IF v_sync_run_id IS NULL OR btrim(v_sync_run_id) = '' THEN
-    RAISE EXCEPTION USING ERRCODE = 'LC004',
-      MESSAGE = 'payload missing syncRunId';
-  END IF;
-
   INSERT INTO public.sf_lifecycle_sync_runs (
     status,
     started_at,
@@ -167,16 +249,38 @@ BEGIN
     watermark_system_modstamp
   ) VALUES (
     'running',
-    COALESCE((p_run ->> 'runStartedAt')::TIMESTAMPTZ, now()),
-    COALESCE((p_run ->> 'lifecyclePagesExpected')::INT, 0),
-    COALESCE((p_run ->> 'lifecyclePagesCompleted')::INT, 0),
-    COALESCE((p_run ->> 'identityPagesExpected')::INT, 0),
-    COALESCE((p_run ->> 'identityPagesCompleted')::INT, 0),
+    pg_catalog.now(),
+    0, 0, 0, 0,
     NULL
   )
   RETURNING id INTO v_run_id;
 
   BEGIN
+    -- -------------------------------------------------------
+    -- ALL caller-controlled validation and casting happens here, inside
+    -- the protected block, so every failure below is recorded on the run
+    -- row created above rather than aborting the function.
+    -- -------------------------------------------------------
+    v_sync_run_id := p_run ->> 'syncRunId';
+    IF v_sync_run_id IS NULL OR btrim(v_sync_run_id) = '' THEN
+      RAISE EXCEPTION USING ERRCODE = 'LC004',
+        MESSAGE = 'payload missing syncRunId';
+    END IF;
+
+    -- Casts that can fail on malformed input, now safely inside the block.
+    v_started_at := COALESCE((p_run ->> 'runStartedAt')::TIMESTAMPTZ, pg_catalog.now());
+    v_lc_expected := COALESCE((p_run ->> 'lifecyclePagesExpected')::INT, 0);
+    v_lc_completed := COALESCE((p_run ->> 'lifecyclePagesCompleted')::INT, 0);
+    v_id_expected := COALESCE((p_run ->> 'identityPagesExpected')::INT, 0);
+    v_id_completed := COALESCE((p_run ->> 'identityPagesCompleted')::INT, 0);
+
+    UPDATE public.sf_lifecycle_sync_runs
+    SET started_at = v_started_at,
+        lifecycle_pages_expected = v_lc_expected,
+        lifecycle_pages_completed = v_lc_completed,
+        identity_pages_expected = v_id_expected,
+        identity_pages_completed = v_id_completed
+    WHERE id = v_run_id;
     -- -------------------------------------------------------
     -- Completeness gate. An incomplete run may never apply state.
     -- -------------------------------------------------------
@@ -222,21 +326,18 @@ BEGIN
     -- -------------------------------------------------------
     FOR v_rec IN
       SELECT value ->> 'personHandle' AS handle,
+             value -> 'personRef' AS person_ref,
              value ->> 'sourceObject' AS source_object,
              value ->> 'sourceRecordId' AS source_record_id,
              value ->> 'linkBasis' AS link_basis
       FROM jsonb_array_elements(COALESCE(p_aliases, '[]'::JSONB))
       ORDER BY 2, 3
     LOOP
-      v_person_id := NULLIF(v_handle_map ->> v_rec.handle, '')::UUID;
-      IF v_person_id IS NULL THEN
-        -- Not created in this batch: the handle must already resolve to a
-        -- person through an existing alias.
-        SELECT person_id INTO v_person_id
-        FROM public.sf_lifecycle_person_aliases
-        WHERE source_record_id = v_rec.handle
-        LIMIT 1;
-      END IF;
+      -- Typed person resolution. NEVER an id-only lookup: a bare
+      -- source_record_id could match a Lead and a Contact and LIMIT 1
+      -- would pick an arbitrary winner, silently attaching evidence to
+      -- the wrong person. The reference states its own kind.
+      v_person_id := public.sf_lifecycle_resolve_person(v_rec.person_ref, v_handle_map);
 
       SELECT person_id INTO v_existing_person
       FROM public.sf_lifecycle_person_aliases
@@ -288,6 +389,7 @@ BEGIN
     -- -------------------------------------------------------
     FOR v_rec IN
       SELECT value ->> 'observationKey' AS observation_key,
+             value -> 'personRef' AS person_ref,
              value ->> 'personHandle' AS handle,
              value ->> 'sourceObject' AS source_object,
              value ->> 'sourceRecordId' AS source_record_id,
@@ -303,16 +405,10 @@ BEGIN
       FROM jsonb_array_elements(COALESCE(p_observations, '[]'::JSONB))
       ORDER BY 1
     LOOP
-      v_person_id := NULLIF(v_handle_map ->> v_rec.handle, '')::UUID;
-      IF v_person_id IS NULL THEN
-        SELECT person_id INTO v_person_id
-        FROM public.sf_lifecycle_person_aliases
-        WHERE source_object = v_rec.source_object
-          AND source_record_id = v_rec.source_record_id;
-      END IF;
+      v_person_id := public.sf_lifecycle_resolve_person(v_rec.person_ref, v_handle_map);
       IF v_person_id IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = 'LC005',
-          MESSAGE = 'unresolvable person handle for observation';
+          MESSAGE = 'unresolvable person reference for observation';
       END IF;
       v_handle_map := jsonb_set(v_handle_map, ARRAY[v_rec.handle], to_jsonb(v_person_id::TEXT));
 
@@ -344,10 +440,44 @@ BEGIN
       RETURNING id INTO v_obs_id;
 
       IF v_obs_id IS NULL THEN
-        -- Exact retry: adopt the existing row so events still bind.
-        SELECT id INTO v_obs_id
+        -- Key already present. A matching key is NOT proof of a matching
+        -- row, so verify the COMPLETE canonical identity with null-safe
+        -- comparisons before treating this as an exact retry.
+        --
+        -- Deliberately EXCLUDED from canonical identity (first
+        -- observation wins): sync_run_id and created_at. Those record
+        -- WHICH run first saw the evidence, not what the evidence says,
+        -- so a later run re-observing identical content must not be
+        -- treated as a conflict.
+        SELECT * INTO v_existing_obs
         FROM public.sf_lifecycle_observations
-        WHERE observation_key = v_rec.observation_key;
+        WHERE observation_key = v_rec.observation_key
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC004',
+            MESSAGE = 'observation key conflict with no readable row';
+        END IF;
+
+        IF v_existing_obs.person_id           IS DISTINCT FROM v_person_id
+           OR v_existing_obs.source_object     IS DISTINCT FROM v_rec.source_object
+           OR v_existing_obs.source_record_id  IS DISTINCT FROM v_rec.source_record_id
+           OR v_existing_obs.raw_lifecycle_value IS DISTINCT FROM v_rec.raw_value
+           OR v_existing_obs.normalized_state  IS DISTINCT FROM v_rec.normalized_state
+           OR v_existing_obs.source_modified_at IS DISTINCT FROM v_rec.source_modified_at
+           OR v_existing_obs.content_fingerprint IS DISTINCT FROM v_rec.content_fingerprint
+           OR v_existing_obs.provenance        IS DISTINCT FROM v_rec.provenance
+           OR v_existing_obs.is_baseline       IS DISTINCT FROM v_rec.is_baseline
+           OR v_existing_obs.became_lead_date  IS DISTINCT FROM NULLIF(v_rec.became_lead_date, '')::DATE
+           OR v_existing_obs.became_mql_date   IS DISTINCT FROM NULLIF(v_rec.became_mql_date, '')::DATE
+        THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC002',
+            MESSAGE = 'observation key reused with different canonical content';
+        END IF;
+
+        -- Verified exact retry: adopt the existing row so events bind.
+        -- The append-only row is NEVER updated.
+        v_obs_id := v_existing_obs.id;
       ELSE
         v_observations_inserted := v_observations_inserted + 1;
       END IF;
@@ -367,6 +497,7 @@ BEGIN
     -- -------------------------------------------------------
     FOR v_rec IN
       SELECT value ->> 'eventKey' AS event_key,
+             value -> 'personRef' AS person_ref,
              value ->> 'personHandle' AS handle,
              value ->> 'observationKey' AS observation_key,
              value ->> 'eventKind' AS event_kind,
@@ -378,10 +509,10 @@ BEGIN
       FROM jsonb_array_elements(COALESCE(p_events, '[]'::JSONB))
       ORDER BY 1
     LOOP
-      v_person_id := NULLIF(v_handle_map ->> v_rec.handle, '')::UUID;
+      v_person_id := public.sf_lifecycle_resolve_person(v_rec.person_ref, v_handle_map);
       IF v_person_id IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = 'LC005',
-          MESSAGE = 'unresolvable person handle for event';
+          MESSAGE = 'unresolvable person reference for event';
       END IF;
 
       v_obs_id := NULLIF(v_obs_map ->> v_rec.observation_key, '')::UUID;
@@ -411,6 +542,32 @@ BEGIN
 
       IF FOUND THEN
         v_events_inserted := v_events_inserted + 1;
+      ELSE
+        -- Key present: verify the complete canonical identity before
+        -- accepting this as an exact retry. sync_run_id and created_at
+        -- are excluded (first observation wins). The append-only row is
+        -- never updated either way.
+        SELECT * INTO v_existing_evt
+        FROM public.sf_lifecycle_events
+        WHERE event_key = v_rec.event_key
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC004',
+            MESSAGE = 'event key conflict with no readable row';
+        END IF;
+
+        IF v_existing_evt.person_id      IS DISTINCT FROM v_person_id
+           OR v_existing_evt.from_state   IS DISTINCT FROM v_rec.from_state
+           OR v_existing_evt.to_state     IS DISTINCT FROM v_rec.to_state
+           OR v_existing_evt.event_kind   IS DISTINCT FROM v_rec.event_kind
+           OR v_existing_evt.effective_date IS DISTINCT FROM NULLIF(v_rec.effective_date, '')::DATE
+           OR v_existing_evt.provenance   IS DISTINCT FROM v_rec.provenance
+           OR v_existing_evt.observation_id IS DISTINCT FROM v_obs_id
+        THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC002',
+            MESSAGE = 'event key reused with different canonical content';
+        END IF;
       END IF;
     END LOOP;
 
@@ -421,6 +578,7 @@ BEGIN
     -- -------------------------------------------------------
     FOR v_rec IN
       SELECT value ->> 'personHandle' AS handle,
+             value -> 'personRef' AS person_ref,
              value ->> 'normalizedState' AS normalized_state,
              (value ->> 'mqlSeenBefore')::BOOLEAN AS mql_seen_before,
              (value ->> 'sourceModifiedAt')::TIMESTAMPTZ AS source_modified_at,
@@ -429,10 +587,10 @@ BEGIN
       FROM jsonb_array_elements(COALESCE(p_projections, '[]'::JSONB))
       ORDER BY 1
     LOOP
-      v_person_id := NULLIF(v_handle_map ->> v_rec.handle, '')::UUID;
+      v_person_id := public.sf_lifecycle_resolve_person(v_rec.person_ref, v_handle_map);
       IF v_person_id IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = 'LC005',
-          MESSAGE = 'unresolvable person handle for projection';
+          MESSAGE = 'unresolvable person reference for projection';
       END IF;
 
       SELECT * INTO v_existing_state
@@ -451,8 +609,33 @@ BEGIN
           v_rec.observed_at, v_run_id
         );
         v_projections_updated := v_projections_updated + 1;
+      -- Ordering truth table. Undated evidence proves LESS than dated
+      -- evidence, so it may never overwrite a known timestamp, and two
+      -- rows whose order cannot be proven are a conflict rather than a
+      -- silent last-writer-wins. Comparisons are on TIMESTAMPTZ instants,
+      -- so '+0000' and 'Z' are the same moment.
+      --
+      --   existing known, incoming older      -> stale no-op
+      --   existing known, incoming NULL       -> no-op (never overwrite)
+      --   existing NULL,  incoming known      -> accept
+      --   both known, incoming newer          -> accept
+      --   same instant, same fingerprint      -> idempotent no-op
+      --   same instant, different fingerprint -> LC002 conflict
+      --   both NULL, same fingerprint         -> idempotent no-op
+      --   both NULL, different fingerprint    -> LC002 conflict
+      ELSIF v_rec.source_modified_at IS NOT DISTINCT FROM v_existing_state.last_source_modified_at THEN
+        -- Same instant (or both undated): order cannot break the tie, so
+        -- content decides. Identical content is an idempotent no-op;
+        -- different content is a conflict with NO winner chosen.
+        IF v_rec.content_fingerprint IS DISTINCT FROM v_existing_state.last_content_fingerprint THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC002',
+            MESSAGE = 'projection: indistinguishable ordering with differing content';
+        END IF;
+        -- identical: no-op
+      ELSIF v_rec.source_modified_at IS NULL THEN
+        -- Undated incoming against a KNOWN existing timestamp: no-op.
+        NULL;
       ELSIF v_existing_state.last_source_modified_at IS NULL
-         OR v_rec.source_modified_at IS NULL
          OR v_rec.source_modified_at > v_existing_state.last_source_modified_at THEN
         UPDATE public.sf_lifecycle_state
         SET normalized_state = v_rec.normalized_state,
@@ -460,8 +643,8 @@ BEGIN
             -- is a requalification, not a first conversion.
             mql_seen_before = v_existing_state.mql_seen_before
                               OR COALESCE(v_rec.mql_seen_before, FALSE),
-            last_source_modified_at = COALESCE(v_rec.source_modified_at,
-                                               v_existing_state.last_source_modified_at),
+            -- Non-NULL on this branch by the guard above.
+            last_source_modified_at = v_rec.source_modified_at,
             last_content_fingerprint = v_rec.content_fingerprint,
             last_observed_at = v_rec.observed_at,
             last_sync_run_id = v_run_id,
@@ -478,6 +661,7 @@ BEGIN
     -- -------------------------------------------------------
     FOR v_rec IN
       SELECT value ->> 'issueKey' AS issue_key,
+             value -> 'personRef' AS person_ref,
              value ->> 'personHandle' AS handle,
              value ->> 'sourceObject' AS source_object,
              value ->> 'sourceRecordId' AS source_record_id,
@@ -486,7 +670,10 @@ BEGIN
       FROM jsonb_array_elements(COALESCE(p_issues, '[]'::JSONB))
       ORDER BY 1
     LOOP
-      v_person_id := NULLIF(v_handle_map ->> v_rec.handle, '')::UUID;
+      v_person_id := CASE
+        WHEN v_rec.person_ref IS NULL THEN NULL
+        ELSE public.sf_lifecycle_resolve_person(v_rec.person_ref, v_handle_map)
+      END;
 
       INSERT INTO public.sf_lifecycle_issues (
         issue_key, person_id, source_object, source_record_id,
@@ -499,6 +686,29 @@ BEGIN
 
       IF FOUND THEN
         v_issues_recorded := v_issues_recorded + 1;
+      ELSE
+        -- Key present: verify canonical identity. review_state, detail,
+        -- sync_run_id, created_at, and updated_at are EXCLUDED: a human
+        -- may have resolved the issue, and the detail wording may change,
+        -- without that making the same standing evidence a conflict.
+        SELECT * INTO v_existing_iss
+        FROM public.sf_lifecycle_issues
+        WHERE issue_key = v_rec.issue_key
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC004',
+            MESSAGE = 'issue key conflict with no readable row';
+        END IF;
+
+        IF v_existing_iss.issue_kind        IS DISTINCT FROM v_rec.issue_kind
+           OR v_existing_iss.source_object   IS DISTINCT FROM v_rec.source_object
+           OR v_existing_iss.source_record_id IS DISTINCT FROM v_rec.source_record_id
+           OR v_existing_iss.person_id       IS DISTINCT FROM v_person_id
+        THEN
+          RAISE EXCEPTION USING ERRCODE = 'LC002',
+            MESSAGE = 'issue key reused with different canonical content';
+        END IF;
       END IF;
     END LOOP;
 
