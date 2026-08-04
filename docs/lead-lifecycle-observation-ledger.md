@@ -231,6 +231,15 @@ completeness, whether the watermark advanced, and `writes_attempted: 0`.
 No names, emails, Salesforce ids, or source rows ever appear in shared
 diagnostics.
 
+## The write boundary
+
+Bite 4G2B1 adds the serialization and atomic-apply layer between this
+planner and the storage above: see `docs/lead-lifecycle-atomic-apply.md`.
+It also documents three idempotency gaps the original 4G2A schema left
+open (events and issues had no unique key, and events were not bound to
+their evidencing observation) and the forward-only constraints that close
+them.
+
 ## Explicitly not in this bite
 
 No n8n workflow, activation, or schedule. No live Salesforce query. No
