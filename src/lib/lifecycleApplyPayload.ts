@@ -1,0 +1,640 @@
+// lifecycleApplyPayload.ts: Bite 4G2B1 typed serialization boundary
+// (docs/lead-lifecycle-atomic-apply.md).
+//
+// Turns one LifecyclePlan into ONE allowlisted apply payload for the
+// restricted SQL function. Pure: no Supabase, no Salesforce, no network, no
+// clock. It attempts zero writes and reports so.
+//
+// This module owns exactly three concerns the planner deliberately left to
+// the write boundary, and NOTHING else:
+//
+//   1. Event-to-observation binding. The planner emits lifecycle_event
+//      operations carrying a personId and the 4A event, but no link to the
+//      observation that evidenced them. sf_lifecycle_events.observation_id
+//      is nullable, so unbound events would land as orphans with no audit
+//      path back to their evidence. The serializer binds each event to the
+//      observation emitted for the same person in the same plan, by an
+//      explicit key, never by array position.
+//
+//   2. Deterministic idempotency keys. Observations already dedupe in the
+//      applied 4G2A schema. Events and issues do not, so an exact retry
+//      would append permanent duplicates through the append-only trigger.
+//      The serializer derives a content-addressed key for each.
+//
+//   3. Refusal. An incomplete run, an unknown operation kind, or a
+//      watermark on an incomplete run is rejected here rather than being
+//      handed to SQL to sort out.
+//
+// It does NOT normalize lifecycle values (Bite 4G1), calculate transitions
+// (Bite 4A), or decide baselines, identity, or completeness (Bite 4G2A).
+// Those authorities are reused verbatim through the plan it receives.
+
+import { sha256Hex } from './sha256';
+import type {
+  IssueKind,
+  LifecycleEventKind,
+  LifecyclePlan,
+  NormalizedLifecycleState,
+  ObservationProvenance,
+  SourceObject,
+} from './lifecycleObservationPlanner';
+
+// ---------------------------------------------------------------------------
+// Payload types (allowlisted: only sf_lifecycle_* targets are expressible)
+// ---------------------------------------------------------------------------
+
+// The seven protected tables are the ONLY things this payload can name.
+// There is deliberately no field anywhere in this file able to address
+// leads, lead_campaign_touches, attributions, channels, campaign_costs,
+// funnel_actuals, funnel_projections, any sf_opportunity_* table, or any
+// dashboard/reporting table. A write to those is not "forbidden" here, it
+// is unrepresentable.
+
+// A person is referenced in EXACTLY one of three unambiguous ways. This is
+// a discriminated union rather than a bare string so the SQL never has to
+// guess what a reference means, and so an id-only lookup that could collide
+// a Lead with a Contact is not expressible.
+//
+//   new_handle: a person created in THIS batch. Resolves only through the
+//               batch handle map. Never persisted to a column.
+//   person_id:  an existing internal person UUID, loaded directly.
+//   alias:      an exact source alias, carrying BOTH sourceObject and
+//               sourceRecordId. Never sourceRecordId alone.
+export type PayloadPersonRef =
+  | { kind: 'new_handle'; handle: string }
+  | { kind: 'person_id'; personId: string }
+  | { kind: 'alias'; sourceObject: SourceObject; sourceRecordId: string };
+
+// Planner handles for new people have this exact shape; anything else the
+// planner produced came from PriorState and is a real database UUID.
+const NEW_PERSON_HANDLE = /^new-person-/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function personRefFor(plannerPersonId: string): PayloadPersonRef | null {
+  if (NEW_PERSON_HANDLE.test(plannerPersonId)) {
+    return { kind: 'new_handle', handle: plannerPersonId };
+  }
+  if (UUID_RE.test(plannerPersonId)) {
+    return { kind: 'person_id', personId: plannerPersonId };
+  }
+  // Neither a batch handle nor a valid UUID: refuse rather than guess.
+  return null;
+}
+
+export interface PayloadPerson {
+  // Temporary handle from the planner. The database assigns the real UUID
+  // and maps it; this value never reaches a column.
+  handle: string;
+}
+
+export interface PayloadAlias {
+  personHandle: string;
+  // Typed, unambiguous person reference (see PayloadPersonRef).
+  personRef: PayloadPersonRef;
+  sourceObject: SourceObject;
+  sourceRecordId: string;
+  // 'source_record' for the record that introduced the person;
+  // 'converted_contact_id' for an exact Salesforce conversion link.
+  linkBasis: 'source_record' | 'converted_contact_id';
+}
+
+export interface PayloadObservation {
+  // Stable, content-addressed key. Used to bind events to their evidence
+  // and to make an exact retry a no-op.
+  observationKey: string;
+  personHandle: string;
+  // Typed, unambiguous person reference (see PayloadPersonRef).
+  personRef: PayloadPersonRef;
+  sourceObject: SourceObject;
+  sourceRecordId: string;
+  rawLifecycleValue: string | null;
+  normalizedState: NormalizedLifecycleState;
+  sourceModifiedAt: string | null;
+  observedAt: string;
+  contentFingerprint: string;
+  provenance: ObservationProvenance;
+  isBaseline: boolean;
+  becameLeadDate: string | null;
+  becameMqlDate: string | null;
+}
+
+export interface PayloadEvent {
+  eventKey: string;
+  personHandle: string;
+  // Typed, unambiguous person reference (see PayloadPersonRef).
+  personRef: PayloadPersonRef;
+  // Explicit binding to the evidencing observation. Never positional.
+  observationKey: string;
+  eventKind: LifecycleEventKind;
+  // NULL only for a baseline; the SQL shape constraint enforces the same.
+  fromState: 'lead' | 'mql' | null;
+  toState: 'lead' | 'mql';
+  effectiveDate: string | null;
+  observedAt: string;
+  provenance: 'n8n_observed' | 'salesforce_confirmed' | 'unknown';
+}
+
+export interface PayloadProjection {
+  personHandle: string;
+  // Typed, unambiguous person reference (see PayloadPersonRef).
+  personRef: PayloadPersonRef;
+  normalizedState: NormalizedLifecycleState;
+  mqlSeenBefore: boolean;
+  sourceModifiedAt: string | null;
+  contentFingerprint: string | null;
+  observedAt: string;
+}
+
+export interface PayloadIssue {
+  issueKey: string;
+  personHandle: string | null;
+  // Typed, unambiguous person reference (see PayloadPersonRef).
+  personRef: PayloadPersonRef | null;
+  sourceObject: SourceObject | null;
+  sourceRecordId: string | null;
+  issueKind: IssueKind;
+  detail: string;
+}
+
+export interface PayloadRun {
+  syncRunId: string;
+  runStartedAt: string;
+  lifecyclePagesExpected: number;
+  lifecyclePagesCompleted: number;
+  identityPagesExpected: number;
+  identityPagesCompleted: number;
+  lifecycleExtractionComplete: boolean;
+  identityExtractionComplete: boolean;
+  // Persisted by the function only when the whole batch succeeds.
+  proposedWatermarkSystemModstamp: string | null;
+}
+
+export interface LifecycleApplyPayload {
+  run: PayloadRun;
+  persons: PayloadPerson[];
+  aliases: PayloadAlias[];
+  observations: PayloadObservation[];
+  events: PayloadEvent[];
+  projections: PayloadProjection[];
+  issues: PayloadIssue[];
+  // Aggregate-only. No ids, names, emails, or source rows.
+  dryRunSummary: DryRunSummary;
+}
+
+export interface DryRunSummary {
+  writes_attempted: 0;
+  personsToCreate: number;
+  aliasesToCreate: number;
+  observationsToInsert: number;
+  eventsToInsert: number;
+  projectionsToUpdate: number;
+  issuesToRecord: number;
+  baselineEvents: number;
+  transitionEvents: number;
+  returnEvents: number;
+  requalificationEvents: number;
+  unchangedNoops: number;
+  staleNoops: number;
+  duplicateNoops: number;
+  watermarkWouldAdvance: boolean;
+}
+
+export type SerializeResult =
+  | { ok: true; payload: LifecycleApplyPayload }
+  | { ok: false; refusals: string[] };
+
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+// Keys hash a JSON array of explicitly ordered values, with a leading type
+// tag so a value can never collide across key kinds. An ARRAY, not an
+// object: array order is part of the encoding, so property-ordering
+// differences cannot change a key. JSON also encodes null distinctly from
+// the empty string, so an absent timestamp and a blank one are different
+// keys rather than the same one. Every key input is plain readable text:
+// no invisible delimiters, so these files stay text to git and to ordinary
+// tools.
+//
+// Content-addressed over the applied schema's natural observation identity
+// (source_object, source_record_id, source_modified_at, content_fingerprint),
+// so the key and the UNIQUE constraint agree by construction.
+export function observationKeyFor(o: {
+  sourceObject: SourceObject;
+  sourceRecordId: string;
+  sourceModifiedAt: string | null;
+  contentFingerprint: string;
+}): string {
+  return `obs:${sha256Hex(
+    JSON.stringify([
+      'observation',
+      o.sourceObject,
+      o.sourceRecordId,
+      o.sourceModifiedAt,
+      o.contentFingerprint,
+    ]),
+  )}`;
+}
+
+// An event is identified by the observation that evidenced it plus its
+// direction and kind. Two genuinely distinct events for one observation
+// (which the planner does not currently emit) stay distinct; an exact retry
+// collapses.
+export function eventKeyFor(e: {
+  observationKey: string;
+  eventKind: LifecycleEventKind;
+  fromState: string | null;
+  toState: string;
+}): string {
+  return `evt:${sha256Hex(
+    JSON.stringify(['event', e.observationKey, e.eventKind, e.fromState, e.toState]),
+  )}`;
+}
+
+// Issues dedupe on the evidence, NOT on the run: the same unresolved
+// conflict re-observed every night must not append a row every night.
+// detail is excluded deliberately so wording changes cannot defeat it.
+export function issueKeyFor(i: {
+  issueKind: IssueKind;
+  sourceObject: SourceObject | null;
+  sourceRecordId: string | null;
+  personHandle: string | null;
+}): string {
+  return `iss:${sha256Hex(
+    JSON.stringify([
+      'issue',
+      i.issueKind,
+      i.sourceObject,
+      i.sourceRecordId,
+      i.personHandle,
+    ]),
+  )}`;
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp normalization
+// ---------------------------------------------------------------------------
+
+// Instants are normalized to UTC ISO-8601 with milliseconds so ordering and
+// equality are stable regardless of the producer's offset formatting.
+// Date-only supporting values are NOT touched: they are calendar dates and
+// are preserved exactly as received (evidence, never recalculated).
+function toInstant(value: string): string | null {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+// ---------------------------------------------------------------------------
+// Serializer
+// ---------------------------------------------------------------------------
+
+const KNOWN_OPS: ReadonlySet<string> = new Set([
+  'create_person',
+  'create_alias',
+  'baseline_observation',
+  'changed_observation',
+  'unchanged_noop',
+  'lifecycle_event',
+  'update_projection',
+  'stale_noop',
+  'duplicate_noop',
+  'raise_issue',
+  'record_sync_run',
+]);
+
+// The run identity lives on PlannerConfig, not on LifecyclePlan, so the
+// caller supplies it and the serializer verifies it against the run id the
+// planner actually stamped onto its observations. A mismatch means the
+// payload and the plan disagree about which run they belong to.
+export interface RunIdentity {
+  syncRunId: string;
+  runStartedAt: string;
+}
+
+export function serializeLifecycleApply(
+  plan: LifecyclePlan,
+  run: RunIdentity,
+): SerializeResult {
+  const refusals: string[] = [];
+  const d = plan.diagnostics;
+
+  if (run.syncRunId.trim() === '') {
+    refusals.push('Run identity is missing a syncRunId.');
+  }
+  const runStartedAtInstant = toInstant(run.runStartedAt);
+  if (runStartedAtInstant === null) {
+    refusals.push('Run identity carries an unparseable runStartedAt instant.');
+  }
+  for (const op of plan.operations) {
+    if (
+      (op.op === 'baseline_observation' || op.op === 'changed_observation') &&
+      op.observation.syncRunId !== run.syncRunId
+    ) {
+      refusals.push('Plan observations belong to a different sync run.');
+      break;
+    }
+  }
+
+  // --- Refusals: an incomplete run never reaches SQL.
+  if (!d.lifecycleExtractionComplete) {
+    refusals.push('Lifecycle extraction incomplete: apply refused.');
+  }
+  if (!d.identityExtractionComplete) {
+    refusals.push('Identity extraction incomplete: apply refused.');
+  }
+  if (!plan.applyPermitted) {
+    refusals.push('Planner withheld apply permission: apply refused.');
+  }
+
+  // Unknown operation kinds are a contract break, not something to skip.
+  for (const op of plan.operations) {
+    if (!KNOWN_OPS.has(op.op)) {
+      refusals.push(`Unknown operation kind: ${String((op as { op: string }).op)}`);
+    }
+  }
+
+  if (refusals.length > 0) return { ok: false, refusals };
+
+  const persons: PayloadPerson[] = [];
+  const aliases: PayloadAlias[] = [];
+  const observations: PayloadObservation[] = [];
+  const events: PayloadEvent[] = [];
+  const projections: PayloadProjection[] = [];
+  const issues: PayloadIssue[] = [];
+
+  let unchangedNoops = 0;
+  let staleNoops = 0;
+  let duplicateNoops = 0;
+  const createdPersonHandles = new Set<string>();
+
+  // Per-person index of the observation emitted in THIS plan, used to bind
+  // events to their evidence explicitly. The planner emits a person's
+  // observation before any event it evidences, so the latest observation
+  // seen for a person is the one that evidenced the event. This is an
+  // explicit keyed lookup, not an inference from array position.
+  const latestObservationKeyByPerson = new Map<string, string>();
+
+  for (const op of plan.operations) {
+    switch (op.op) {
+      case 'create_person':
+        persons.push({ handle: op.personId });
+        createdPersonHandles.add(op.personId);
+        break;
+
+      case 'create_alias': {
+        // The planner creates an alias in exactly two situations: alongside
+        // a create_person for the record that introduced that person, or
+        // from an exact Lead.ConvertedContactId link onto a person who
+        // already exists. An alias for a person NOT created in this plan
+        // can therefore only have come from the conversion rule. There is
+        // no third path, and no fuzzy path.
+        const createdHere = createdPersonHandles.has(op.personId);
+        const aliasRef = personRefFor(op.personId);
+        if (aliasRef === null) {
+          refusals.push('Alias references a person that is neither a batch handle nor a UUID.');
+          break;
+        }
+        aliases.push({
+          personHandle: op.personId,
+          personRef: aliasRef,
+          sourceObject: op.sourceObject,
+          sourceRecordId: op.sourceRecordId,
+          linkBasis: createdHere ? 'source_record' : 'converted_contact_id',
+        });
+        break;
+      }
+
+      case 'baseline_observation':
+      case 'changed_observation': {
+        const o = op.observation;
+        const observedAt = toInstant(o.observedAt);
+        if (observedAt === null) {
+          refusals.push('Observation carries an unparseable observedAt instant.');
+          break;
+        }
+        const sourceModifiedAt =
+          o.sourceModifiedAt === null ? null : toInstant(o.sourceModifiedAt);
+        if (o.sourceModifiedAt !== null && sourceModifiedAt === null) {
+          refusals.push('Observation carries an unparseable sourceModifiedAt instant.');
+          break;
+        }
+        const key = observationKeyFor({
+          sourceObject: o.sourceObject,
+          sourceRecordId: o.sourceRecordId,
+          sourceModifiedAt,
+          contentFingerprint: o.contentFingerprint,
+        });
+        latestObservationKeyByPerson.set(o.personId, key);
+        const obsRef = personRefFor(o.personId);
+        if (obsRef === null) {
+          refusals.push('Observation references a person that is neither a batch handle nor a UUID.');
+          break;
+        }
+        observations.push({
+          observationKey: key,
+          personHandle: o.personId,
+          personRef: obsRef,
+          sourceObject: o.sourceObject,
+          sourceRecordId: o.sourceRecordId,
+          rawLifecycleValue: o.rawLifecycleValue,
+          normalizedState: o.normalizedState,
+          sourceModifiedAt,
+          observedAt,
+          contentFingerprint: o.contentFingerprint,
+          provenance: o.provenance,
+          isBaseline: o.isBaseline,
+          // Supporting dates are evidence only: preserved exactly, never
+          // reformatted into instants and never used to derive an event.
+          becameLeadDate: o.becameLeadDate,
+          becameMqlDate: o.becameMqlDate,
+        });
+        break;
+      }
+
+      case 'lifecycle_event': {
+        const e = op.event;
+        const observationKey = latestObservationKeyByPerson.get(op.personId);
+        if (observationKey === undefined) {
+          // An event with no evidencing observation in the same plan would
+          // be an orphan. Refuse rather than insert it unbound.
+          refusals.push('Lifecycle event has no evidencing observation in this plan.');
+          break;
+        }
+        // Baseline invariant, serializer side. The SQL shape constraint
+        // enforces the same thing independently.
+        const isBaseline = op.eventKind === 'baseline';
+        if (isBaseline && e.fromStage !== null) {
+          refusals.push('Baseline event carries a non-null from_state.');
+          break;
+        }
+        if (!isBaseline && e.fromStage === null) {
+          refusals.push('Non-baseline event is missing its from_state.');
+          break;
+        }
+        if (e.toStage !== 'lead' && e.toStage !== 'mql') {
+          refusals.push('Lifecycle event targets a state outside the funnel vocabulary.');
+          break;
+        }
+        const fromState =
+          e.fromStage === 'lead' || e.fromStage === 'mql' ? e.fromStage : null;
+        const observedAt = toInstant(e.observedAt);
+        if (observedAt === null) {
+          refusals.push('Lifecycle event carries an unparseable observedAt instant.');
+          break;
+        }
+        const eventRef = personRefFor(op.personId);
+        if (eventRef === null) {
+          refusals.push('Event references a person that is neither a batch handle nor a UUID.');
+          break;
+        }
+        events.push({
+          eventKey: eventKeyFor({
+            observationKey,
+            eventKind: op.eventKind,
+            fromState,
+            toState: e.toStage,
+          }),
+          personHandle: op.personId,
+          personRef: eventRef,
+          observationKey,
+          // The kind is carried through verbatim. A baseline is never
+          // re-derived from its shape, so null -> mql cannot be rewritten
+          // as null -> lead or reinterpreted as a transition.
+          eventKind: op.eventKind,
+          fromState,
+          toState: e.toStage,
+          effectiveDate: e.effectiveDate,
+          observedAt,
+          provenance: e.dateSource,
+        });
+        break;
+      }
+
+      case 'update_projection': {
+        const observedAt = toInstant(op.observedAt);
+        if (observedAt === null) {
+          refusals.push('Projection carries an unparseable observedAt instant.');
+          break;
+        }
+        const sourceModifiedAt =
+          op.sourceModifiedAt === null ? null : toInstant(op.sourceModifiedAt);
+        const projRef = personRefFor(op.personId);
+        if (projRef === null) {
+          refusals.push('Projection references a person that is neither a batch handle nor a UUID.');
+          break;
+        }
+        projections.push({
+          personHandle: op.personId,
+          personRef: projRef,
+          normalizedState: op.normalizedState,
+          // An observed mql at any point means mql has been seen, which is
+          // what makes a later Lead-to-MQL a requalification.
+          mqlSeenBefore: op.normalizedState === 'mql',
+          sourceModifiedAt,
+          contentFingerprint: null,
+          observedAt,
+        });
+        break;
+      }
+
+      case 'raise_issue':
+        issues.push({
+          issueKey: issueKeyFor({
+            issueKind: op.kind,
+            sourceObject: null,
+            sourceRecordId: op.sourceRecordId ?? null,
+            personHandle: op.personId ?? null,
+          }),
+          personHandle: op.personId ?? null,
+          personRef: op.personId === undefined ? null : personRefFor(op.personId),
+          sourceObject: null,
+          sourceRecordId: op.sourceRecordId ?? null,
+          issueKind: op.kind,
+          detail: op.detail,
+        });
+        break;
+
+      case 'unchanged_noop':
+        unchangedNoops += 1;
+        break;
+      case 'stale_noop':
+        staleNoops += 1;
+        break;
+      case 'duplicate_noop':
+        duplicateNoops += 1;
+        break;
+      case 'record_sync_run':
+        break;
+    }
+  }
+
+  if (refusals.length > 0) return { ok: false, refusals };
+
+  // A projection carries mql_seen_before forward: if any observation for a
+  // person in this batch was mql, the flag stays set for the whole batch.
+  const mqlSeenInBatch = new Set(
+    observations.filter((o) => o.normalizedState === 'mql').map((o) => o.personHandle),
+  );
+  for (const p of projections) {
+    if (mqlSeenInBatch.has(p.personHandle)) p.mqlSeenBefore = true;
+    const obs = observations.filter((o) => o.personHandle === p.personHandle);
+    if (obs.length > 0) p.contentFingerprint = obs[obs.length - 1].contentFingerprint;
+  }
+
+  // Deterministic ordering: the same plan must always serialize byte-for-
+  // byte identically, and the SQL applies persons before aliases before
+  // observations before events, so a stable sort here also fixes the
+  // insertion order the function relies on.
+  persons.sort((a, b) => a.handle.localeCompare(b.handle));
+  aliases.sort(
+    (a, b) =>
+      a.sourceObject.localeCompare(b.sourceObject) ||
+      a.sourceRecordId.localeCompare(b.sourceRecordId),
+  );
+  observations.sort((a, b) => a.observationKey.localeCompare(b.observationKey));
+  events.sort((a, b) => a.eventKey.localeCompare(b.eventKey));
+  projections.sort((a, b) => a.personHandle.localeCompare(b.personHandle));
+  issues.sort((a, b) => a.issueKey.localeCompare(b.issueKey));
+
+  const payload: LifecycleApplyPayload = {
+    run: {
+      syncRunId: run.syncRunId,
+      runStartedAt: runStartedAtInstant as string,
+      lifecyclePagesExpected: d.lifecyclePagesExpected,
+      lifecyclePagesCompleted: d.lifecyclePagesCompleted,
+      identityPagesExpected: d.identityPagesExpected,
+      identityPagesCompleted: d.identityPagesCompleted,
+      lifecycleExtractionComplete: d.lifecycleExtractionComplete,
+      identityExtractionComplete: d.identityExtractionComplete,
+      // Both axes are already proven complete above, so a watermark here
+      // can only ever accompany a complete run.
+      proposedWatermarkSystemModstamp: d.proposedWatermarkSystemModstamp,
+    },
+    persons,
+    aliases,
+    observations,
+    events,
+    projections,
+    issues,
+    dryRunSummary: {
+      writes_attempted: 0,
+      personsToCreate: persons.length,
+      aliasesToCreate: aliases.length,
+      observationsToInsert: observations.length,
+      eventsToInsert: events.length,
+      projectionsToUpdate: projections.length,
+      issuesToRecord: issues.length,
+      baselineEvents: events.filter((e) => e.eventKind === 'baseline').length,
+      transitionEvents: events.filter((e) => e.eventKind === 'transition').length,
+      returnEvents: events.filter((e) => e.eventKind === 'return').length,
+      requalificationEvents: events.filter((e) => e.eventKind === 'requalification').length,
+      unchangedNoops,
+      staleNoops,
+      duplicateNoops,
+      watermarkWouldAdvance: d.watermarkAdvanced,
+    },
+  };
+
+  return { ok: true, payload };
+}

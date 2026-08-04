@@ -111,6 +111,16 @@ alone is not proof of production state.
 - Imports must honor field locks and update source provenance.
 - Event Activation is a validated label array without individual activation
   timestamps.
+- Lifecycle state is tracked separately in the `sf_lifecycle_*` observation
+  ledger, because Bite 4G1 proved the Salesforce org holds zero lifecycle
+  field history, so past movement cannot be reconstructed and truth must be
+  accumulated forward. A first observation is a BASELINE recording the state
+  first seen, never a transition: `null -> mql` means "first observed as
+  MQL", not "moved from Lead to MQL". The contracts are in
+  `docs/lead-lifecycle-observation-ledger.md` (storage and planning) and
+  `docs/lead-lifecycle-atomic-apply.md` (serialization and the restricted
+  apply function). Read them only when working on lifecycle sync. Ingestion
+  is not built or active: nothing writes to these tables today.
 
 #### Opportunities and attribution
 

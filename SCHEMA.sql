@@ -1595,3 +1595,79 @@ ALTER TABLE sf_lifecycle_issues         ENABLE ROW LEVEL SECURITY;
 
 -- Done. Nothing above touches existing tables, rows, or policies, and no
 -- data is written by this migration.
+
+-- =============================================================
+-- Bite 4G2B1: lifecycle observation ledger, atomic apply boundary
+-- (docs/lead-lifecycle-atomic-apply.md). Added by
+-- migrations/2026-08-04_lifecycle_observation_apply_fn.sql.
+-- STATUS: PENDING. NOT YET APPLIED to production. This block documents
+-- the intended shape once that migration is applied.
+--
+-- Three idempotency constraints the original 4G2A schema lacked, plus one
+-- restricted function. The event key is the load-bearing one: without it
+-- an exact retry would insert PERMANENT duplicate events through the
+-- append-only trigger, inflating every transition, return, and
+-- requalification count downstream.
+--
+-- The function applies ONE serialized batch atomically against ONLY the
+-- seven sf_lifecycle_* tables. It writes no data by itself, imports
+-- nothing, and backfills nothing. Ingestion (Bite 4G2B2) does not exist.
+-- =============================================================
+
+ALTER TABLE sf_lifecycle_events
+  ADD COLUMN IF NOT EXISTS event_key TEXT;
+ALTER TABLE sf_lifecycle_events
+  ADD CONSTRAINT sf_lifecycle_event_key_unique UNIQUE (event_key);
+
+ALTER TABLE sf_lifecycle_issues
+  ADD COLUMN IF NOT EXISTS issue_key TEXT;
+ALTER TABLE sf_lifecycle_issues
+  ADD CONSTRAINT sf_lifecycle_issue_key_unique UNIQUE (issue_key);
+
+ALTER TABLE sf_lifecycle_observations
+  ADD COLUMN IF NOT EXISTS observation_key TEXT;
+ALTER TABLE sf_lifecycle_observations
+  ADD CONSTRAINT sf_lifecycle_observation_key_unique UNIQUE (observation_key);
+
+-- public.sf_lifecycle_resolve_person(p_ref JSONB, p_handle_map JSONB)
+--   RETURNS UUID
+--
+-- Typed person resolution. A reference states its own kind, so nothing is
+-- guessed from an untyped string:
+--   new_handle -> resolves ONLY through the batch handle map
+--   person_id  -> an existing UUID, validated and confirmed to exist
+--   alias      -> the COMPLETE (source_object, source_record_id) identity,
+--                 so a Lead and a Contact sharing an id string can never
+--                 collide through an id-only lookup
+-- Returns NULL when unresolvable; callers raise a sanitized LC005.
+--
+-- public.sf_apply_lifecycle_observations(
+--   p_run JSONB, p_persons JSONB, p_aliases JSONB, p_observations JSONB,
+--   p_events JSONB, p_projections JSONB, p_issues JSONB
+-- ) RETURNS JSONB
+--
+-- Applies one serialized batch atomically. The run row is inserted FIRST
+-- from server-generated and constant values only, with every
+-- caller-controlled cast and validation deferred into the protected block,
+-- so a malformed payload still records exactly one failed run row instead
+-- of aborting with none. Observation, event, and issue key conflicts
+-- verify the COMPLETE canonical identity before being accepted as an exact
+-- retry (sync_run_id and created_at excluded under first-observation-wins;
+-- issues additionally exclude review_state and detail); differing content
+-- raises LC002 and no version is chosen. The projection follows a full
+-- ordering truth table in which undated evidence never overwrites a known
+-- timestamp and an unprovable order with differing content is a conflict.
+--
+-- Validated by execution against PostgreSQL 15.18 in a disposable local
+-- cluster (not production). Two defects were found and corrected there:
+-- an exact retry raised a bogus LC003 because the invocation compared the
+-- alias owner against a person the SAME invocation had just speculatively
+-- created, and native cast failures (22007, 22P02) were categorized as
+-- unexpected_error rather than malformed_payload.
+--
+-- Both functions: SECURITY DEFINER, SET search_path = pg_catalog, every
+-- reference schema-qualified. Revoked from PUBLIC, anon, and
+-- authenticated; EXECUTE granted only to service_role. See the migration
+-- for the full body, the LC001..LC005 SQLSTATE vocabulary, and the
+-- sanitized failure contract (SQLSTATE plus an allowlisted category,
+-- never SQLERRM).
