@@ -675,8 +675,14 @@ describe('PENDING migration safety (static SQL)', () => {
   );
   const codeOnly = MIGRATION.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
 
-  it('is marked NOT YET APPLIED and is forward-only', () => {
-    expect(MIGRATION).toContain('NOT YET APPLIED');
+  it('states its true applied status and is forward-only', () => {
+    // Applied manually to production on 2026-08-04. The file must state the
+    // real status and must not carry the obsolete pending note, which would
+    // contradict the ledger row in migrations/README.md.
+    expect(MIGRATION).toContain('Applied manually to production on 2026-08-04');
+    expect(MIGRATION).toContain('Created structure');
+    expect(MIGRATION).toContain('no lifecycle data was imported');
+    expect(MIGRATION).not.toContain('NOT YET APPLIED');
     expect(codeOnly).toContain('CREATE TABLE IF NOT EXISTS');
   });
 
