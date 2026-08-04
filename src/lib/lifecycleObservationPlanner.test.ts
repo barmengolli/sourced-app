@@ -675,8 +675,33 @@ describe('PENDING migration safety (static SQL)', () => {
   );
   const codeOnly = MIGRATION.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
 
-  it('is marked NOT YET APPLIED and is forward-only', () => {
-    expect(MIGRATION).toContain('NOT YET APPLIED');
+  it('records the same applied status in the SCHEMA.sql lifecycle section', () => {
+    // Scoped to the Bite 4G2A block only: SCHEMA.sql documents older
+    // migrations whose own headers are still stale, and those are a
+    // separate cleanup item that must not fail this assertion.
+    const schema = readFileSync(resolve(process.cwd(), 'SCHEMA.sql'), 'utf8');
+    const start = schema.indexOf('-- Bite 4G2A: Salesforce lifecycle observation ledger');
+    expect(start).toBeGreaterThan(-1);
+    // The section runs to the first lifecycle table it introduces.
+    const end = schema.indexOf('CREATE TABLE IF NOT EXISTS sf_lifecycle_sync_runs', start);
+    expect(end).toBeGreaterThan(start);
+    const section = schema.slice(start, end);
+
+    expect(section).toContain('Applied manually to production on 2026-08-04');
+    expect(section).toContain('Created structure');
+    expect(section).toContain('no lifecycle data was imported');
+    expect(section).not.toContain('PENDING');
+    expect(section).not.toContain('NOT YET APPLIED');
+  });
+
+  it('states its true applied status and is forward-only', () => {
+    // Applied manually to production on 2026-08-04. The file must state the
+    // real status and must not carry the obsolete pending note, which would
+    // contradict the ledger row in migrations/README.md.
+    expect(MIGRATION).toContain('Applied manually to production on 2026-08-04');
+    expect(MIGRATION).toContain('Created structure');
+    expect(MIGRATION).toContain('no lifecycle data was imported');
+    expect(MIGRATION).not.toContain('NOT YET APPLIED');
     expect(codeOnly).toContain('CREATE TABLE IF NOT EXISTS');
   });
 
@@ -776,12 +801,18 @@ describe('PENDING migration safety (static SQL)', () => {
     expect(MIGRATION).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
   });
 
-  it('is recorded PENDING in the migration ledger', () => {
+  it('is recorded APPLIED in the migration ledger, with no data imported', () => {
+    // Applied manually to production on 2026-08-04. The row must state the
+    // real status: the guard is that it stays accurate, not that it stays
+    // PENDING. Structure only; ingestion (Bite 4G2B) is unstarted, so the
+    // row must not imply any lifecycle data exists.
     const readme = readFileSync(resolve(process.cwd(), 'migrations/README.md'), 'utf8');
     expect(readme).toContain('2026-08-04_lifecycle_observation_ledger.sql');
     const row = readme.split('\n').find((l) => l.includes('2026-08-04_lifecycle_observation_ledger.sql'))!;
-    expect(row).toContain('PENDING');
-    expect(row).toContain('NOT YET APPLIED');
+    expect(row).toContain('APPLIED');
+    expect(row).toContain('2026-08-04');
+    expect(row).not.toContain('NOT YET APPLIED');
+    expect(row).toContain('imported no lifecycle data');
   });
 });
 

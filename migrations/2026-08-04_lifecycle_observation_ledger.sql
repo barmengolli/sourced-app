@@ -55,7 +55,8 @@
 --     run can never advance one.
 --
 -- RUN ORDER: standalone, no dependencies on other pending migrations.
--- Apply manually in the Supabase SQL Editor. NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-04. Created structure
+-- only; no lifecycle data was imported.
 
 -- =============================================================
 -- 1. Sync runs (diagnostics + watermarks)
