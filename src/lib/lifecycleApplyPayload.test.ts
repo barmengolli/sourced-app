@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { serializeLifecycleApply } from './lifecycleApplyPayload';
+import { serializeLifecycleApply, observationKeyFor, personRefFor } from './lifecycleApplyPayload';
 import type { RunIdentity } from './lifecycleApplyPayload';
 import { planLifecycleObservations } from './lifecycleObservationPlanner';
 import type {
@@ -507,6 +507,236 @@ describe('atomic-apply migration safety (static SQL)', () => {
     );
     expect(applied).toContain('STATUS: Applied manually to production on 2026-08-04');
     expect(applied).not.toContain('sf_apply_lifecycle_observations');
+  });
+});
+
+// --- hardening pass --------------------------------------------------------
+
+describe('hardening 1: source is text, never binary', () => {
+  const FILES = [
+    'src/lib/lifecycleApplyPayload.ts',
+    'src/lib/lifecycleApplyPayload.test.ts',
+    'src/lib/lifecycleObservationPlanner.ts',
+    'migrations/2026-08-04_lifecycle_observation_apply_fn.sql',
+  ];
+
+  it('contains zero literal NUL bytes', () => {
+    for (const f of FILES) {
+      const buf = readFileSync(resolve(process.cwd(), f));
+      expect(buf.indexOf(0), `${f} contains a NUL byte`).toBe(-1);
+    }
+  });
+
+  it('builds keys from explicit ordered JSON arrays, not invisible joins', () => {
+    const src = readFileSync(resolve(process.cwd(), 'src/lib/lifecycleApplyPayload.ts'), 'utf8');
+    expect(src).toContain("JSON.stringify(['event'");
+    expect(src).not.toMatch(/\.join\(['"]\\u0000|\\x00/);
+  });
+
+  it('distinguishes null from empty string in a key', () => {
+    const a = observationKeyFor({ sourceObject: 'Lead', sourceRecordId: 'SYNTH-1', sourceModifiedAt: null, contentFingerprint: 'fp' });
+    const b = observationKeyFor({ sourceObject: 'Lead', sourceRecordId: 'SYNTH-1', sourceModifiedAt: '', contentFingerprint: 'fp' });
+    expect(a).not.toBe(b);
+  });
+
+  it('cannot be confused by a value containing the delimiter', () => {
+    // The classic join-delimiter collision: ["a","b"] vs ["a,b"].
+    const a = observationKeyFor({ sourceObject: 'Lead', sourceRecordId: 'A', sourceModifiedAt: 'B', contentFingerprint: 'fp' });
+    const b = observationKeyFor({ sourceObject: 'Lead', sourceRecordId: 'A","B', sourceModifiedAt: null, contentFingerprint: 'fp' });
+    expect(a).not.toBe(b);
+  });
+
+  it('is stable across calls and independent of property order', () => {
+    const x = { sourceObject: 'Lead' as const, sourceRecordId: 'SYNTH-1', sourceModifiedAt: 'T', contentFingerprint: 'fp' };
+    const y = { contentFingerprint: 'fp', sourceModifiedAt: 'T', sourceRecordId: 'SYNTH-1', sourceObject: 'Lead' as const };
+    expect(observationKeyFor(x)).toBe(observationKeyFor(y));
+  });
+});
+
+describe('hardening 5: typed person references', () => {
+  it('classifies a batch handle, a UUID, and neither', () => {
+    expect(personRefFor('new-person-SYNTH-RUN-1-1')).toEqual({
+      kind: 'new_handle',
+      handle: 'new-person-SYNTH-RUN-1-1',
+    });
+    expect(personRefFor('3f2504e0-4f89-41d3-9a0c-0305e82c3301')).toEqual({
+      kind: 'person_id',
+      personId: '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
+    });
+    // An arbitrary Salesforce-ish string is NOT a person reference.
+    expect(personRefFor('SYNTH-LEAD-1')).toBeNull();
+  });
+
+  it('attaches a typed reference to every person-bearing record', () => {
+    const p = ok(plan({ rows: [row({ rawLifecycleValue: 'Newly Added Stage' })] }));
+    expect(p.aliases[0].personRef.kind).toBe('new_handle');
+    expect(p.observations[0].personRef.kind).toBe('new_handle');
+    expect(p.projections[0].personRef.kind).toBe('new_handle');
+    for (const i of p.issues) {
+      if (i.personRef !== null) expect(i.personRef.kind).toBe('new_handle');
+    }
+  });
+
+  it('resolves an existing person as a validated UUID, not a string', () => {
+    const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+    const prior: PriorState = {
+      aliasToPerson: { 'SYNTH-LEAD-1': uuid },
+      persons: {
+        [uuid]: { personId: uuid, normalizedState: 'lead', mqlSeenBefore: false, lastSourceModifiedAt: '2026-07-01T00:00:00.000Z', lastContentFingerprint: 'old' },
+      },
+    };
+    const p = ok(plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead', sourceModifiedAt: '2026-08-02T10:00:00.000Z' })], prior }));
+    expect(p.observations[0].personRef).toEqual({ kind: 'person_id', personId: uuid });
+  });
+});
+
+describe('hardening 2: the run row is genuinely first', () => {
+  const FILE = resolve(process.cwd(), 'migrations/2026-08-04_lifecycle_observation_apply_fn.sql');
+  const SQL = readFileSync(FILE, 'utf8');
+  const body = SQL.slice(SQL.indexOf('CREATE OR REPLACE FUNCTION public.sf_apply_lifecycle_observations'));
+  const preamble = body.slice(
+    body.indexOf('\nBEGIN\n'),
+    body.indexOf('RETURNING id INTO v_run_id;'),
+  );
+
+  it('inserts the run row with no caller-controlled value', () => {
+    expect(preamble).toContain('INSERT INTO public.sf_lifecycle_sync_runs');
+    // Nothing reads p_run before the run row exists.
+    expect(preamble).not.toContain('p_run');
+    expect(preamble).toContain('pg_catalog.now()');
+  });
+
+  it('performs no cast or validation before the run row', () => {
+    expect(preamble).not.toMatch(/::TIMESTAMPTZ/);
+    expect(preamble).not.toMatch(/::INT/);
+    expect(preamble).not.toMatch(/::BOOLEAN/);
+    expect(preamble).not.toMatch(/RAISE EXCEPTION/);
+  });
+
+  it('validates syncRunId, timestamps, and page counts inside the block', () => {
+    const guarded = body.slice(body.indexOf('RETURNING id INTO v_run_id;'));
+    expect(guarded).toContain("v_sync_run_id := p_run ->> 'syncRunId'");
+    expect(guarded).toContain('payload missing syncRunId');
+    expect(guarded).toMatch(/v_started_at := COALESCE\(\(p_run ->> 'runStartedAt'\)::TIMESTAMPTZ/);
+    expect(guarded).toMatch(/v_lc_expected := COALESCE\(\(p_run ->> 'lifecyclePagesExpected'\)::INT/);
+  });
+
+  it('records exactly one run row per invocation, including on failure', () => {
+    const inserts = body.match(/INSERT INTO public\.sf_lifecycle_sync_runs/g) ?? [];
+    expect(inserts).toHaveLength(1);
+    // The handler updates that row rather than inserting another.
+    expect(body).toMatch(/EXCEPTION WHEN OTHERS THEN[\s\S]*UPDATE public\.sf_lifecycle_sync_runs/);
+  });
+});
+
+describe('hardening 3: projection ordering truth table', () => {
+  const SQL = readFileSync(
+    resolve(process.cwd(), 'migrations/2026-08-04_lifecycle_observation_apply_fn.sql'),
+    'utf8',
+  );
+
+  it('never lets undated evidence overwrite a known timestamp', () => {
+    // The old bug: "OR v_rec.source_modified_at IS NULL" as an accept.
+    expect(SQL).not.toMatch(/OR v_rec\.source_modified_at IS NULL\s*\n\s*OR v_rec\.source_modified_at >/);
+    expect(SQL).toMatch(/ELSIF v_rec\.source_modified_at IS NULL THEN\s*\n\s*--[^\n]*\n\s*NULL;/);
+  });
+
+  it('treats an indistinguishable order with differing content as a conflict', () => {
+    expect(SQL).toMatch(/IS NOT DISTINCT FROM v_existing_state\.last_source_modified_at/);
+    expect(SQL).toContain('indistinguishable ordering with differing content');
+    expect(SQL).toMatch(/content_fingerprint IS DISTINCT FROM v_existing_state\.last_content_fingerprint/);
+  });
+
+  it('accepts only strictly newer dated evidence', () => {
+    expect(SQL).toMatch(/v_rec\.source_modified_at > v_existing_state\.last_source_modified_at/);
+    expect(SQL).toMatch(/v_existing_state\.last_source_modified_at IS NULL/);
+  });
+
+  it('compares parsed instants, not text', () => {
+    // The column and the payload cast are both TIMESTAMPTZ, so '+0000'
+    // and 'Z' are the same moment by construction.
+    expect(SQL).toMatch(/\(value ->> 'sourceModifiedAt'\)::TIMESTAMPTZ/);
+  });
+});
+
+describe('hardening 4: full canonical identity on key conflict', () => {
+  const SQL = readFileSync(
+    resolve(process.cwd(), 'migrations/2026-08-04_lifecycle_observation_apply_fn.sql'),
+    'utf8',
+  );
+
+  it('verifies content for observations, events, and issues', () => {
+    expect(SQL).toContain('observation key reused with different canonical content');
+    expect(SQL).toContain('event key reused with different canonical content');
+    expect(SQL).toContain('issue key reused with different canonical content');
+  });
+
+  it('uses null-safe comparisons', () => {
+    const distinct = SQL.match(/IS DISTINCT FROM/g) ?? [];
+    expect(distinct.length).toBeGreaterThanOrEqual(15);
+  });
+
+  it('locks the existing row before comparing', () => {
+    expect(SQL).toMatch(/WHERE observation_key = v_rec\.observation_key\s*\n\s*FOR UPDATE/);
+    expect(SQL).toMatch(/WHERE event_key = v_rec\.event_key\s*\n\s*FOR UPDATE/);
+    expect(SQL).toMatch(/WHERE issue_key = v_rec\.issue_key\s*\n\s*FOR UPDATE/);
+  });
+
+  it('still never updates an append-only table', () => {
+    expect(SQL).not.toMatch(/UPDATE public\.sf_lifecycle_observations/i);
+    expect(SQL).not.toMatch(/UPDATE public\.sf_lifecycle_events/i);
+  });
+
+  it('documents the first-observation-wins exclusions', () => {
+    expect(SQL).toMatch(/EXCLUDED from canonical identity \(first[\s\S]{0,60}observation wins\)/);
+    expect(SQL).toMatch(/sync_run_id and created_at/);
+    // Issues additionally exclude human review state and wording.
+    expect(SQL).toMatch(/review_state, detail,[\s\S]{0,80}EXCLUDED/);
+  });
+});
+
+describe('hardening 5: SQL person resolution is typed', () => {
+  const SQL = readFileSync(
+    resolve(process.cwd(), 'migrations/2026-08-04_lifecycle_observation_apply_fn.sql'),
+    'utf8',
+  );
+
+  it('has no id-only person lookup anywhere', () => {
+    expect(SQL).not.toMatch(/WHERE source_record_id = v_rec\.handle/);
+    expect(SQL).not.toMatch(/FROM public\.sf_lifecycle_person_aliases[\s\S]{0,200}LIMIT 1/);
+  });
+
+  it('resolves through a typed helper that handles all three kinds', () => {
+    expect(SQL).toContain('CREATE OR REPLACE FUNCTION public.sf_lifecycle_resolve_person');
+    expect(SQL).toMatch(/v_kind = 'new_handle'/);
+    expect(SQL).toMatch(/v_kind = 'person_id'/);
+    expect(SQL).toMatch(/v_kind = 'alias'/);
+  });
+
+  it('always uses the complete alias identity', () => {
+    expect(SQL).toMatch(/WHERE source_object = \(p_ref ->> 'sourceObject'\)\s*\n\s*AND source_record_id = \(p_ref ->> 'sourceRecordId'\)/);
+  });
+
+  it('resolves a batch handle only through the batch map', () => {
+    expect(SQL).toMatch(/IF v_kind = 'new_handle' THEN[\s\S]{0,200}p_handle_map ->>/);
+  });
+
+  it('validates an existing UUID and refuses a bad one', () => {
+    expect(SQL).toMatch(/EXCEPTION WHEN OTHERS THEN\s*\n\s*RETURN NULL;/);
+    expect(SQL).toMatch(/PERFORM 1 FROM public\.sf_lifecycle_persons WHERE id = v_id/);
+  });
+
+  it('fails the batch on an unresolvable reference', () => {
+    expect(SQL).toMatch(/unresolvable person reference for observation/);
+    expect(SQL).toMatch(/unresolvable person reference for event/);
+    expect(SQL).toMatch(/unresolvable person reference for projection/);
+    expect(SQL).toContain("'LC005'");
+  });
+
+  it('restricts the helper to service_role as well', () => {
+    expect(SQL).toMatch(/REVOKE ALL ON FUNCTION public\.sf_lifecycle_resolve_person[\s\S]*FROM anon/);
+    expect(SQL).toMatch(/GRANT EXECUTE ON FUNCTION public\.sf_lifecycle_resolve_person[\s\S]*TO service_role/);
+    expect(SQL).toMatch(/SET search_path = pg_catalog[\s\S]{0,200}\$resolve\$/);
   });
 });
 

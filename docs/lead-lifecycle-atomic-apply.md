@@ -69,35 +69,91 @@ An `observation_key` column and unique constraint were also added so the
 key the serializer computes and the constraint the database enforces are
 the same fact rather than two things that must be kept in agreement.
 
-## Temporary handles and database UUIDs
+## Person references are typed, never guessed
 
-The planner emits content-free handles (`new-person-<runId>-<n>`) because
-it cannot know a UUID it has not created. The function maps them:
+A person is referenced in exactly one of three unambiguous ways, as a
+discriminated union rather than a bare string, so the SQL never infers
+what a reference means:
 
-- A `create_person` operation inserts a row and records
-  `handle -> real UUID` in an in-memory map.
-- Every later alias, observation, event, projection, and issue resolves
-  its person through that map.
-- A handle that is not in the map must resolve through an existing alias;
-  if it resolves to nothing, the batch fails (`LC005`) rather than
-  inventing or guessing a person.
-- Handles are never stored in a column. They exist only for the duration
-  of one apply.
+| Kind | Resolution |
+|---|---|
+| `new_handle` | A person created in **this batch**. Resolves **only** through the batch handle map. There is no table-lookup fallback |
+| `person_id` | An existing internal UUID. Validated as a UUID and confirmed to exist |
+| `alias` | The **complete** `(source_object, source_record_id)` identity |
+
+The alias case carries both columns deliberately. An earlier version
+resolved a person with `WHERE source_record_id = handle LIMIT 1`, omitting
+`source_object`: a Lead and a Contact sharing an id string could collide,
+and `LIMIT 1` would pick an arbitrary winner, silently attaching evidence
+to the wrong person. That lookup no longer exists, and the unique
+constraint means no `LIMIT` is needed at all.
+
+An unresolvable or ambiguous reference fails the batch with a sanitized
+`LC005` rather than guessing. Temporary handles are never written to a
+column; they exist only for the duration of one apply.
+
+## Key construction
+
+Keys hash a JSON **array** of explicitly ordered values with a leading
+type tag. An array rather than an object, so property ordering cannot
+change a key; JSON rather than a delimiter join, so a value containing the
+delimiter cannot forge a different record's key; and JSON's distinction
+between `null` and `""` means an absent timestamp and a blank one produce
+different keys. Every input is readable text, so these files stay text to
+git and to ordinary tools.
 
 ## Idempotency and conflict
 
 | Situation | Behavior |
 |---|---|
-| Exact retry of a whole batch | Every insert collapses on its key. No duplicates, no error |
+| Exact retry of a whole batch | Every insert collapses on its key **after its full content is verified**. No duplicates, no error |
+| Key reused with different content | `LC002`. The batch fails; **no version is chosen** |
 | Same source timestamp, same content | Idempotent no-op |
-| Same source timestamp, different content | `LC002`. The batch fails; **no winner is chosen** |
-| Stale source timestamp | Projection no-op under a row lock. Newer state is never overwritten |
+| Same source timestamp, different content | `LC002`. **No winner is chosen** |
+| Stale source timestamp | Projection no-op under a row lock |
 | Unchanged re-observation | Counted in run diagnostics, no row inserted |
 
 Declaring a unique constraint is not the guarantee; the insert has to
 *use* it. Each insert's `ON CONFLICT ... DO NOTHING` is asserted against
 its own statement, because a constraint that exists while the insert
 ignores it turns a silent no-op into a failed batch.
+
+**A matching key is not proof of a matching row.** On every key conflict,
+for observations, events, and issues alike, the existing row is loaded
+`FOR UPDATE` and its **complete canonical identity** is compared with
+null-safe `IS DISTINCT FROM` comparisons. Only a full match counts as an
+exact retry. Any difference raises `LC002` and neither version wins.
+Neither append-only table is ever updated on either path.
+
+### What is excluded from canonical identity
+
+Under a **first-observation-wins** policy, some columns record *which run
+first saw* the evidence rather than what the evidence says, so a later run
+re-observing identical content must not be treated as a conflict:
+
+- **Observations and events**: `sync_run_id` and `created_at` are
+  excluded.
+- **Issues**: additionally `review_state`, `detail`, and `updated_at` are
+  excluded. A human may have resolved an issue, and the detail wording may
+  change, without the same standing evidence becoming a conflict.
+
+## Projection ordering truth table
+
+Undated evidence proves *less* than dated evidence, so it may never
+overwrite a known timestamp, and two rows whose order cannot be proven are
+a conflict rather than silent last-writer-wins. All comparisons are on
+parsed `TIMESTAMPTZ` instants, so `+0000` and `Z` are the same moment.
+
+| Existing | Incoming | Result |
+|---|---|---|
+| known | older | stale no-op |
+| known | NULL | **no-op; never overwrites** |
+| NULL | known | accept |
+| known | newer | accept |
+| same instant | same fingerprint | idempotent no-op |
+| same instant | different fingerprint | `LC002` conflict, no winner |
+| NULL | NULL, same fingerprint | idempotent no-op |
+| NULL | NULL, different fingerprint | `LC002` conflict, order unprovable |
 
 ## Identity
 
@@ -114,9 +170,19 @@ unrecoverable, which is why it is never attempted.
 
 ## Atomicity, failure, and the watermark
 
-The run row is created **first**, from server-generated values only, so a
-malformed payload still produces a recorded failure. All business work
-then happens inside a block whose failure rolls everything back.
+The run row is created **genuinely first**: the insert uses only
+`pg_catalog.now()` and constant zeros, and **nothing reads, validates, or
+casts any caller-controlled value before it**. That ordering is the whole
+guarantee. An earlier version validated `syncRunId` and cast five payload
+values inside the insert itself, so a blank id or an unparseable timestamp
+aborted the function with **zero** run rows and the attempt vanished
+without a trace.
+
+`syncRunId`, `runStartedAt`, the four page counts, completeness, and the
+watermark are all validated and cast **inside** the protected block, which
+then corrects the run row's page counts and start time. Every invocation
+produces exactly one run row, malformed input included. All business work
+happens inside that same block, whose failure rolls everything back.
 
 - **Success**: run marked `completed`, watermark persisted, counts
   returned.
