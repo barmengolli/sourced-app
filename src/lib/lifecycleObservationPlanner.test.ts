@@ -776,12 +776,18 @@ describe('PENDING migration safety (static SQL)', () => {
     expect(MIGRATION).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
   });
 
-  it('is recorded PENDING in the migration ledger', () => {
+  it('is recorded APPLIED in the migration ledger, with no data imported', () => {
+    // Applied manually to production on 2026-08-04. The row must state the
+    // real status: the guard is that it stays accurate, not that it stays
+    // PENDING. Structure only; ingestion (Bite 4G2B) is unstarted, so the
+    // row must not imply any lifecycle data exists.
     const readme = readFileSync(resolve(process.cwd(), 'migrations/README.md'), 'utf8');
     expect(readme).toContain('2026-08-04_lifecycle_observation_ledger.sql');
     const row = readme.split('\n').find((l) => l.includes('2026-08-04_lifecycle_observation_ledger.sql'))!;
-    expect(row).toContain('PENDING');
-    expect(row).toContain('NOT YET APPLIED');
+    expect(row).toContain('APPLIED');
+    expect(row).toContain('2026-08-04');
+    expect(row).not.toContain('NOT YET APPLIED');
+    expect(row).toContain('imported no lifecycle data');
   });
 });
 
