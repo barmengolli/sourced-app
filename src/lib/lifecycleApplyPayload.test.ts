@@ -740,6 +740,67 @@ describe('hardening 5: SQL person resolution is typed', () => {
   });
 });
 
+describe('hardening 6: defects found by real PostgreSQL 15 execution', () => {
+  const SQL = readFileSync(
+    resolve(process.cwd(), 'migrations/2026-08-04_lifecycle_observation_apply_fn.sql'),
+    'utf8',
+  );
+
+  // Found by EXECUTING the function, not by reading it. On an exact retry
+  // the payload still contains create_person for a new_handle, so the
+  // function minted a fresh person and then compared it against the alias
+  // owner. v_existing_person <> v_person_id was true, so it raised LC003
+  // and EVERY retry failed as a bogus "identity conflict". Those are not
+  // two real people: one is a speculative row the same invocation created.
+  // Anchored to the specific IF that guards the merge refusal. Asserting
+  // only that the kind-check string appears somewhere would still pass if
+  // the guard were removed from THIS branch, which is exactly the bug.
+  it('treats an alias-already-bound new_handle as a retry, not a merge', () => {
+    const i = SQL.indexOf('refusing to merge two existing people');
+    expect(i).toBeGreaterThan(-1);
+    // The 400 characters preceding the raise must contain the narrowing
+    // condition, so the refusal cannot fire for a speculative person.
+    const guard = SQL.slice(Math.max(0, i - 400), i);
+    expect(guard).toContain("(v_rec.person_ref ->> 'kind') <> 'new_handle'");
+    expect(SQL).toContain('EXACT RETRY');
+  });
+
+  it('discards the speculative person so a retry leaves no orphan', () => {
+    // Exactly one cleanup DELETE, guarded by both not-exists checks. A
+    // duplicated or unguarded DELETE would be a different statement.
+    const deletes = SQL.match(/DELETE FROM public\.sf_lifecycle_persons/g) ?? [];
+    expect(deletes).toHaveLength(1);
+    const i = SQL.indexOf('DELETE FROM public.sf_lifecycle_persons');
+    const block = SQL.slice(i, i + 500);
+    expect(block).toContain('WHERE id = v_person_id');
+    expect(block).toContain('SELECT 1 FROM public.sf_lifecycle_person_aliases a WHERE a.person_id = v_person_id');
+    expect(block).toContain('SELECT 1 FROM public.sf_lifecycle_observations o WHERE o.person_id = v_person_id');
+    // Guarded by the same new_handle narrowing.
+    const before = SQL.slice(Math.max(0, i - 300), i);
+    expect(before).toContain("(v_rec.person_ref ->> 'kind') = 'new_handle'");
+  });
+
+  it('still refuses to merge two people that existed BEFORE the batch', () => {
+    // The guard narrows to new_handle only; person_id and alias references
+    // still raise LC003.
+    expect(SQL).toContain('refusing to merge two existing people');
+    expect(SQL).toContain("'LC003'");
+  });
+
+  it('adopts the winner after losing an alias race on a speculative person', () => {
+    expect(SQL).toContain('Lost race on a speculative person: adopt the winner');
+  });
+
+  // Observed SQLSTATEs from PostgreSQL 15 execution: an unparseable
+  // timestamp raises 22007 and a non-integer page count raises 22P02.
+  // Both are malformed caller input, not an unexpected internal fault.
+  it('categorizes native cast failures as malformed_payload', () => {
+    expect(SQL).toContain("WHEN '22007' THEN 'malformed_payload'");
+    expect(SQL).toContain("WHEN '22P02' THEN 'malformed_payload'");
+    expect(SQL).toContain("WHEN '22008' THEN 'malformed_payload'");
+  });
+});
+
 // --- fixture hygiene -------------------------------------------------------
 
 describe('fixture hygiene', () => {

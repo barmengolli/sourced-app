@@ -219,6 +219,61 @@ projections, and issues, split by event kind, plus no-op counts and
 whether the watermark would advance. `writes_attempted` is `0`. No names,
 emails, Salesforce Ids, or source rows appear in shared diagnostics.
 
+## Execution validation (PostgreSQL 15.18)
+
+The contract above is not only statically asserted: the migration and
+function were executed against a real PostgreSQL 15.18 cluster in a
+disposable local environment (never production, never a shared database).
+Two defects surfaced that static analysis had missed, and both are fixed
+in the still-unapplied migration:
+
+1. **Every exact retry failed with a bogus `LC003`.** On a retry the
+   payload still contains `create_person` for a `new_handle`, so the
+   function minted a fresh person and then compared it against the alias's
+   established owner. They differed, so the merge refusal fired. Those are
+   not two real people: one is a speculative row the same invocation just
+   created. The refusal is now narrowed to references that named a person
+   which existed *before* the batch (`person_id` and `alias`), and the
+   speculative person is discarded so no orphan remains. A retry is now a
+   clean success with every counter at zero.
+
+2. **Native cast failures were miscategorized.** An unparseable timestamp
+   raises `22007` and a non-integer page count raises `22P02`; both were
+   recorded as `unexpected_error`. They are malformed caller input and are
+   now categorized as `malformed_payload`.
+
+Verified in execution: both migrations apply and rerun idempotently; all
+seven tables, three key constraints, two functions, and both append-only
+triggers exist; RLS is on with zero policies; the tables are absent from
+the realtime publication; `anon`, `authenticated`, and `PUBLIC` cannot
+execute either function while `service_role` can; direct `UPDATE` and
+`DELETE` against observations and events are rejected by the triggers; the
+full projection truth table behaves exactly as tabulated above, including
+undated evidence refusing to overwrite a known timestamp; a Lead and a
+Contact sharing one source-id string resolve to **different** people; and
+genuinely concurrent sessions produce no duplicates, no silent competing
+winner, no unintended merge, a deterministic final projection, and zero
+deadlocks.
+
+**The central transaction guarantee was confirmed in practice.** A batch
+that wrote two valid people and then failed on a poisoned third rolled
+back every business write (persons, aliases, observations, events, and
+projections all unchanged), while the run row created before the protected
+block survived as `failed` with a NULL watermark and a sanitized
+`LC004 malformed_payload` summary. Exactly one run row was added, and no
+run row anywhere contains text outside the allowlisted SQLSTATE/category
+vocabulary.
+
+### Caller contract
+
+The function returns its result as JSON with a successful SQL status even
+when the batch failed. **A caller must treat any `outcome` other than
+`success` as a workflow failure.** PostgreSQL returning a row means the
+function ran, not that the batch applied: `incomplete` and `failure` both
+come back as ordinary result rows, and `watermark_advanced` is `false` for
+both. Ingestion must never interpret "the RPC returned 200" as "the data
+landed".
+
 ## Baseline invariant
 
 Enforced independently at three levels: the serializer, the function body,
