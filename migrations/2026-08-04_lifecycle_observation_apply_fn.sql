@@ -346,10 +346,42 @@ BEGIN
       FOR UPDATE;
 
       IF FOUND THEN
-        IF v_person_id IS NOT NULL AND v_existing_person <> v_person_id THEN
+        -- The alias is already bound. Whether this is a conflict depends
+        -- on what the batch's reference actually denotes:
+        --
+        --   new_handle -> this invocation speculatively minted a person
+        --      for a record that turns out to already be linked, i.e. an
+        --      EXACT RETRY. The minted person is not a second real
+        --      person, so adopting the existing one is correct and the
+        --      speculative row is discarded below. Treating this as a
+        --      merge conflict would make every retry fail.
+        --   person_id / alias -> the batch names a person that ALREADY
+        --      existed before this invocation. If that differs from the
+        --      alias owner, two real people would be merged, which is
+        --      unrecoverable, so refuse.
+        IF (v_rec.person_ref ->> 'kind') <> 'new_handle'
+           AND v_person_id IS NOT NULL
+           AND v_existing_person <> v_person_id THEN
           RAISE EXCEPTION USING ERRCODE = 'LC003',
             MESSAGE = 'identity conflict: refusing to merge two existing people';
         END IF;
+
+        -- Adopt the established owner and discard the speculative person
+        -- so a retry leaves no orphan behind.
+        IF (v_rec.person_ref ->> 'kind') = 'new_handle'
+           AND v_person_id IS NOT NULL
+           AND v_person_id <> v_existing_person THEN
+          DELETE FROM public.sf_lifecycle_persons
+          WHERE id = v_person_id
+            AND NOT EXISTS (
+              SELECT 1 FROM public.sf_lifecycle_person_aliases a WHERE a.person_id = v_person_id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM public.sf_lifecycle_observations o WHERE o.person_id = v_person_id
+            );
+          v_persons_created := v_persons_created - 1;
+        END IF;
+
         v_person_id := v_existing_person;
         v_handle_map := jsonb_set(v_handle_map, ARRAY[v_rec.handle], to_jsonb(v_person_id::TEXT));
         CONTINUE;  -- already linked, idempotent
@@ -371,10 +403,14 @@ BEGIN
         FROM public.sf_lifecycle_person_aliases
         WHERE source_object = v_rec.source_object
           AND source_record_id = v_rec.source_record_id;
-        IF v_existing_person <> v_person_id THEN
+        IF (v_rec.person_ref ->> 'kind') <> 'new_handle'
+           AND v_existing_person <> v_person_id THEN
           RAISE EXCEPTION USING ERRCODE = 'LC003',
             MESSAGE = 'identity conflict: concurrent alias resolves to a different person';
         END IF;
+        -- Lost race on a speculative person: adopt the winner.
+        v_person_id := v_existing_person;
+        v_handle_map := jsonb_set(v_handle_map, ARRAY[v_rec.handle], to_jsonb(v_person_id::TEXT));
       ELSE
         v_aliases_created := v_aliases_created + 1;
       END IF;
@@ -753,6 +789,13 @@ BEGIN
       WHEN 'LC003' THEN 'identity_conflict'
       WHEN 'LC004' THEN 'malformed_payload'
       WHEN 'LC005' THEN 'unresolvable_person_handle'
+      -- Bad caller-supplied literals surface as native cast errors.
+      -- They are malformed payload, not an unexpected internal fault, and
+      -- were observed in PostgreSQL 15 execution testing: 22007 from an
+      -- unparseable timestamp, 22P02 from a non-integer page count.
+      WHEN '22007' THEN 'malformed_payload'
+      WHEN '22P02' THEN 'malformed_payload'
+      WHEN '22008' THEN 'malformed_payload'
       WHEN '23505' THEN 'unique_violation'
       WHEN '23503' THEN 'foreign_key_violation'
       WHEN '23514' THEN 'check_violation'

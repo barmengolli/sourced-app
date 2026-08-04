@@ -1658,6 +1658,13 @@ ALTER TABLE sf_lifecycle_observations
 -- ordering truth table in which undated evidence never overwrites a known
 -- timestamp and an unprovable order with differing content is a conflict.
 --
+-- Validated by execution against PostgreSQL 15.18 in a disposable local
+-- cluster (not production). Two defects were found and corrected there:
+-- an exact retry raised a bogus LC003 because the invocation compared the
+-- alias owner against a person the SAME invocation had just speculatively
+-- created, and native cast failures (22007, 22P02) were categorized as
+-- unexpected_error rather than malformed_payload.
+--
 -- Both functions: SECURITY DEFINER, SET search_path = pg_catalog, every
 -- reference schema-qualified. Revoked from PUBLIC, anon, and
 -- authenticated; EXECUTE granted only to service_role. See the migration
