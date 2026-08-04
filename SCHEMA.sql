@@ -1595,3 +1595,47 @@ ALTER TABLE sf_lifecycle_issues         ENABLE ROW LEVEL SECURITY;
 
 -- Done. Nothing above touches existing tables, rows, or policies, and no
 -- data is written by this migration.
+
+-- =============================================================
+-- Bite 4G2B1: lifecycle observation ledger, atomic apply boundary
+-- (docs/lead-lifecycle-atomic-apply.md). Added by
+-- migrations/2026-08-04_lifecycle_observation_apply_fn.sql.
+-- STATUS: PENDING. NOT YET APPLIED to production. This block documents
+-- the intended shape once that migration is applied.
+--
+-- Three idempotency constraints the original 4G2A schema lacked, plus one
+-- restricted function. The event key is the load-bearing one: without it
+-- an exact retry would insert PERMANENT duplicate events through the
+-- append-only trigger, inflating every transition, return, and
+-- requalification count downstream.
+--
+-- The function applies ONE serialized batch atomically against ONLY the
+-- seven sf_lifecycle_* tables. It writes no data by itself, imports
+-- nothing, and backfills nothing. Ingestion (Bite 4G2B2) does not exist.
+-- =============================================================
+
+ALTER TABLE sf_lifecycle_events
+  ADD COLUMN IF NOT EXISTS event_key TEXT;
+ALTER TABLE sf_lifecycle_events
+  ADD CONSTRAINT sf_lifecycle_event_key_unique UNIQUE (event_key);
+
+ALTER TABLE sf_lifecycle_issues
+  ADD COLUMN IF NOT EXISTS issue_key TEXT;
+ALTER TABLE sf_lifecycle_issues
+  ADD CONSTRAINT sf_lifecycle_issue_key_unique UNIQUE (issue_key);
+
+ALTER TABLE sf_lifecycle_observations
+  ADD COLUMN IF NOT EXISTS observation_key TEXT;
+ALTER TABLE sf_lifecycle_observations
+  ADD CONSTRAINT sf_lifecycle_observation_key_unique UNIQUE (observation_key);
+
+-- public.sf_apply_lifecycle_observations(
+--   p_run JSONB, p_persons JSONB, p_aliases JSONB, p_observations JSONB,
+--   p_events JSONB, p_projections JSONB, p_issues JSONB
+-- ) RETURNS JSONB
+--
+-- SECURITY DEFINER, SET search_path = pg_catalog, every reference
+-- schema-qualified. Revoked from PUBLIC, anon, and authenticated;
+-- EXECUTE granted only to service_role. See the migration for the full
+-- body, the LC001..LC005 SQLSTATE vocabulary, and the sanitized failure
+-- contract (SQLSTATE plus an allowlisted category, never SQLERRM).
