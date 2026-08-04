@@ -12,12 +12,14 @@
 //   - Value normalization is Bite 4G1's APPROVED_LIFECYCLE_VALUE_MAP. No
 //     fuzzy matching; unmapped values become 'unknown' and route to review.
 //
-// The one deliberate narrowing of 4A (documented in the contract): on a
-// FIRST observation, 4A emits a null->lead baseline AND, when the current
-// stage is already mql, a second null->mql event. Under 4G2 the org has no
-// lifecycle history at all, so that second event would assert a transition
-// nothing can evidence. The planner keeps only the baseline on a first
-// observation. Every later observation flows through 4A untouched.
+// Baseline selection is the one 4G2-specific concern (documented in the
+// contract): on a FIRST observation, 4A emits a null->lead event AND, when
+// the current stage is already mql, a null->mql event. Both have a null
+// fromStage, so the planner selects the baseline by DESTINATION: the one
+// landing on the state actually observed. A null->mql baseline means
+// "first observed as MQL", not "moved from Lead to MQL"; pre-baseline
+// history is unknown and stays unknown. Later observations flow through
+// 4A untouched.
 
 import { eventsFromObservation } from './funnelCohorts';
 import type { LifecycleEvent } from './funnelCohorts';
@@ -127,6 +129,17 @@ export interface PlannerInput {
 // Operations (allowlisted)
 // ---------------------------------------------------------------------------
 
+// How an emitted event should be recorded in sf_lifecycle_events.event_kind.
+// A baseline states where a person was FIRST OBSERVED; it is never evidence
+// of movement. The other three are observed changes between consecutive
+// observations. Carrying this explicitly keeps the database meaning from
+// being re-inferred (and possibly mis-inferred) at the write boundary.
+export type LifecycleEventKind =
+  | 'baseline'
+  | 'transition'
+  | 'return'
+  | 'requalification';
+
 export type IssueKind =
   | 'unknown_lifecycle_value'
   | 'blank_lifecycle_value'
@@ -159,7 +172,7 @@ export type PlannedOperation =
   | { op: 'baseline_observation'; observation: ObservationRow }
   | { op: 'changed_observation'; observation: ObservationRow }
   | { op: 'unchanged_noop'; personId: string; sourceRecordId: string }
-  | { op: 'lifecycle_event'; personId: string; event: LifecycleEvent }
+  | { op: 'lifecycle_event'; personId: string; eventKind: LifecycleEventKind; event: LifecycleEvent }
   | {
       op: 'update_projection';
       personId: string;
@@ -509,10 +522,20 @@ export function planLifecycleObservations(input: PlannerInput): LifecyclePlan {
 
       const stage = asStageKey(normalized);
       if (stage !== null) {
-        // Reuse 4A for the baseline event, then apply the 4G2 narrowing:
-        // keep ONLY the baseline. On a first sighting already at mql, 4A
-        // would also emit null->mql, which would assert a transition this
-        // org cannot evidence (zero lifecycle history, Bite 4G1).
+        // Reuse 4A to build the candidate events, then keep the ONE that
+        // records where this person was actually first observed.
+        //
+        // On a first sighting already at mql, 4A emits both null->lead and
+        // null->mql. Selecting by `fromStage === null` would always take the
+        // null->lead event, inventing a Lead baseline for someone Salesforce
+        // reports as MQL: the event ledger would then contradict the
+        // projection, and assessLeadLifecycle would read that fabricated
+        // event as a real acquisition date (it takes the first event
+        // entering 'lead') instead of correctly reporting the pre-baseline
+        // history as unknown.
+        //
+        // The truthful baseline lands on the observed state, so select by
+        // destination. Pre-baseline movement is unknown and stays unknown.
         const result = eventsFromObservation({
           leadId: personId,
           currentStage: stage,
@@ -521,20 +544,15 @@ export function planLifecycleObservations(input: PlannerInput): LifecyclePlan {
           observedAt: row.observedAt,
           priorKnownStage: null,
         });
-        const baselineEvent = result.events.find((e) => e.fromStage === null);
+        const baselineEvent = result.events.find(
+          (e) => e.fromStage === null && e.toStage === stage,
+        );
         if (baselineEvent) {
-          operations.push({ op: 'lifecycle_event', personId, event: baselineEvent });
-        }
-        if (result.events.length > 1) {
-          // Recorded for transparency: the discarded event is visible in
-          // diagnostics as an out-of-scope-of-4G2 first sighting, not
-          // silently dropped.
           operations.push({
-            op: 'raise_issue',
-            kind: 'ambiguous_transition_sequence',
+            op: 'lifecycle_event',
             personId,
-            detail:
-              'First observation was already MQL. Baseline recorded; no historical Lead-to-MQL transition is asserted because the org holds no lifecycle history.',
+            eventKind: 'baseline',
+            event: baselineEvent,
           });
         }
       }
@@ -621,14 +639,22 @@ export function planLifecycleObservations(input: PlannerInput): LifecyclePlan {
         mqlSeenBefore: priorPerson.mqlSeenBefore,
       });
       for (const event of result.events) {
-        operations.push({ op: 'lifecycle_event', personId, event });
+        let eventKind: LifecycleEventKind = 'transition';
         if (event.fromStage === 'lead' && event.toStage === 'mql') {
           diagnostics.leadToMql += 1;
           // A Lead->MQL after MQL was already seen is a requalification.
-          if (priorPerson.mqlSeenBefore) diagnostics.requalifications += 1;
+          // An MQL baseline sets mqlSeenBefore, so a person first observed
+          // at MQL who returns to Lead and moves back is a requalification
+          // too, not a first observed conversion.
+          if (priorPerson.mqlSeenBefore) {
+            diagnostics.requalifications += 1;
+            eventKind = 'requalification';
+          }
         } else if (event.fromStage === 'mql' && event.toStage === 'lead') {
           diagnostics.mqlToLead += 1;
+          eventKind = 'return';
         }
+        operations.push({ op: 'lifecycle_event', personId, eventKind, event });
       }
     } else {
       // At least one endpoint is out_of_scope or unknown. The sequence is

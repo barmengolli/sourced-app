@@ -22,32 +22,45 @@ does. Every day without it is a day of lifecycle movement lost permanently.
 ## The baseline rule, and its boundary with Bite 4A
 
 **The first successfully observed lifecycle value for a person is a
-baseline, never a transition.** It asserts "this is where they stand as of
-this observation" and nothing more. It never invents a Lead acquisition
-date, an MQL transition, an earlier stage, or a requalification. This holds
-even when the first observed value is MQL, Opportunity, Customer, or any
-other out-of-scope value.
+baseline, never a transition.** A baseline records *the state the person
+was first observed in*, and nothing more. It never invents a Lead
+acquisition date, an earlier stage, a conversion, a return, or a
+requalification. This holds whether the first observed value is Lead, MQL,
+Opportunity, Customer, or any other out-of-scope value.
+
+Read the event direction carefully, because the notation is easy to
+misread:
+
+> `null -> mql` means **"first observed as MQL."**
+> It does **not** mean "observed moving from Lead to MQL."
+
+The `null` origin is precisely the statement that **pre-baseline history is
+unknown**. Only an observed change between two consecutive observations is
+a transition, a return, or a requalification.
 
 Bite 4A's `eventsFromObservation` is the authoritative transition
-calculator and this bite reuses it rather than writing a competing one.
-There is exactly one place where 4A's behavior must be narrowed, and it is
-deliberate:
+calculator and this bite reuses it rather than writing a competing one. On
+a first observation already at `mql`, 4A emits **two** candidate events,
+`null -> lead` and `null -> mql`, because its original feed treated a first
+sighting at MQL as implying an earlier Lead stage. Choosing between those
+candidates is a 4G2 concern, and the rule is simple:
 
-> On a first observation whose current stage is already `mql`, 4A emits
-> **two** events: the `null -> lead` baseline and a `null -> mql` event
-> (with `unknown_mql_transition_date` flagged). That is correct for 4A's
-> original feed, where a first sighting at MQL implied an earlier Lead
-> stage worth recording.
->
-> Under 4G2 that second event would assert a transition the org cannot
-> evidence, because no lifecycle history exists at all. **The planner keeps
-> only the baseline event on a first observation and discards any
-> additional first-sighting event**, recording the discarded stage in the
-> observation row instead. Later observations flow through 4A untouched.
+> **The retained baseline is the one landing on the normalized state
+> actually observed.** The planner selects by destination, not by
+> `fromStage === null`, because both candidates satisfy that condition.
 
-This narrowing applies *only* to the first observation of a person. Every
-subsequent Lead to MQL, MQL to Lead, and requalification is computed by 4A
-with no modification.
+Selecting the `null -> lead` candidate for a person Salesforce currently
+reports as MQL would be actively harmful, not merely imprecise. It would
+put the event ledger in contradiction with the projection for the same
+person from their very first observation, and `assessLeadLifecycle` takes
+the acquisition date from the first event entering `lead`, so a fabricated
+Lead baseline would hand back a confident Lead acquisition date for someone
+never observed as a Lead. With the correct `null -> mql` baseline, that
+lookup finds nothing and truthfully reports the acquisition date as
+unknown, which is the answer the source can actually support.
+
+Every observed change after the baseline flows through 4A with no
+modification.
 
 ## Normalized lifecycle states
 
@@ -61,6 +74,25 @@ ever, and deal stages are never lead lifecycle.
 Out-of-scope and unknown observations are **stored**, not dropped: they are
 evidence of where a person went, and discarding them would create a false
 impression of continuity.
+
+## Event kinds
+
+Every stored event carries an explicit `event_kind`, so a baseline is never
+re-inferred from its shape at the write boundary:
+
+| Kind | Meaning |
+|---|---|
+| `baseline` | The state the person was **first observed** in. `from_state` is NULL. Asserts nothing about earlier movement |
+| `transition` | An observed Lead to MQL move between consecutive observations |
+| `return` | An observed MQL back to Lead move |
+| `requalification` | An observed Lead to MQL move for a person whose MQL state had already been seen |
+
+A **requalification requires an observed return to Lead followed by an
+observed move back to MQL.** A person first observed at MQL who later
+returns to Lead and moves back to MQL is a requalification, because their
+MQL state was already seen; that later move is not their original observed
+conversion, and the ledger never claims to know what their original
+conversion was.
 
 ## Transition sequence rule
 

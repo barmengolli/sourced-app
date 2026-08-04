@@ -111,35 +111,69 @@ describe('first observation is a baseline, never a transition', () => {
     const baselines = ops(result, 'baseline_observation');
     expect(baselines).toHaveLength(1);
     expect(result.diagnostics.baselines).toBe(1);
-    // Exactly one event, and it is a baseline landing on lead.
+    // Exactly one event: a baseline landing on the observed state, lead.
     const events = ops(result, 'lifecycle_event');
     expect(events).toHaveLength(1);
     expect(events[0].op === 'lifecycle_event' && events[0].event.fromStage).toBeNull();
     expect(events[0].op === 'lifecycle_event' && events[0].event.toStage).toBe('lead');
+    expect(events[0].op === 'lifecycle_event' && events[0].eventKind).toBe('baseline');
     // No transition of any kind was invented.
     expect(result.diagnostics.leadToMql).toBe(0);
     expect(result.diagnostics.mqlToLead).toBe(0);
     expect(result.diagnostics.requalifications).toBe(0);
   });
 
-  it('a first MQL observation records a baseline only, inventing NO Lead-to-MQL', () => {
-    // The 4G2 narrowing of Bite 4A: 4A alone would emit null->lead AND
-    // null->mql here. The org has zero lifecycle history, so the second
-    // event would assert a transition nothing can evidence.
+  it('a first MQL observation records exactly one null -> mql baseline', () => {
+    // 4A emits BOTH null->lead and null->mql here. Both have a null
+    // fromStage, so selection must be by DESTINATION. Keeping null->lead
+    // would invent a Lead baseline for someone Salesforce reports as MQL.
     const result = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
     expect(result.diagnostics.baselines).toBe(1);
     const events = ops(result, 'lifecycle_event');
     expect(events).toHaveLength(1);
     const only = events[0];
     expect(only.op === 'lifecycle_event' && only.event.fromStage).toBeNull();
-    // The DESTINATION is what distinguishes the kept baseline from the
-    // discarded null->mql event: both have a null fromStage, so asserting
-    // only on fromStage would let the invented transition through.
-    expect(only.op === 'lifecycle_event' && only.event.toStage).toBe('lead');
+    expect(only.op === 'lifecycle_event' && only.event.toStage).toBe('mql');
+    expect(only.op === 'lifecycle_event' && only.eventKind).toBe('baseline');
+    // No null->lead event survives anywhere in the plan.
+    expect(
+      events.some((o) => o.op === 'lifecycle_event' && o.event.toStage === 'lead'),
+    ).toBe(false);
+  });
+
+  it('a first MQL baseline counts as no conversion, return, or requalification', () => {
+    const result = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
     expect(result.diagnostics.leadToMql).toBe(0);
-    // The discarded first-sighting event is disclosed, not silently dropped.
-    const issues = ops(result, 'raise_issue');
-    expect(issues.some((o) => o.op === 'raise_issue' && o.kind === 'ambiguous_transition_sequence')).toBe(true);
+    expect(result.diagnostics.mqlToLead).toBe(0);
+    expect(result.diagnostics.requalifications).toBe(0);
+  });
+
+  it('a first MQL baseline raises no ambiguity issue for missing pre-baseline history', () => {
+    // Unavailable history before the baseline is the normal condition, not
+    // an anomaly worth flagging on every first-observed MQL.
+    const result = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
+    expect(ops(result, 'raise_issue')).toHaveLength(0);
+  });
+
+  it('invents no Lead acquisition date or prior Lead state for a first MQL baseline', () => {
+    const result = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
+    const only = ops(result, 'lifecycle_event')[0];
+    // The baseline carries no fabricated effective date.
+    expect(only.op === 'lifecycle_event' && only.event.effectiveDate).toBeNull();
+    // The stored observation invents no supporting dates either.
+    const b = ops(result, 'baseline_observation')[0];
+    expect(b.op === 'baseline_observation' && b.observation.becameLeadDate).toBeNull();
+    expect(b.op === 'baseline_observation' && b.observation.becameMqlDate).toBeNull();
+  });
+
+  it('leaves the projection at mql after a first MQL observation', () => {
+    const result = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
+    const proj = ops(result, 'update_projection');
+    expect(proj).toHaveLength(1);
+    expect(proj[0].op === 'update_projection' && proj[0].normalizedState).toBe('mql');
+    // The projection and the event ledger agree on the same person.
+    const only = ops(result, 'lifecycle_event')[0];
+    expect(only.op === 'lifecycle_event' && only.event.toStage).toBe('mql');
   });
 
   it('a first out-of-scope observation records a baseline with no event', () => {
@@ -273,6 +307,57 @@ describe('transitions use the Bite 4A calculator', () => {
     });
     expect(requal.diagnostics.leadToMql).toBe(1);
     expect(requal.diagnostics.requalifications).toBe(1);
+  });
+
+  it('after an MQL baseline, an unchanged MQL observation emits no event', () => {
+    const first = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
+    const again = plan({
+      rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead', sourceModifiedAt: '2026-08-02T10:00:00.000Z' })],
+      prior: priorFrom(first),
+    });
+    expect(again.diagnostics.unchanged).toBe(1);
+    expect(ops(again, 'lifecycle_event')).toHaveLength(0);
+    expect(again.diagnostics.leadToMql).toBe(0);
+    expect(again.diagnostics.mqlToLead).toBe(0);
+    expect(again.diagnostics.requalifications).toBe(0);
+  });
+
+  it('after an MQL baseline, a move to Lead is exactly one return', () => {
+    const first = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
+    const back = plan({
+      rows: [row({ rawLifecycleValue: 'Lead', sourceModifiedAt: '2026-08-02T10:00:00.000Z' })],
+      prior: priorFrom(first),
+    });
+    expect(back.diagnostics.mqlToLead).toBe(1);
+    expect(back.diagnostics.leadToMql).toBe(0);
+    expect(back.diagnostics.requalifications).toBe(0);
+    const events = ops(back, 'lifecycle_event');
+    expect(events).toHaveLength(1);
+    expect(events[0].op === 'lifecycle_event' && events[0].eventKind).toBe('return');
+  });
+
+  it('MQL baseline then Lead then MQL is a requalification, not an original conversion', () => {
+    const first = plan({ rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead' })] });
+    // An MQL baseline records that MQL has already been seen, which is what
+    // makes the later Lead->MQL a requalification rather than a first
+    // observed conversion.
+    expect(Object.values(priorFrom(first).persons).every((p) => p.mqlSeenBefore)).toBe(true);
+    const back = plan({
+      rows: [row({ rawLifecycleValue: 'Lead', sourceModifiedAt: '2026-08-02T10:00:00.000Z' })],
+      prior: priorFrom(first),
+    });
+    const state = priorFrom(back);
+    // Thread mqlSeenBefore forward as the stored projection would.
+    for (const p of Object.values(state.persons)) p.mqlSeenBefore = true;
+    const requal = plan({
+      rows: [row({ rawLifecycleValue: 'Marketing Qualified Lead', sourceModifiedAt: '2026-08-03T10:00:00.000Z' })],
+      prior: state,
+    });
+    expect(requal.diagnostics.leadToMql).toBe(1);
+    expect(requal.diagnostics.requalifications).toBe(1);
+    const events = ops(requal, 'lifecycle_event');
+    expect(events).toHaveLength(1);
+    expect(events[0].op === 'lifecycle_event' && events[0].eventKind).toBe('requalification');
   });
 
   it('does NOT infer a transition across an intervening out-of-scope value', () => {
@@ -651,6 +736,26 @@ describe('PENDING migration safety (static SQL)', () => {
     expect(codeOnly).toContain("'n8n_observed', 'salesforce_confirmed'");
     expect(codeOnly).toContain("'running', 'completed', 'failed', 'incomplete'");
     expect(codeOnly).toContain('identity_conflict');
+  });
+
+  it('accepts truthful lead and mql baseline shapes and rejects malformed ones', () => {
+    // The shape constraint, evaluated the way Postgres would.
+    const accepts = (kind: string, from: string | null) =>
+      (kind === 'baseline' && from === null) || (kind !== 'baseline' && from !== null);
+    // to_state permits both funnel states, so a null -> mql baseline is a
+    // legal row: "first observed as MQL".
+    expect(codeOnly).toMatch(/to_state TEXT NOT NULL CHECK \(to_state IN \('lead', 'mql'\)\)/);
+    expect(accepts('baseline', null)).toBe(true); // null -> lead AND null -> mql
+    expect(accepts('transition', 'lead')).toBe(true);
+    expect(accepts('return', 'mql')).toBe(true);
+    expect(accepts('requalification', 'lead')).toBe(true);
+    // Malformed: a baseline that claims an origin, or a change that lacks one.
+    expect(accepts('baseline', 'lead')).toBe(false);
+    expect(accepts('transition', null)).toBe(false);
+    expect(accepts('return', null)).toBe(false);
+    expect(accepts('requalification', null)).toBe(false);
+    // The documented meaning of a NULL origin is recorded in the migration.
+    expect(MIGRATION).toContain('first observed as MQL');
   });
 
   it('permits a watermark only on a completed run', () => {

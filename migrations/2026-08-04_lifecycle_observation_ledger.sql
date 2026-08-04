@@ -218,8 +218,12 @@ CREATE TABLE IF NOT EXISTS sf_lifecycle_events (
   person_id UUID NOT NULL
     REFERENCES sf_lifecycle_persons(id) ON DELETE RESTRICT,
 
-  -- NULL from_state means a baseline (the first observation), not a
-  -- transition. The Bite 4A calculator owns every non-baseline event.
+  -- NULL from_state means a baseline: the state the person was FIRST
+  -- OBSERVED in, not movement into it. A (NULL -> 'mql') baseline means
+  -- "first observed as MQL", NOT "observed moving from Lead to MQL":
+  -- whatever happened before the baseline is unknown and stays unknown.
+  -- Only a later observed change is a transition, return, or
+  -- requalification, and the Bite 4A calculator owns all of those.
   from_state TEXT CHECK (from_state IN ('lead', 'mql')),
   to_state TEXT NOT NULL CHECK (to_state IN ('lead', 'mql')),
   event_kind TEXT NOT NULL
