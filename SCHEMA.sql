@@ -1297,9 +1297,9 @@ GRANT EXECUTE ON FUNCTION public.sf_apply_opportunity_ingestion(JSONB, JSONB, JS
 -- =============================================================
 -- Bite 4G2A: Salesforce lifecycle observation ledger
 -- (docs/lead-lifecycle-observation-ledger.md). Added by
--- migrations/2026-08-04_lifecycle_observation_ledger.sql, which is PENDING
--- and NOT YET APPLIED to production: this block documents the intended
--- fresh-database shape.
+-- migrations/2026-08-04_lifecycle_observation_ledger.sql.
+-- STATUS: Applied manually to production on 2026-08-04. Created structure
+-- only; no lifecycle data was imported.
 --
 -- Seven tables recording lifecycle OBSERVATIONS going forward, because
 -- Bite 4G1 proved the org holds zero lifecycle field history and
