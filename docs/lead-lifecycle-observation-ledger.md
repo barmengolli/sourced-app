@@ -2,8 +2,11 @@
 
 Storage and calculation contract for future Salesforce lifecycle
 synchronization. **Nothing in this bite ingests, activates, schedules, or
-writes anything**: the migration is PENDING and unapplied, the planner is
-pure, and no n8n workflow exists.
+writes anything**: the planner is pure and no n8n workflow exists.
+
+STATUS: the migration was applied manually to production on 2026-08-04.
+It created structure only and no lifecycle data was imported, so the
+seven tables it added remain empty.
 
 ## Why an observation ledger exists at all
 

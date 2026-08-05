@@ -694,6 +694,33 @@ describe('PENDING migration safety (static SQL)', () => {
     expect(section).not.toContain('NOT YET APPLIED');
   });
 
+  it('records the same applied status in the contract document', () => {
+    // PR #63 aligned the README row, the migration header, the SCHEMA
+    // comment, and these tests, but not this document, which was outside
+    // its scope. Its opening claim that the migration was "PENDING and
+    // unapplied" survived as the last stale 4G2A status statement.
+    //
+    // Scoped to the STATUS paragraph alone: the body of this document
+    // legitimately discusses pending work and unapplied future bites, so
+    // asserting over the whole file would fail on unrelated wording.
+    const doc = readFileSync(
+      resolve(process.cwd(), 'docs/lead-lifecycle-observation-ledger.md'),
+      'utf8',
+    );
+    const start = doc.indexOf('STATUS: the migration was applied');
+    expect(start).toBeGreaterThan(-1);
+    // The status paragraph ends at the first heading that follows it.
+    const end = doc.indexOf('\n#', start);
+    expect(end).toBeGreaterThan(start);
+    const section = doc.slice(start, end);
+
+    expect(section).toContain('applied manually to production on 2026-08-04');
+    expect(section).toContain('structure only');
+    expect(section).toContain('no lifecycle data was imported');
+    expect(section).not.toContain('PENDING');
+    expect(section).not.toContain('unapplied');
+  });
+
   it('states its true applied status and is forward-only', () => {
     // Applied manually to production on 2026-08-04. The file must state the
     // real status and must not carry the obsolete pending note, which would
