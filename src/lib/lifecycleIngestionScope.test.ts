@@ -724,10 +724,13 @@ describe('corrected dry-run workflow', () => {
     // DEFECT 3: each collector must read the CURRENT loop item. It now
     // does so by EXPLICIT run index rather than the implicit latest-run
     // default, which is what let the package see 1 of 16 Contact batches.
+    // Branch index matters as much as run index: output 0 is Done and
+    // output 1 is Loop, so the batch item lives on output 1. Reading
+    // output 0 mid-iteration is the live "0 item(s)" defect.
     expect(js('Collect: Lead batch'))
-      .toContain("const reqItems = $('Loop: Lead batches').all(0, runIndex);");
+      .toContain("const reqItems = $('Loop: Lead batches').all(LOOP_OUTPUT, runIndex);");
     expect(js('Collect: Contact batch'))
-      .toContain("const reqItems = $('Loop: Contact batches').all(0, runIndex);");
+      .toContain("const reqItems = $('Loop: Contact batches').all(LOOP_OUTPUT, runIndex);");
     for (const c of ['Collect: Lead batch', 'Collect: Contact batch']) {
       expect(js(c), c).toContain('req.batch_index');
       expect(js(c), c).toContain('(req.ids || []).length');
@@ -1203,39 +1206,134 @@ describe('package node run-index aggregation (behavioral)', () => {
     expect(() => runPackage({ leadRuns })).toThrow(/Lead run 0/);
   });
 
-  it.each(['Collect: Lead batch', 'Collect: Contact batch'])(
-    '%s EXECUTES against a stubbed run and cross-checks position', (nodeName) => {
-    const collectCode = String((wf.nodes.find(
-      (n) => String(n.name) === nodeName)!
-      .parameters as Record<string, unknown>).jsCode);
+  // The earlier version of this test named the branch parameter `_b` and
+  // IGNORED it, returning the same data for output 0 and output 1. That
+  // stub could not tell Done from Loop, so it certified the wrong-branch
+  // code as correct and the defect reached production. The stub below
+  // models the real two-output graph.
+  interface LoopStubOpts {
+    loopBatchIndex: number;
+    loopItems?: number;
+    runIndex: number;
+    // What the DONE branch yields mid-iteration: nothing, as in n8n.
+    doneBranchItems?: Array<{ json: Record<string, unknown> }>;
+  }
 
-    const makeStub = (loopBatchIndex: number, loopItems = 1) => (name: string) => ({
-      all: (_b?: number, runIndex?: number) => {
+  function execCollector(nodeName: string, o: LoopStubOpts, transform?: (c: string) => string) {
+    const raw = String((wf.nodes.find((n) => String(n.name) === nodeName)!
+      .parameters as Record<string, unknown>).jsCode);
+    const collectCode = transform ? transform(raw) : raw;
+    const $ = (name: string) => ({
+      all: (branchIndex?: number, runIndex?: number) => {
         expect(runIndex, `${name} was read without a run index`).toBeDefined();
         if (name.startsWith('Query:')) return [{ json: { Id: 'SYNTHCONT00001A' } }];
         if (name.startsWith('Loop:')) {
-          return Array.from({ length: loopItems }, () =>
-            ({ json: { batch_index: loopBatchIndex, ids: ['SYNTHCONT00001A'] } }));
+          expect(branchIndex, `${name} was read without a branch index`).toBeDefined();
+          // OUTPUT 0 = Done. During a loop iteration it has emitted
+          // NOTHING. Reading it is the live defect.
+          if (branchIndex === 0) return o.doneBranchItems ?? [];
+          // OUTPUT 1 = Loop. Carries this iteration's batch item.
+          if (branchIndex === 1) {
+            return Array.from({ length: o.loopItems ?? 1 }, () =>
+              ({ json: { batch_index: o.loopBatchIndex, ids: ['SYNTHCONT00001A'] } }));
+          }
+          throw new Error(`unexpected branch ${branchIndex} on ${name}`);
         }
         throw new Error(`unexpected all() on ${name}`);
       },
     });
-    const exec = (runIndex: number, loopBatchIndex: number, loopItems = 1) => {
-      const fn = new Function('$', '$runIndex', collectCode) as (
-        d: ReturnType<typeof makeStub>, r: number) => Array<{ json: Record<string, unknown> }>;
-      return fn(makeStub(loopBatchIndex, loopItems), runIndex)[0].json;
-    };
+    const fn = new Function('$', '$runIndex', collectCode) as (
+      d: typeof $, r: number) => Array<{ json: Record<string, unknown> }>;
+    return fn($, o.runIndex)[0].json;
+  }
 
-    // Happy path: run 7 collecting batch 7.
-    const ok = exec(7, 7);
-    expect(ok.batch_index).toBe(7);
-    expect(ok.run_index).toBe(7);
-
-    // The collector must NOT accept a loop item from a different batch.
-    expect(() => exec(7, 3)).toThrow(/loop and the collector disagree about position/);
-    // Nor a run producing more than one loop item.
-    expect(() => exec(7, 7, 2)).toThrow(/expected exactly 1/);
+  it.each(['Collect: Lead batch', 'Collect: Contact batch'])(
+    '%s reads the LOOP output and collects its own batch', (nodeName) => {
+    const out = execCollector(nodeName, { runIndex: 0, loopBatchIndex: 0 });
+    expect(out.batch_index).toBe(0);
+    expect(out.run_index).toBe(0);
+    // A later iteration works the same way.
+    const later = execCollector(nodeName, { runIndex: 7, loopBatchIndex: 7 });
+    expect(later.batch_index).toBe(7);
+    expect(later.run_index).toBe(7);
   });
+
+  it.each(['Collect: Lead batch', 'Collect: Contact batch'])(
+    '%s reproduces the live failure when reading the DONE output', (nodeName) => {
+    // Uses the SHARED stub deliberately. An inline stub here could
+    // model branches loosely and hide exactly the defect this test
+    // exists to catch, which is how the original bug survived review.
+    expect(() => execCollector(
+      nodeName,
+      { runIndex: 0, loopBatchIndex: 0 },
+      (c) => c.replace('const LOOP_OUTPUT = 1;', 'const LOOP_OUTPUT = 0;'),
+    )).toThrow(/loop run 0 produced 0 item\(s\); expected exactly 1/);
+  });
+
+  it.each(['Collect: Lead batch', 'Collect: Contact batch'])(
+    '%s fails closed on missing, multiple, or mismatched loop items', (nodeName) => {
+    // Zero items on the loop branch.
+    expect(() => execCollector(nodeName, { runIndex: 0, loopBatchIndex: 0, loopItems: 0 }))
+      .toThrow(/produced 0 item\(s\); expected exactly 1/);
+    // More than one item: the run-to-batch mapping would be ambiguous.
+    expect(() => execCollector(nodeName, { runIndex: 0, loopBatchIndex: 0, loopItems: 2 }))
+      .toThrow(/produced 2 item\(s\); expected exactly 1/);
+    // The loop and the collector disagree about position.
+    expect(() => execCollector(nodeName, { runIndex: 7, loopBatchIndex: 3 }))
+      .toThrow(/loop and the collector disagree about position/);
+  });
+
+  it('the stub itself distinguishes the Done and Loop branches', () => {
+    // Self-check. The previous stub named the branch parameter `_b` and
+    // ignored it, returning identical data for outputs 0 and 1, so it
+    // certified wrong-branch code as correct. If this ever holds again,
+    // every branch test above becomes meaningless.
+    const captured: Array<number | undefined> = [];
+    const collectCode = String((wf.nodes.find(
+      (n) => String(n.name) === 'Collect: Lead batch')!
+      .parameters as Record<string, unknown>).jsCode);
+    const $ = (name: string) => ({
+      all: (branchIndex?: number, runIndex?: number) => {
+        if (name.startsWith('Loop:')) captured.push(branchIndex);
+        void runIndex;
+        if (name.startsWith('Query:')) return [{ json: { Id: 'X' } }];
+        return branchIndex === 0 ? [] : [{ json: { batch_index: 0, ids: ['X'] } }];
+      },
+    });
+    const fn = new Function('$', '$runIndex', collectCode) as (d: typeof $, r: number) => unknown;
+    fn($, 0);
+    // The collector asked for the LOOP branch, not Done.
+    expect(captured).toContain(1);
+    expect(captured).not.toContain(0);
+  });
+
+  it('STATIC GRAPH: each collector uses the branch that feeds its Build SOQL', () => {
+    // Derived from the real connections, never hardcoded. If the graph is
+    // ever rewired, this assertion follows it.
+    const conns = (JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+      connections: Record<string, { main: Array<Array<{ node: string }>> }>;
+    }).connections;
+
+    for (const [loop, collector, builder] of [
+      ['Loop: Lead batches', 'Collect: Lead batch', 'Build SOQL: Lead batch'],
+      ['Loop: Contact batches', 'Collect: Contact batch', 'Build SOQL: Contact batch'],
+    ]) {
+      const branches = conns[loop].main;
+      const loopBranch = branches.findIndex((b) => b.some((c) => c.node === builder));
+      expect(loopBranch, `${loop} does not feed ${builder}`).toBeGreaterThan(-1);
+
+      const code = String((wf.nodes.find((n) => String(n.name) === collector)!
+        .parameters as Record<string, unknown>).jsCode);
+      const declared = /const LOOP_OUTPUT = (\d+);/.exec(code);
+      expect(declared, `${collector} declares no LOOP_OUTPUT`).not.toBeNull();
+      // The branch the collector reads MUST be the branch that feeds its
+      // Build SOQL node.
+      expect(Number(declared![1]), `${collector} reads the wrong loop output`)
+        .toBe(loopBranch);
+      expect(code).toContain(`.all(LOOP_OUTPUT, runIndex)`);
+    }
+  });
+
 
   it('collectors read their own run index and cross-check position', () => {
     const collectCode = (name: string) =>

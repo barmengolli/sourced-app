@@ -465,6 +465,54 @@ rather than relying on a bare `.first()`, and fails if the loop item it
 receives carries a `batch_index` that disagrees with its execution
 position.
 
+## Second live dry run: the loop-output defect
+
+With run-index aggregation fixed, the next production run failed earlier,
+at Lead collection:
+
+```
+COLLECT FAILED: loop run 0 produced 0 item(s); expected exactly 1.
+```
+
+**Salesforce did not return zero Leads, and the Lead population was not
+empty.** The anchors node passed with the same approved population (3,146
+anchors; 131 unique Lead ids in 1 batch, 3,061 unique Contact ids in 16
+batches).
+
+`Split In Batches` has **two** outputs: index **0 is Done**, index **1 is
+Loop**. The graph proves it, since `Build SOQL` is fed by output 1. Both
+collectors were reading:
+
+```js
+$('Loop: Lead batches').all(0, runIndex)   // branch 0 = Done
+```
+
+During a loop iteration the Done branch has emitted nothing, so run 0
+returned zero items and the collector correctly refused. Run index was
+right; **branch index was wrong**.
+
+### Why the earlier tests missed it
+
+The behavioral stub named its branch parameter `_b` and **ignored it**,
+returning the same data for output 0 and output 1. It could not tell Done
+from Loop, so it certified wrong-branch code as correct.
+
+The stub now models the real two-output graph: output 0 returns nothing
+mid-iteration, output 1 returns the batch item. A **self-check** test
+asserts the stub itself still distinguishes the two, because a stub that
+stops discriminating makes every branch test meaningless. The
+wrong-branch test uses that shared stub rather than an inline one, so it
+cannot be hidden by a loose local mock.
+
+A **static graph-to-code assertion** now derives the answer from the
+workflow itself: it finds which loop output feeds each `Build SOQL` node
+and requires the matching collector's `LOOP_OUTPUT` to equal that index.
+Nothing is hardcoded, so a rewire moves the assertion with it.
+
+The package node is unchanged and still correct: each Collect node has
+one normal output, so reading Collect branch 0 by explicit run index
+remains right.
+
 ## Files to delete when finished
 
 - `~/Downloads/4g2b2a-private-pairs.csv`
@@ -619,7 +667,7 @@ A convenience copy lives outside the repository at
     },
     {
       "parameters": {
-        "jsCode": "// Collects ONE batch result, for THIS loop iteration.\n//\n// RUN-INDEX SEMANTICS. In n8n, $(node).all() and $(node).first() without\n// a runIndex return the node's MOST RECENT run. Relying on that implicit\n// default is exactly what made the packaging node see 1 of 16 Contact\n// batches, so this node reads its own run index explicitly and\n// cross-checks that it is collecting the batch the loop is emitting.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst runIndex = $runIndex;               // 0-based index of THIS execution\nconst rows = realRows($('Query: Lead batch').all(0, runIndex));\nconst reqItems = $('Loop: Lead batches').all(0, runIndex);\nif (reqItems.length !== 1) {\n  throw new Error('COLLECT FAILED: loop run ' + runIndex + ' produced '\n    + reqItems.length + ' item(s); expected exactly 1.');\n}\nconst req = reqItems[0].json;\nif (!Number.isInteger(req.batch_index)) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' has a non-integer batch_index.');\n}\nif (req.batch_index !== runIndex) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' carries batch_index '\n    + req.batch_index + '. The loop and the collector disagree about position.');\n}\n\nconst seen = new Set();\nlet duplicates = 0;\nfor (const r of rows) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  if (seen.has(id)) duplicates += 1; else seen.add(id);\n}\nif (duplicates > 0) {\n  throw new Error('EXTRACTION FAILED: Salesforce returned ' + duplicates\n    + ' duplicate lead record(s) for one Id IN batch.');\n}\nreturn [{ json: {\n  object: 'lead',\n  batch_index: req.batch_index,\n  run_index: runIndex,\n  requested: (req.ids || []).length,\n  returned: seen.size,\n  rows: rows\n} }];"
+        "jsCode": "// Collects ONE batch result, for THIS loop iteration.\n//\n// RUN-INDEX SEMANTICS. In n8n, $(node).all() and $(node).first() without\n// a runIndex return the node's MOST RECENT run. Relying on that implicit\n// default is exactly what made the packaging node see 1 of 16 Contact\n// batches, so this node reads its own run index explicitly and\n// cross-checks that it is collecting the batch the loop is emitting.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst runIndex = $runIndex;               // 0-based index of THIS execution\n\n// BRANCH INDEX MATTERS AS MUCH AS RUN INDEX.\n// SplitInBatches has TWO outputs: index 0 is DONE, index 1 is LOOP.\n// \"Build SOQL\" is fed by output 1, so the batch item for THIS iteration\n// lives on output 1. Reading output 0 mid-iteration returns nothing,\n// because Done has not emitted yet: that is exactly what produced\n// \"COLLECT FAILED: loop run 0 produced 0 item(s)\".\nconst LOOP_OUTPUT = 1;                    // 0 = Done, 1 = Loop\nconst rows = realRows($('Query: Lead batch').all(0, runIndex));\nconst reqItems = $('Loop: Lead batches').all(LOOP_OUTPUT, runIndex);\nif (reqItems.length !== 1) {\n  throw new Error('COLLECT FAILED: loop run ' + runIndex + ' produced '\n    + reqItems.length + ' item(s); expected exactly 1.');\n}\nconst req = reqItems[0].json;\nif (!Number.isInteger(req.batch_index)) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' has a non-integer batch_index.');\n}\nif (req.batch_index !== runIndex) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' carries batch_index '\n    + req.batch_index + '. The loop and the collector disagree about position.');\n}\n\nconst seen = new Set();\nlet duplicates = 0;\nfor (const r of rows) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  if (seen.has(id)) duplicates += 1; else seen.add(id);\n}\nif (duplicates > 0) {\n  throw new Error('EXTRACTION FAILED: Salesforce returned ' + duplicates\n    + ' duplicate lead record(s) for one Id IN batch.');\n}\nreturn [{ json: {\n  object: 'lead',\n  batch_index: req.batch_index,\n  run_index: runIndex,\n  requested: (req.ids || []).length,\n  returned: seen.size,\n  rows: rows\n} }];"
       },
       "id": "n-collect-lead-batch",
       "name": "Collect: Lead batch",
@@ -694,7 +742,7 @@ A convenience copy lives outside the repository at
     },
     {
       "parameters": {
-        "jsCode": "// Collects ONE batch result, for THIS loop iteration.\n//\n// RUN-INDEX SEMANTICS. In n8n, $(node).all() and $(node).first() without\n// a runIndex return the node's MOST RECENT run. Relying on that implicit\n// default is exactly what made the packaging node see 1 of 16 Contact\n// batches, so this node reads its own run index explicitly and\n// cross-checks that it is collecting the batch the loop is emitting.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst runIndex = $runIndex;               // 0-based index of THIS execution\nconst rows = realRows($('Query: Contact batch').all(0, runIndex));\nconst reqItems = $('Loop: Contact batches').all(0, runIndex);\nif (reqItems.length !== 1) {\n  throw new Error('COLLECT FAILED: loop run ' + runIndex + ' produced '\n    + reqItems.length + ' item(s); expected exactly 1.');\n}\nconst req = reqItems[0].json;\nif (!Number.isInteger(req.batch_index)) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' has a non-integer batch_index.');\n}\nif (req.batch_index !== runIndex) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' carries batch_index '\n    + req.batch_index + '. The loop and the collector disagree about position.');\n}\n\nconst seen = new Set();\nlet duplicates = 0;\nfor (const r of rows) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  if (seen.has(id)) duplicates += 1; else seen.add(id);\n}\nif (duplicates > 0) {\n  throw new Error('EXTRACTION FAILED: Salesforce returned ' + duplicates\n    + ' duplicate contact record(s) for one Id IN batch.');\n}\nreturn [{ json: {\n  object: 'contact',\n  batch_index: req.batch_index,\n  run_index: runIndex,\n  requested: (req.ids || []).length,\n  returned: seen.size,\n  rows: rows\n} }];"
+        "jsCode": "// Collects ONE batch result, for THIS loop iteration.\n//\n// RUN-INDEX SEMANTICS. In n8n, $(node).all() and $(node).first() without\n// a runIndex return the node's MOST RECENT run. Relying on that implicit\n// default is exactly what made the packaging node see 1 of 16 Contact\n// batches, so this node reads its own run index explicitly and\n// cross-checks that it is collecting the batch the loop is emitting.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst runIndex = $runIndex;               // 0-based index of THIS execution\n\n// BRANCH INDEX MATTERS AS MUCH AS RUN INDEX.\n// SplitInBatches has TWO outputs: index 0 is DONE, index 1 is LOOP.\n// \"Build SOQL\" is fed by output 1, so the batch item for THIS iteration\n// lives on output 1. Reading output 0 mid-iteration returns nothing,\n// because Done has not emitted yet: that is exactly what produced\n// \"COLLECT FAILED: loop run 0 produced 0 item(s)\".\nconst LOOP_OUTPUT = 1;                    // 0 = Done, 1 = Loop\nconst rows = realRows($('Query: Contact batch').all(0, runIndex));\nconst reqItems = $('Loop: Contact batches').all(LOOP_OUTPUT, runIndex);\nif (reqItems.length !== 1) {\n  throw new Error('COLLECT FAILED: loop run ' + runIndex + ' produced '\n    + reqItems.length + ' item(s); expected exactly 1.');\n}\nconst req = reqItems[0].json;\nif (!Number.isInteger(req.batch_index)) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' has a non-integer batch_index.');\n}\nif (req.batch_index !== runIndex) {\n  throw new Error('COLLECT FAILED: run ' + runIndex + ' carries batch_index '\n    + req.batch_index + '. The loop and the collector disagree about position.');\n}\n\nconst seen = new Set();\nlet duplicates = 0;\nfor (const r of rows) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  if (seen.has(id)) duplicates += 1; else seen.add(id);\n}\nif (duplicates > 0) {\n  throw new Error('EXTRACTION FAILED: Salesforce returned ' + duplicates\n    + ' duplicate contact record(s) for one Id IN batch.');\n}\nreturn [{ json: {\n  object: 'contact',\n  batch_index: req.batch_index,\n  run_index: runIndex,\n  requested: (req.ids || []).length,\n  returned: seen.size,\n  rows: rows\n} }];"
       },
       "id": "n-collect-contact-batch",
       "name": "Collect: Contact batch",
