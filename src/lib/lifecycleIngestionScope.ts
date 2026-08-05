@@ -278,6 +278,15 @@ export const CONFIRMED_LIFECYCLE_FIELD = 'Hubspot_lead_lifecycle__c';
 // thing.
 export const UNRESOLVED_FIELD_PLACEHOLDER = 'UNRESOLVED';
 
+// Confirmed present as Date on BOTH Lead and Contact by the production
+// FieldDefinition check. They are SUPPORTING EVIDENCE ONLY: they cannot
+// create an event, change a baseline destination, replace
+// SystemModstamp, or invent a historical transition. Contradictory dates
+// are diagnostic evidence, never a correction.
+export const CONFIRMED_BECAME_LEAD_DATE_FIELD = 'Became_a_Lead_Date__c';
+export const CONFIRMED_BECAME_MQL_DATE_FIELD =
+  'Became_a_Marketing_Qualified_Lead_Date__c';
+
 export interface ExtractionField {
   apiName: string;
   purpose: string;
@@ -292,8 +301,8 @@ export const LEAD_EXTRACTION_FIELDS: readonly ExtractionField[] = [
   { apiName: 'LastModifiedDate', purpose: 'secondary change evidence', required: false, confirmed: true },
   { apiName: 'IsConverted', purpose: 'conversion state', required: true, confirmed: true },
   { apiName: 'ConvertedContactId', purpose: 'exact cross-object identity', required: true, confirmed: true },
-  { apiName: UNRESOLVED_FIELD_PLACEHOLDER, purpose: 'Became Lead date (supporting evidence)', required: false, confirmed: false },
-  { apiName: UNRESOLVED_FIELD_PLACEHOLDER, purpose: 'Became MQL date (supporting evidence)', required: false, confirmed: false },
+  { apiName: CONFIRMED_BECAME_LEAD_DATE_FIELD, purpose: 'Became Lead date (supporting evidence)', required: false, confirmed: true },
+  { apiName: CONFIRMED_BECAME_MQL_DATE_FIELD, purpose: 'Became MQL date (supporting evidence)', required: false, confirmed: true },
 ];
 
 export const CONTACT_EXTRACTION_FIELDS: readonly ExtractionField[] = [
@@ -301,8 +310,8 @@ export const CONTACT_EXTRACTION_FIELDS: readonly ExtractionField[] = [
   { apiName: CONFIRMED_LIFECYCLE_FIELD, purpose: 'lifecycle value', required: true, confirmed: true },
   { apiName: 'SystemModstamp', purpose: 'pagination key and staleness guard', required: true, confirmed: true },
   { apiName: 'LastModifiedDate', purpose: 'secondary change evidence', required: false, confirmed: true },
-  { apiName: UNRESOLVED_FIELD_PLACEHOLDER, purpose: 'Became Lead date (supporting evidence)', required: false, confirmed: false },
-  { apiName: UNRESOLVED_FIELD_PLACEHOLDER, purpose: 'Became MQL date (supporting evidence)', required: false, confirmed: false },
+  { apiName: CONFIRMED_BECAME_LEAD_DATE_FIELD, purpose: 'Became Lead date (supporting evidence)', required: false, confirmed: true },
+  { apiName: CONFIRMED_BECAME_MQL_DATE_FIELD, purpose: 'Became MQL date (supporting evidence)', required: false, confirmed: true },
 ];
 
 // Any REQUIRED field left unresolved blocks the run. Optional unresolved
@@ -317,6 +326,215 @@ export function unresolvedOptionalFields(
   fields: readonly ExtractionField[],
 ): ExtractionField[] {
   return fields.filter((f) => !f.required && (!f.confirmed || f.apiName === UNRESOLVED_FIELD_PLACEHOLDER));
+}
+
+// ---------------------------------------------------------------------------
+// Paired anchors and Id-batched extraction
+// ---------------------------------------------------------------------------
+
+// ONE Sourced person, carrying BOTH exact Salesforce ids together. The
+// pair relationship is the point: two unrelated id lists cannot express
+// that a Lead and a Contact are the same person, and so cannot enforce
+// Contact precedence or validate a conversion link.
+export interface IdentityAnchorPair {
+  sfdcLeadId: string | null;
+  sfdcContactId: string | null;
+}
+
+export type AnchorShape = 'lead_only' | 'contact_only' | 'dual' | 'invalid';
+
+export function classifyAnchor(a: IdentityAnchorPair): AnchorShape {
+  const lead = a.sfdcLeadId !== null && isWellFormedSalesforceId(a.sfdcLeadId);
+  const contact = a.sfdcContactId !== null && isWellFormedSalesforceId(a.sfdcContactId);
+  if (lead && contact) return 'dual';
+  if (lead) return 'lead_only';
+  if (contact) return 'contact_only';
+  return 'invalid';
+}
+
+export interface AnchorPlan {
+  anchorsReceived: number;
+  leadOnly: number;
+  contactOnly: number;
+  dual: number;
+  invalid: number;
+  // Deduplicated, validated ids to query, per source object.
+  uniqueLeadIds: string[];
+  uniqueContactIds: string[];
+}
+
+// Derives the exact query population from paired anchors. Ids are
+// deduplicated and validated; a malformed id NEVER reaches a SOQL
+// literal, which is what makes `Id IN (...)` construction safe.
+export function planAnchorExtraction(anchors: readonly IdentityAnchorPair[]): AnchorPlan {
+  const leadIds = new Set<string>();
+  const contactIds = new Set<string>();
+  let leadOnly = 0, contactOnly = 0, dual = 0, invalid = 0;
+
+  for (const a of anchors) {
+    switch (classifyAnchor(a)) {
+      case 'dual':
+        dual += 1;
+        leadIds.add(a.sfdcLeadId as string);
+        contactIds.add(a.sfdcContactId as string);
+        break;
+      case 'lead_only':
+        leadOnly += 1;
+        leadIds.add(a.sfdcLeadId as string);
+        break;
+      case 'contact_only':
+        contactOnly += 1;
+        contactIds.add(a.sfdcContactId as string);
+        break;
+      default:
+        invalid += 1;
+    }
+  }
+
+  return {
+    anchorsReceived: anchors.length,
+    leadOnly,
+    contactOnly,
+    dual,
+    invalid,
+    uniqueLeadIds: [...leadIds].sort(),
+    uniqueContactIds: [...contactIds].sort(),
+  };
+}
+
+// Salesforce `Id IN (...)` batches. Finite and bounded: with at most 200
+// ids per batch there is no cursor, no epoch scan, and no unbounded loop.
+export const ID_BATCH_SIZE = 200;
+
+export function batchIds(ids: readonly string[], size: number = ID_BATCH_SIZE): string[][] {
+  const batches: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) batches.push(ids.slice(i, i + size));
+  return batches;
+}
+
+// Builds a SOQL `Id IN ('a','b')` literal list. Every id is re-validated
+// here even though callers validate too: this is the last line before a
+// value becomes SQL text, so it refuses rather than trusting an earlier
+// check. A malformed id throws instead of being escaped or dropped.
+export function buildIdInLiteral(ids: readonly string[]): string {
+  for (const id of ids) {
+    if (!isWellFormedSalesforceId(id)) {
+      throw new Error('Refusing to build a SOQL literal from a malformed Salesforce id.');
+    }
+  }
+  return `Id IN (${ids.map((id) => `'${id}'`).join(',')})`;
+}
+
+// ---------------------------------------------------------------------------
+// Dual-identity resolution (Contact precedence)
+// ---------------------------------------------------------------------------
+
+export type DualResolution =
+  | { kind: 'use_contact'; contactId: string }
+  | { kind: 'use_lead'; leadId: string }
+  | { kind: 'review'; reason: DualReviewReason };
+
+export type DualReviewReason =
+  | 'lead_record_missing'
+  | 'contact_record_missing'
+  | 'conversion_link_mismatch'
+  | 'conversion_link_absent'
+  | 'no_valid_identity';
+
+export interface FetchedLead {
+  id: string;
+  convertedContactId: string | null;
+}
+
+// Resolves ONE anchor to the single record that is the lifecycle
+// authority for that person.
+//
+//   contact-only -> Contact.
+//   lead-only    -> Lead.
+//   dual         -> Contact IS the authority, but ONLY once the fetched
+//                   Lead's ConvertedContactId exactly matches the paired
+//                   Contact id. The Lead is then retained as conversion
+//                   evidence, not as a second person.
+//
+// A missing record or a mismatched link becomes a review issue and
+// changes nothing. Identity is never repaired automatically, and email
+// and fuzzy matching do not exist here.
+export function resolveDualIdentity(
+  anchor: IdentityAnchorPair,
+  fetchedLeads: ReadonlyMap<string, FetchedLead>,
+  fetchedContactIds: ReadonlySet<string>,
+): DualResolution {
+  const shape = classifyAnchor(anchor);
+
+  if (shape === 'invalid') return { kind: 'review', reason: 'no_valid_identity' };
+
+  if (shape === 'contact_only') {
+    const cid = anchor.sfdcContactId as string;
+    return fetchedContactIds.has(cid)
+      ? { kind: 'use_contact', contactId: cid }
+      : { kind: 'review', reason: 'contact_record_missing' };
+  }
+
+  if (shape === 'lead_only') {
+    const lid = anchor.sfdcLeadId as string;
+    return fetchedLeads.has(lid)
+      ? { kind: 'use_lead', leadId: lid }
+      : { kind: 'review', reason: 'lead_record_missing' };
+  }
+
+  // Dual identity.
+  const lid = anchor.sfdcLeadId as string;
+  const cid = anchor.sfdcContactId as string;
+  const lead = fetchedLeads.get(lid);
+  if (lead === undefined) return { kind: 'review', reason: 'lead_record_missing' };
+  if (!fetchedContactIds.has(cid)) return { kind: 'review', reason: 'contact_record_missing' };
+  if (lead.convertedContactId === null) {
+    return { kind: 'review', reason: 'conversion_link_absent' };
+  }
+  if (lead.convertedContactId !== cid) {
+    // Salesforce says this Lead converted to a DIFFERENT Contact than
+    // Sourced records. Never reconciled automatically.
+    return { kind: 'review', reason: 'conversion_link_mismatch' };
+  }
+  return { kind: 'use_contact', contactId: cid };
+}
+
+export interface DualIdentitySummary {
+  usedContact: number;
+  usedLead: number;
+  review: number;
+  reviewByReason: Record<DualReviewReason, number>;
+  // Exactly one observation per reconciled anchor: a dual-identity person
+  // is ONE person, never two.
+  observationsPlanned: number;
+}
+
+export function summarizeResolutions(
+  resolutions: readonly DualResolution[],
+): DualIdentitySummary {
+  const reviewByReason: Record<DualReviewReason, number> = {
+    lead_record_missing: 0,
+    contact_record_missing: 0,
+    conversion_link_mismatch: 0,
+    conversion_link_absent: 0,
+    no_valid_identity: 0,
+  };
+  let usedContact = 0, usedLead = 0, review = 0;
+  for (const r of resolutions) {
+    if (r.kind === 'use_contact') usedContact += 1;
+    else if (r.kind === 'use_lead') usedLead += 1;
+    else {
+      review += 1;
+      reviewByReason[r.reason] += 1;
+    }
+  }
+  return {
+    usedContact,
+    usedLead,
+    review,
+    reviewByReason,
+    observationsPlanned: usedContact + usedLead,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +623,25 @@ export function acceptPage(
     duplicateIds,
     outOfOrderRows,
   };
+}
+
+// Correct TUPLE pagination boundary. The naive form
+//   SystemModstamp > ts AND Id > id
+// is NOT tuple pagination: it silently drops every later-timestamp
+// record whose Id sorts below the previous page's Id. The correct
+// boundary is the disjunction below. Ids are validated before becoming
+// literals, and the timestamp is emitted as a SOQL datetime literal.
+export function tupleCursorPredicate(cursor: PageCursor | null): string {
+  if (cursor === null) return '';
+  if (!isWellFormedSalesforceId(cursor.lastId)) {
+    throw new Error('Refusing to build a cursor predicate from a malformed Salesforce id.');
+  }
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(cursor.lastSystemModstamp)) {
+    throw new Error('Refusing to build a cursor predicate from a malformed timestamp.');
+  }
+  const ts = cursor.lastSystemModstamp;
+  const id = cursor.lastId;
+  return `(SystemModstamp > ${ts} OR (SystemModstamp = ${ts} AND Id > '${id}'))`;
 }
 
 export function paginationComplete(state: PaginationState): boolean {
