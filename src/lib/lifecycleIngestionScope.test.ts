@@ -17,8 +17,14 @@ import {
   LEAD_EXTRACTION_FIELDS,
   CONTACT_EXTRACTION_FIELDS,
   CONFIRMED_LIFECYCLE_FIELD,
+  planAnchorExtraction,
+  batchIds,
+  buildIdInLiteral,
+  tupleCursorPredicate,
+  resolveDualIdentity,
+  summarizeResolutions,
 } from './lifecycleIngestionScope';
-import type { ScopeInput, SourcedIdentityAnchor } from './lifecycleIngestionScope';
+import type { ScopeInput, SourcedIdentityAnchor, FetchedLead } from './lifecycleIngestionScope';
 import { planLifecycleObservations } from './lifecycleObservationPlanner';
 import type { ExtractedLifecycleRow, PriorState } from './lifecycleObservationPlanner';
 
@@ -217,12 +223,21 @@ describe('extraction contract', () => {
     expect(unresolvedRequiredFields(CONTACT_EXTRACTION_FIELDS)).toEqual([]);
   });
 
-  it('reports the Became dates as unresolved OPTIONAL evidence', () => {
-    // 4G1 deliberately left these for human confirmation. Absence is
-    // reported, never guessed.
-    const lead = unresolvedOptionalFields(LEAD_EXTRACTION_FIELDS);
-    expect(lead).toHaveLength(2);
-    expect(lead.every((f) => /Became/.test(f.purpose))).toBe(true);
+  it('treats both Became dates as CONFIRMED supporting evidence', () => {
+    // Confirmed as Date on both objects by the production FieldDefinition
+    // check. Nothing is unresolved now.
+    expect(unresolvedOptionalFields(LEAD_EXTRACTION_FIELDS)).toEqual([]);
+    expect(unresolvedOptionalFields(CONTACT_EXTRACTION_FIELDS)).toEqual([]);
+    for (const fields of [LEAD_EXTRACTION_FIELDS, CONTACT_EXTRACTION_FIELDS]) {
+      expect(fields.some((f) => f.apiName === 'Became_a_Lead_Date__c' && f.confirmed)).toBe(true);
+      expect(fields.some(
+        (f) => f.apiName === 'Became_a_Marketing_Qualified_Lead_Date__c' && f.confirmed,
+      )).toBe(true);
+      // Supporting evidence: never required, so absence can never block.
+      for (const f of fields) {
+        if (/Became/.test(f.apiName)) expect(f.required).toBe(false);
+      }
+    }
   });
 
   it('requires the conversion link only on Lead', () => {
@@ -414,169 +429,9 @@ describe('production workflow safety', () => {
 
 // --- sanitized dry-run workflow safety -------------------------------------
 
-describe('dry-run workflow safety', () => {
-  const DOC = readFileSync(
-    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
-    'utf8',
-  );
-  const template = (() => {
-    const body = DOC.split('```json\n')[1]?.split('\n```')[0];
-    expect(body, 'workflow template missing from the documentation').toBeTruthy();
-    return JSON.parse(body!) as {
-      active: boolean;
-      nodes: Array<Record<string, unknown>>;
-      connections: Record<string, unknown>;
-      pinData?: unknown;
-    };
-  })();
-  const raw = JSON.stringify(template);
-  const nodeTypes = template.nodes.map((n) => String(n.type));
-
-  it('is disabled and manually triggered only', () => {
-    expect(template.active).toBe(false);
-    expect(nodeTypes.filter((t) => t.endsWith('.manualTrigger'))).toHaveLength(1);
-    expect(nodeTypes.some((t) => t.endsWith('.scheduleTrigger'))).toBe(false);
-    expect(nodeTypes.some((t) => t.endsWith('.webhook'))).toBe(false);
-  });
-
-  it('contains no write-capable node of any kind', () => {
-    for (const forbidden of [
-      'googleSheets', 'postgres', 'supabase', 'httpRequest',
-      'emailSend', 'executeCommand', 'ftp', 's3', 'webhook',
-    ]) {
-      expect(nodeTypes.some((t) => t.includes(forbidden)), forbidden).toBe(false);
-    }
-  });
-
-  it('uses only read-only Salesforce search operations', () => {
-    const sf = template.nodes.filter((n) => String(n.type).includes('salesforce'));
-    expect(sf.length).toBeGreaterThan(0);
-    for (const n of sf) {
-      const p = n.parameters as Record<string, unknown>;
-      expect(p.resource).toBe('search');
-    }
-    // Query amplification guard applies to SINGLE-SHOT nodes only. The
-    // paged query nodes must NOT be executeOnce, or the loop would be
-    // pinned to page 1. Covered precisely in the pagination suite.
-    const singleShot = sf.filter((n) => String(n.name).startsWith('Describe'));
-    for (const n of singleShot) expect(n.executeOnce, String(n.name)).toBe(true);
-    expect(raw).not.toMatch(/"operation"\s*:\s*"(create|update|upsert|delete)"/i);
-  });
-
-  it('carries no credentials, credential ids, or pinned data', () => {
-    expect(template.nodes.some((n) => 'credentials' in n)).toBe(false);
-    expect(template.pinData).toBeUndefined();
-    expect(raw).not.toMatch(/"credentials"/);
-    expect(raw).not.toMatch(/"pinData"/);
-  });
-
-  it('carries no real record ids, urls, or secrets', () => {
-    expect(raw).not.toMatch(/\b(001|003|00Q|005|006|00v|701)[A-Za-z0-9]{12}\b/);
-    expect(raw).not.toMatch(/https?:\/\//);
-    expect(raw).not.toMatch(/api[_-]?key|bearer |password|secret|service_role/i);
-    expect(raw).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
-  });
-
-  it('declares dry_run and zero writes, and creates no apply payload', () => {
-    expect(raw).toContain('dry_run');
-    expect(raw).toContain('writes_attempted');
-    expect(raw).toContain('apply_payload_created: false');
-  });
-
-  it('makes GUARD the only successful terminal', () => {
-    const guard = template.nodes.find((n) => String(n.name).startsWith('GUARD'));
-    expect(guard).toBeTruthy();
-    // GUARD has no outgoing connection: nothing succeeds after it.
-    expect(Object.keys(template.connections)).not.toContain(String(guard!.name));
-    // It fails loudly on each required condition. Duplicate-id and
-    // ordering failures are raised per axis in the Accumulate nodes, so
-    // a bad page throws before GUARD ever runs.
-    const js = String((guard!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('GUARD FAILED');
-    const accJs = template.nodes
-      .filter((n) => String(n.name).startsWith('Accumulate'))
-      .map((n) => String((n.parameters as Record<string, unknown>).jsCode));
-    expect(accJs.length).toBe(3);
-    for (const a of accJs) {
-      expect(a).toContain('PAGINATION FAILED');
-      expect(a).toContain('duplicate Salesforce Id');
-    }
-  });
-
-  it('fails loudly on placeholder configuration before querying', () => {
-    const pre = template.nodes.find((n) => String(n.name).startsWith('Preflight'));
-    expect(pre).toBeTruthy();
-    const js = String((pre!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('PREFLIGHT FAILED');
-    expect(js).toContain('Never guess a field name');
-  });
-
-  it('orders every extraction query by SystemModstamp then Id', () => {
-    // Paged EXTRACTION queries only. The FieldDefinition describe is
-    // metadata, has no SystemModstamp, and is not paginated.
-    const sf = template.nodes.filter(
-      (n) => String(n.type).includes('salesforce') && String(n.name).startsWith('Query:'),
-    );
-    expect(sf.length).toBe(3);
-    for (const n of sf) {
-      const q = String((n.parameters as Record<string, unknown>).query);
-      expect(q, String(n.name)).toContain('ORDER BY SystemModstamp ASC, Id ASC');
-    }
-  });
-
-  it('records the intended timezone without adding a schedule', () => {
-    expect(raw).toContain('America/Denver');
-    expect(nodeTypes.some((t) => t.endsWith('.scheduleTrigger'))).toBe(false);
-  });
-
-  it('keeps campaign names confined to the PRIVATE decision node', () => {
-    const priv = template.nodes.find((n) => String(n.name).startsWith('PRIVATE'));
-    expect(priv).toBeTruthy();
-    const js = String((priv!.parameters as Record<string, unknown>).jsCode);
-    // Currently empty: no campaign scope is approved.
-    expect(js).toContain('APPROVED_CAMPAIGN_SCOPE = []');
-    // It emits a COUNT, never the names.
-    expect(js).toContain('approved_campaign_scope_count');
-    // GUARD never reads campaign names.
-    const guard = template.nodes.find((n) => String(n.name).startsWith('GUARD'));
-    const gjs = String((guard!.parameters as Record<string, unknown>).jsCode);
-    expect(gjs).not.toMatch(/campaign_name|Campaign\.Name/i);
-  });
-
-  it('asserts zero transitions, returns, and requalifications', () => {
-    const guard = template.nodes.find((n) => String(n.name).startsWith('GUARD'));
-    const js = String((guard!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toMatch(/transitions\s*=\s*0/);
-    expect(js).toMatch(/returns\s*=\s*0/);
-    expect(js).toMatch(/requalifications\s*=\s*0/);
-  });
-
-  it('tracks lifecycle and identity truncation independently', () => {
-    const guard = template.nodes.find((n) => String(n.name).startsWith('GUARD'));
-    const js = String((guard!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('lifecycle_extraction_complete');
-    expect(js).toContain('identity_extraction_complete');
-    // An incomplete run proposes no watermark.
-    expect(js).toMatch(/proposed_watermark: complete && allRows\.length \?/);
-  });
-});
-
 // --- locked business rule: identity governs observation --------------------
 
 describe('locked rule: campaigns govern admission, identity governs observation', () => {
-  const DOC = readFileSync(
-    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
-    'utf8',
-  );
-  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
-    nodes: Array<Record<string, unknown>>;
-  };
-  const nodeJs = (prefix: string) => {
-    const n = template.nodes.find((x) => String(x.name).startsWith(prefix));
-    expect(n, `${prefix} node missing`).toBeTruthy();
-    return String((n!.parameters as Record<string, unknown>).jsCode ?? '');
-  };
-
   it('observes an anchored person regardless of campaign membership', () => {
     // The scope resolver takes NO campaign input at all, so campaign
     // membership cannot reduce the observable population by construction.
@@ -588,13 +443,12 @@ describe('locked rule: campaigns govern admission, identity governs observation'
     expect(r.proposedObservationTargets.Lead).toBe(1);
   });
 
-  it('states in the workflow that campaign scope is admission-only', () => {
-    const js = nodeJs('PRIVATE');
-    expect(js).toContain('campaign_scope_governs');
-    expect(js).toContain('admission_only');
-    expect(js).toContain('scope_basis');
-    // No campaign scope approved yet.
-    expect(js).toContain('APPROVED_CAMPAIGN_SCOPE = []');
+  it('keeps the scope resolver campaign-blind by construction', () => {
+    // The locked rule holds because the resolver cannot see campaigns,
+    // not because a comment says so.
+    const code = readFileSync(resolve(process.cwd(), 'src/lib/lifecycleIngestionScope.ts'), 'utf8')
+      .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(code.toLowerCase()).not.toContain('campaign');
   });
 
   it('routes conflicting identity evidence to review and changes nothing', () => {
@@ -664,208 +518,367 @@ describe('aggregate coverage SQL', () => {
 
 // --- real multi-page pagination in the workflow ----------------------------
 
-describe('workflow pagination is genuinely multi-page', () => {
-  const DOC = readFileSync(
-    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
-    'utf8',
-  );
-  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
-    nodes: Array<Record<string, unknown>>;
-    connections: Record<string, { main: Array<Array<{ node: string }>> }>;
-  };
-  const queryNodes = template.nodes.filter((n) => String(n.name).startsWith('Query:'));
-  const accNodes = template.nodes.filter((n) => String(n.name).startsWith('Accumulate:'));
-
-  it('loops each axis back to its own query node', () => {
-    expect(accNodes.length).toBe(3);
-    for (const acc of accNodes) {
-      const targets = template.connections[String(acc.name)].main[0].map((c) => c.node);
-      // Back to the query (another page) AND forward to GUARD (done).
-      expect(targets.some((t) => t.startsWith('Query:')), String(acc.name)).toBe(true);
-      expect(targets).toContain('GUARD: dry-run summary');
-    }
-  });
-
-  it('does NOT set executeOnce on paged queries', () => {
-    // executeOnce here would pin the loop to page 1 and silently
-    // truncate, which is the exact defect this rebuild removed.
-    expect(queryNodes.length).toBe(3);
-    for (const q of queryNodes) {
-      expect(q.executeOnce, String(q.name)).toBe(false);
-    }
-  });
-
-  it('keeps executeOnce on genuinely single-shot nodes', () => {
-    for (const name of ['Preflight', 'PRIVATE', 'Cursor init', 'Describe']) {
-      const n = template.nodes.filter((x) => String(x.name).startsWith(name));
-      expect(n.length, name).toBeGreaterThan(0);
-      for (const x of n) expect(x.executeOnce, String(x.name)).toBe(true);
-    }
-  });
-
-  it('bounds every page query by the composite cursor', () => {
-    for (const q of queryNodes) {
-      const sql = String((q.parameters as Record<string, unknown>).query);
-      expect(sql, String(q.name)).toContain('SystemModstamp > {{ $json.cursor_ts }}');
-      expect(sql).toContain('Id > {{ $json.cursor_id }}');
-      expect(sql).toContain('ORDER BY SystemModstamp ASC, Id ASC');
-      expect(sql).toMatch(/LIMIT 200/);
-    }
-  });
-
-  it('never attempts the epoch scan as one unbounded operation', () => {
-    const pre = template.nodes.find((n) => String(n.name).startsWith('Preflight'));
-    const js = String((pre!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('page_size: 200');
-    expect(js).toContain('NEVER as one unbounded');
-    // No query requests everything at once.
-    for (const q of queryNodes) {
-      const sql = String((q.parameters as Record<string, unknown>).query);
-      expect(sql).not.toMatch(/returnAll/i);
-    }
-  });
-
-  it('fails loudly on duplicate ids and broken ordering across pages', () => {
-    for (const acc of accNodes) {
-      const js = String((acc.parameters as Record<string, unknown>).jsCode);
-      expect(js, String(acc.name)).toContain('PAGINATION FAILED');
-      expect(js).toContain('duplicate Salesforce Id');
-      expect(js).toContain('out of (SystemModstamp, Id) order');
-      // Duplicates are never silently deduplicated.
-      expect(js).toContain('deduplicating would hide it');
-    }
-  });
-
-  it('continues paging until a short page proves exhaustion', () => {
-    for (const acc of accNodes) {
-      const js = String((acc.parameters as Record<string, unknown>).jsCode);
-      expect(js).toContain('page.length < state.page_size');
-      expect(js).toContain('has_more');
-    }
-  });
-});
-
 // --- hardened GUARD --------------------------------------------------------
-
-describe('GUARD fail-fast checks', () => {
-  const DOC = readFileSync(
-    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
-    'utf8',
-  );
-  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
-    nodes: Array<Record<string, unknown>>;
-  };
-  const guardJs = String(
-    (template.nodes.find((n) => String(n.name).startsWith('GUARD'))!.parameters as Record<string, unknown>).jsCode,
-  );
-  const preJs = String(
-    (template.nodes.find((n) => String(n.name).startsWith('Preflight'))!.parameters as Record<string, unknown>).jsCode,
-  );
-
-  it('fails when no identity population is supplied', () => {
-    expect(preJs).toContain('no identity population supplied');
-    expect(preJs).toContain('never falls back to an org-wide scan');
-  });
-
-  it('fails on an empty population or a malformed private input', () => {
-    expect(preJs).toContain('identity population is empty');
-    expect(preJs).toContain('malformed Salesforce id');
-    expect(preJs).toContain('No id is coerced into shape');
-  });
-
-  it('fails on zero matches when eligible identities were supplied', () => {
-    expect(guardJs).toContain('ZERO Salesforce records matched');
-  });
-
-  it('fails when the confirmed lifecycle field is absent from every row', () => {
-    expect(guardJs).toContain('lifecycle field is absent from every row');
-    expect(guardJs).toContain('default every person to Lead');
-  });
-
-  it('fails on any non-baseline event in a first run', () => {
-    expect(guardJs).toContain('a first run produced a non-baseline event');
-    expect(guardJs).toMatch(/transitions !== 0 \|\| returns !== 0 \|\| requalifications !== 0/);
-  });
-
-  it('reports lifecycle and identity completeness independently', () => {
-    expect(guardJs).toContain('lifecycle_extraction_complete');
-    expect(guardJs).toContain('identity_extraction_complete');
-    expect(guardJs).toMatch(/const complete = lifecycleComplete && identityComplete/);
-    // An incomplete run proposes no watermark.
-    expect(guardJs).toMatch(/proposed_watermark: complete && allRows\.length \?/);
-  });
-
-  it('emits the required aggregate fields and nothing identifying', () => {
-    for (const f of [
-      'dry_run', 'writes_attempted', 'apply_payload_created',
-      'baseline_observations_by_state', 'planned_observations', 'planned_events',
-      'planned_projections', 'planned_issues', 'transitions', 'returns',
-      'requalifications', 'salesforce_records_found', 'salesforce_records_not_found',
-      'exact_converted_identity_pairs', 'proposed_watermark',
-    ]) {
-      expect(guardJs, f).toContain(f);
-    }
-    // No identifier or campaign name ever reaches GUARD output.
-    expect(guardJs).not.toMatch(/\b(001|003|00Q|005|006)[A-Za-z0-9]{12}\b/);
-    expect(guardJs).not.toMatch(/campaign_name|Campaign\.Name/i);
-    expect(guardJs).not.toMatch(/\bemail\b/i);
-  });
-});
 
 // --- supporting date fields ------------------------------------------------
 
-describe('supporting date fields are candidates, never assumptions', () => {
+// --- paired anchors, batching, and safe literals ---------------------------
+
+describe('paired anchors drive a finite Id IN extraction', () => {
+  it('preserves the pair relationship and classifies each shape', () => {
+    const plan = planAnchorExtraction([
+      { sfdcLeadId: L1, sfdcContactId: null },
+      { sfdcLeadId: null, sfdcContactId: C1 },
+      { sfdcLeadId: L2, sfdcContactId: C2 },
+      { sfdcLeadId: null, sfdcContactId: null },
+    ]);
+    expect(plan.anchorsReceived).toBe(4);
+    expect(plan.leadOnly).toBe(1);
+    expect(plan.contactOnly).toBe(1);
+    expect(plan.dual).toBe(1);
+    expect(plan.invalid).toBe(1);
+    // A dual anchor contributes to BOTH id lists, keeping the person whole.
+    expect(plan.uniqueLeadIds).toEqual([L1, L2].sort());
+    expect(plan.uniqueContactIds).toEqual([C1, C2].sort());
+  });
+
+  it('deduplicates ids shared across anchors', () => {
+    const plan = planAnchorExtraction([
+      { sfdcLeadId: L1, sfdcContactId: null },
+      { sfdcLeadId: L1, sfdcContactId: null },
+    ]);
+    expect(plan.uniqueLeadIds).toEqual([L1]);
+  });
+
+  it('batches into finite groups of at most 200', () => {
+    const ids = Array.from({ length: 451 }, (_, i) =>
+      'SYNTHBULK' + String(i).padStart(6, '0'));
+    const batches = batchIds(ids);
+    expect(batches).toHaveLength(3);
+    expect(batches[0]).toHaveLength(200);
+    expect(batches[2]).toHaveLength(51);
+    expect(batches.flat()).toHaveLength(451);
+  });
+
+  it('matches the verified production shape (131 Lead / 3,061 Contact)', () => {
+    expect(batchIds(new Array(131).fill(L1).map((_, i) => 'SYNTHLEADX' + String(i).padStart(5, '0')))).toHaveLength(1);
+    expect(batchIds(new Array(3061).fill(C1).map((_, i) => 'SYNTHCONTX' + String(i).padStart(5, '0')))).toHaveLength(16);
+  });
+
+  it('builds a SOQL literal only from validated ids', () => {
+    expect(buildIdInLiteral([L1, L2])).toBe(`Id IN ('${L1}','${L2}')`);
+    // The last line of defence refuses rather than escaping or dropping.
+    expect(() => buildIdInLiteral(['bad'])).toThrow(/malformed Salesforce id/);
+    expect(() => buildIdInLiteral(["' OR 1=1 --"])).toThrow(/malformed Salesforce id/);
+  });
+
+  it('uses the TUPLE cursor predicate, never the naive AND form', () => {
+    const p = tupleCursorPredicate({ lastSystemModstamp: '2026-08-01T10:00:00Z', lastId: L1 });
+    expect(p).toContain('SystemModstamp > 2026-08-01T10:00:00Z OR');
+    expect(p).toContain(`SystemModstamp = 2026-08-01T10:00:00Z AND Id > '${L1}'`);
+    // The naive form drops later-timestamp records whose Id sorts lower.
+    expect(p).not.toMatch(/SystemModstamp > [^ ]+ AND Id >/);
+    expect(tupleCursorPredicate(null)).toBe('');
+    expect(() => tupleCursorPredicate({ lastSystemModstamp: 'x', lastId: L1 })).toThrow();
+    expect(() => tupleCursorPredicate({ lastSystemModstamp: '2026-08-01T10:00:00Z', lastId: 'bad' })).toThrow();
+  });
+});
+
+// --- dual identity: Contact precedence -------------------------------------
+
+describe('dual identity resolves to ONE person with Contact precedence', () => {
+  const leads = (over: Partial<FetchedLead> = {}) =>
+    new Map([[L1, { id: L1, convertedContactId: C1, ...over }]]);
+  const contacts = new Set([C1]);
+
+  it('uses Contact when the conversion link matches exactly', () => {
+    const r = resolveDualIdentity({ sfdcLeadId: L1, sfdcContactId: C1 }, leads(), contacts);
+    expect(r).toEqual({ kind: 'use_contact', contactId: C1 });
+  });
+
+  it('routes a conversion-link mismatch to review and changes nothing', () => {
+    const r = resolveDualIdentity(
+      { sfdcLeadId: L1, sfdcContactId: C1 },
+      new Map([[L1, { id: L1, convertedContactId: C2 }]]),
+      contacts,
+    );
+    expect(r).toEqual({ kind: 'review', reason: 'conversion_link_mismatch' });
+  });
+
+  it('routes an absent conversion link to review', () => {
+    const r = resolveDualIdentity(
+      { sfdcLeadId: L1, sfdcContactId: C1 },
+      new Map([[L1, { id: L1, convertedContactId: null }]]),
+      contacts,
+    );
+    expect(r).toEqual({ kind: 'review', reason: 'conversion_link_absent' });
+  });
+
+  it('routes a missing record to review', () => {
+    expect(resolveDualIdentity({ sfdcLeadId: L1, sfdcContactId: C1 }, new Map(), contacts))
+      .toEqual({ kind: 'review', reason: 'lead_record_missing' });
+    expect(resolveDualIdentity({ sfdcLeadId: L1, sfdcContactId: C1 }, leads(), new Set()))
+      .toEqual({ kind: 'review', reason: 'contact_record_missing' });
+  });
+
+  it('uses Contact for contact-only and Lead for lead-only anchors', () => {
+    expect(resolveDualIdentity({ sfdcLeadId: null, sfdcContactId: C1 }, new Map(), contacts))
+      .toEqual({ kind: 'use_contact', contactId: C1 });
+    expect(resolveDualIdentity({ sfdcLeadId: L1, sfdcContactId: null }, leads(), new Set()))
+      .toEqual({ kind: 'use_lead', leadId: L1 });
+  });
+
+  it('produces exactly ONE observation per dual person, never two', () => {
+    const resolutions = [
+      resolveDualIdentity({ sfdcLeadId: L1, sfdcContactId: C1 }, leads(), contacts),
+      resolveDualIdentity({ sfdcLeadId: null, sfdcContactId: C2 }, new Map(), new Set([C2])),
+    ];
+    const sum = summarizeResolutions(resolutions);
+    // Two anchors, two observations. The dual person is ONE person.
+    expect(sum.observationsPlanned).toBe(2);
+    expect(sum.usedContact).toBe(2);
+    expect(sum.usedLead).toBe(0);
+  });
+
+  it('summarizes review reasons without merging anything', () => {
+    const sum = summarizeResolutions([
+      resolveDualIdentity({ sfdcLeadId: L1, sfdcContactId: C1 },
+        new Map([[L1, { id: L1, convertedContactId: C2 }]]), contacts),
+    ]);
+    expect(sum.review).toBe(1);
+    expect(sum.reviewByReason.conversion_link_mismatch).toBe(1);
+    expect(sum.observationsPlanned).toBe(0);
+  });
+});
+
+// --- corrected workflow ----------------------------------------------------
+
+describe('corrected dry-run workflow', () => {
   const DOC = readFileSync(
-    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
-    'utf8',
-  );
-  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'), 'utf8');
+  const wf = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    active: boolean;
     nodes: Array<Record<string, unknown>>;
+    connections: Record<string, { main: Array<Array<{ node: string }>> }>;
+    pinData?: unknown;
   };
+  const raw = JSON.stringify(wf);
+  const byName = new Map(wf.nodes.map((n) => [String(n.name), n]));
+  const js = (name: string) =>
+    String((byName.get(name)!.parameters as Record<string, unknown>).jsCode ?? '');
 
-  it('checks both candidate names on BOTH objects, read-only', () => {
-    const describe_ = template.nodes.find((n) => String(n.name).startsWith('Describe'));
-    expect(describe_).toBeTruthy();
-    const p = describe_!.parameters as Record<string, unknown>;
-    expect(p.resource).toBe('search');
-    const q = String(p.query);
-    expect(q).toContain('FieldDefinition');
-    expect(q).toContain('Became_a_Lead_Date__c');
-    expect(q).toContain('Became_a_Marketing_Qualified_Lead_Date__c');
-    expect(q).toContain("IN ('Lead','Contact')");
+  it('is disabled, manual, read-only, credential-free, and unpinned', () => {
+    expect(wf.active).toBe(false);
+    const types = wf.nodes.map((n) => String(n.type));
+    expect(types.filter((t) => t.endsWith('.manualTrigger'))).toHaveLength(1);
+    for (const forbidden of ['scheduleTrigger', 'webhook', 'googleSheets', 'postgres',
+      'supabase', 'httpRequest', 'emailSend', 'executeCommand']) {
+      expect(types.some((t) => t.includes(forbidden)), forbidden).toBe(false);
+    }
+    for (const n of wf.nodes.filter((x) => String(x.type).includes('salesforce'))) {
+      expect((n.parameters as Record<string, unknown>).resource).toBe('search');
+    }
+    expect(wf.nodes.some((n) => 'credentials' in n)).toBe(false);
+    expect(wf.pinData).toBeUndefined();
+    expect(raw).not.toMatch(/"pinData"/);
   });
 
-  it('reports absence explicitly and continues', () => {
-    const cls = template.nodes.find((n) => String(n.name).startsWith('Classify'));
-    const js = String((cls!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('supporting_date_fields_absent');
-    expect(js).toContain('Never creates a transition and never blocks the run');
-    // No alternative name is guessed.
-    expect(js).toContain('CANDIDATES');
+  it('DEFECT 1: filters by Id IN and never scans the org from epoch', () => {
+    for (const n of wf.nodes.filter((x) => String(x.name).startsWith('Query:'))) {
+      expect(String((n.parameters as Record<string, unknown>).query)).toContain('$json.soql');
+    }
+    // The emitted SOQL must be a well-formed SELECT ... WHERE Id IN (...)
+    // built from the validated literal. Asserting only that the substring
+    // "Id IN (" appears somewhere would survive a broken SELECT.
+    for (const n of ['Build SOQL: Lead batch', 'Build SOQL: Contact batch']) {
+      const code = js(n);
+      expect(code, n).toMatch(/soql:\s*'SELECT [^']*FROM \w+ WHERE Id IN \(' \+ literal \+ '\)'/);
+      expect(code, n).toContain("ids.map((id) => \"'\" + id + \"'\").join(',')");
+    }
+    // No cursor and no epoch floor anywhere.
+    expect(raw).not.toContain('cursor_ts');
+    expect(raw).not.toContain('1970-01-01');
   });
 
-  it('cannot create a transition even when both dates are present', () => {
-    // Proven through the REAL planner, not by inspecting the workflow.
-    const RUN_AT = '2026-08-05T03:00:00.000Z';
-    const p = planLifecycleObservations({
-      rows: [{
-        sourceObject: 'Lead', sourceRecordId: L1, rawLifecycleValue: 'Lead',
-        sourceModifiedAt: 'T1', observedAt: RUN_AT,
-        becameLeadDate: '2026-01-05', becameMqlDate: '2026-03-01',
-      }],
-      identityPairs: [],
-      prior: { aliasToPerson: {}, persons: {} },
-      config: {
-        syncRunId: 'SYNTH-DATES', runStartedAt: RUN_AT,
-        lifecyclePages: { pagesExpected: 1, pagesCompleted: 1, failed: false },
-        identityPages: { pagesExpected: 1, pagesCompleted: 1, failed: false },
-        proposedWatermarkSystemModstamp: 'T1',
-      },
-    });
-    expect(p.diagnostics.leadToMql).toBe(0);
-    const events = p.operations.filter((o) => o.op === 'lifecycle_event');
-    expect(events).toHaveLength(1);
-    expect(events[0].op === 'lifecycle_event' && events[0].eventKind).toBe('baseline');
+  it('DEFECT 2: contains no naive AND cursor boundary', () => {
+    expect(raw).not.toMatch(/SystemModstamp > [^ ]*cursor_ts[^ ]* AND Id >/);
+    // The correct tuple form is documented where it would be needed.
+    expect(js('Build SOQL: Lead batch')).toContain('SystemModstamp = ts AND Id >');
+  });
+
+  it('DEFECTS 3+4: uses a finite loop with an explicit done output', () => {
+    const loops = wf.nodes.filter((n) => String(n.type).includes('splitInBatches'));
+    expect(loops).toHaveLength(2);
+    for (const l of loops) {
+      const outs = wf.connections[String(l.name)].main;
+      // Output 0 = done, output 1 = next batch. Two distinct branches.
+      expect(outs).toHaveLength(2);
+      expect(outs[0][0].node).not.toBe(outs[1][0].node);
+    }
+    // Collectors feed the loop back, not GUARD directly.
+    for (const c of ['Collect: Lead batch', 'Collect: Contact batch']) {
+      const t = wf.connections[c].main[0].map((x) => x.node);
+      expect(t.some((x) => x.startsWith('Loop:'))).toBe(true);
+      expect(t).not.toContain('GUARD: extraction summary');
+    }
+    // DEFECT 3: each collector must read the CURRENT loop item. A reset
+    // or hardcoded request object would silently report batch 0 forever
+    // and lose the per-batch requested counts.
+    expect(js('Collect: Lead batch'))
+      .toContain("const req = $('Loop: Lead batches').first().json;");
+    expect(js('Collect: Contact batch'))
+      .toContain("const req = $('Loop: Contact batches').first().json;");
+    for (const c of ['Collect: Lead batch', 'Collect: Contact batch']) {
+      expect(js(c), c).toContain('req.batch_index');
+      expect(js(c), c).toContain('(req.ids || []).length');
+    }
+  });
+
+  it('DEFECT 5: GUARD has exactly one predecessor and no race', () => {
+    const into = Object.entries(wf.connections)
+      .filter(([, v]) => v.main.some((m) => m.some((c) => c.node.startsWith('GUARD'))))
+      .map(([k]) => k);
+    expect(into).toEqual(['Loop: Contact batches']);
+    // Reached only via the Contact loop's DONE output.
+    expect(wf.connections['Loop: Contact batches'].main[0][0].node)
+      .toBe('GUARD: extraction summary');
+    // And the Lead loop's done output serializes into the Contact path.
+    expect(wf.connections['Loop: Lead batches'].main[0][0].node)
+      .toBe('Fan out: Contact batches');
+  });
+
+  it('DEFECT 5: static graph proof, GUARD deps are executed ancestors', () => {
+    const adj = new Map(Object.entries(wf.connections).map(
+      ([k, v]) => [k, v.main.flat().map((c) => c.node)]));
+    const seen = new Set<string>(['Manual Trigger (no schedule)']);
+    const q = ['Manual Trigger (no schedule)'];
+    while (q.length) {
+      for (const t of adj.get(q.shift()!) ?? []) {
+        if (!seen.has(t)) { seen.add(t); q.push(t); }
+      }
+    }
+    // Every node is reachable, GUARD included.
+    expect(seen.size).toBe(wf.nodes.length);
+    expect(seen.has('GUARD: extraction summary')).toBe(true);
+    // Every node GUARD reads from is an ancestor that must have run.
+    for (const dep of ['PRIVATE: exact Sourced identity anchors',
+      'Collect: Lead batch', 'Collect: Contact batch']) {
+      expect(js('GUARD: extraction summary'), dep).toContain(`$('${dep}')`);
+      expect(seen.has(dep), dep).toBe(true);
+    }
+    // The successful path terminates: GUARD has no outgoing edge.
+    expect(adj.get('GUARD: extraction summary')).toBeUndefined();
+  });
+
+  it('DEFECT 6: provides an editable private node that fails on placeholders', () => {
+    const node = byName.get('PRIVATE: exact Sourced identity anchors');
+    expect(node).toBeTruthy();
+    const code = js('PRIVATE: exact Sourced identity anchors');
+    expect(code).toContain('PASTE_ANCHORS_HERE');
+    expect(code).toContain('PRIVATE INPUT MISSING');
+    expect(code).toContain('never');
+    expect(code).toContain('organization-wide scan');
+  });
+
+  it('DEFECT 7: keeps the Lead/Contact pair together', () => {
+    const code = js('PRIVATE: exact Sourced identity anchors');
+    expect(code).toContain('a.lead');
+    expect(code).toContain('a.contact');
+    expect(code).toContain('anchors_dual_identity');
+    // A dual anchor MUST contribute to BOTH id lists. Dropping either
+    // side silently stops fetching half the pair, which is exactly how
+    // the conversion-link check would go unvalidated.
+    expect(code).toContain('if (lOk && cOk) { dual += 1; leadIds.add(l); contactIds.add(c); }');
+    // GUARD validates the link using the paired ids.
+    expect(js('GUARD: extraction summary')).toContain('lead.ConvertedContactId');
+    expect(js('GUARD: extraction summary')).toContain('dual_identity_links_conflicting');
+  });
+
+  it('DEFECT 8: selects both confirmed Became date fields on both objects', () => {
+    for (const n of ['Build SOQL: Lead batch', 'Build SOQL: Contact batch']) {
+      expect(js(n), n).toContain('Became_a_Lead_Date__c');
+      expect(js(n), n).toContain('Became_a_Marketing_Qualified_Lead_Date__c');
+    }
+    // Lead-only fields stay on Lead.
+    expect(js('Build SOQL: Lead batch')).toContain('ConvertedContactId');
+    expect(js('Build SOQL: Contact batch')).not.toContain('ConvertedContactId');
+  });
+
+  it('DEFECT 10: GUARD makes no planner claim', () => {
+    const code = js('GUARD: extraction summary')
+      .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    for (const banned of ['planned_events', 'planned_projections', 'planned_issues',
+      'planned_observations', 'transitions:', 'returns:', 'requalifications:']) {
+      expect(code, banned).not.toContain(banned);
+    }
+    expect(code).toContain('transport_and_completeness_only');
+    expect(code).toContain('authoritative_counts_source');
+  });
+
+  it('emits only transport aggregates, with no identifiers', () => {
+    const code = js('GUARD: extraction summary');
+    for (const f of ['anchors_supplied', 'lead_batches_expected', 'contact_batches_completed',
+      'lead_records_found', 'contact_records_missing', 'dual_identity_links_matched',
+      'extraction_complete', 'dry_run', 'writes_attempted', 'apply_payload_created']) {
+      expect(code, f).toContain(f);
+    }
+    expect(raw).not.toMatch(/\b(001|003|00Q|005|006)[A-Za-z0-9]{12}\b/);
+    expect(raw).not.toMatch(/https?:\/\//);
+    expect(code).not.toMatch(/campaign_name/i);
+  });
+
+  it('fails loudly on incomplete extraction and zero matches', () => {
+    const code = js('GUARD: extraction summary');
+    expect(code).toContain('GUARD FAILED: incomplete extraction');
+    expect(code).toContain('ids were requested but ZERO Salesforce');
+    expect(code).toContain('lifecycle field is absent from every row');
+  });
+});
+
+// --- DEFECT 9: the authoritative evaluator exists ---------------------------
+
+describe('authoritative evaluator', () => {
+  const PATH = '/Users/barmengolli/Downloads/4g2b2a-local-evaluator.mjs';
+  let src = '';
+  try { src = readFileSync(PATH, 'utf8'); } catch { /* reported below */ }
+
+  it('exists outside the repository', () => {
+    expect(src, 'the local evaluator was never generated').not.toBe('');
+  });
+
+  it('invokes the REAL planner and serializer, not a copy', () => {
+    expect(src).toContain('planLifecycleObservations');
+    expect(src).toContain('serializeLifecycleApply');
+    expect(src).toContain('src/lib/lifecycleObservationPlanner.ts');
+    expect(src).toContain('src/lib/lifecycleApplyPayload.ts');
+  });
+
+  it('applies Contact precedence with exact link validation', () => {
+    expect(src).toContain('ConvertedContactId');
+    expect(src).toContain('link !== contact');
+    expect(src).toContain('conversion_links_conflicting');
+  });
+
+  it('makes no network call, no write, and carries no credential', () => {
+    expect(src).not.toMatch(/fetch\(|axios|https?:\/\/|createClient/);
+    expect(src).not.toMatch(/writeFileSync|appendFileSync/);
+    expect(src).not.toMatch(/api[_-]?key|bearer|password|service_role/i);
+  });
+
+  it('emits aggregates only and refuses to print identifiers', () => {
+    expect(src).toContain('REFUSING to print');
+    expect(src).toMatch(/\\b\(001\|003\|00Q\|005\|006\)/);
+    for (const f of ['anchors_received', 'baselines_by_destination', 'observations_planned',
+      'events_planned', 'projections_planned', 'issues_planned', 'transitions',
+      'returns', 'requalifications', 'proposed_watermark', 'first_run_criteria_met']) {
+      expect(src, f).toContain(f);
+    }
+  });
+
+  it('checks the first-run success criteria', () => {
+    expect(src).toContain('transitions must be 0 on a first run');
+    expect(src).toContain('duplicate baselines');
+    expect(src).toContain('proposed watermark is null');
   });
 });
 

@@ -105,34 +105,92 @@ Contact**.
 | `LastModifiedDate` | ✅ | ✅ | Secondary change evidence | Confirmed |
 | `IsConverted` | ✅ | — | Conversion state | Confirmed |
 | `ConvertedContactId` | ✅ | — | Exact cross-object identity | Confirmed |
-| Became Lead date | ? | ? | Supporting evidence only | **UNRESOLVED** |
-| Became MQL date | ? | ? | Supporting evidence only | **UNRESOLVED** |
+| `Became_a_Lead_Date__c` | ✅ | ✅ | Supporting evidence only | **Confirmed (Date)** |
+| `Became_a_Marketing_Qualified_Lead_Date__c` | ✅ | ✅ | Supporting evidence only | **Confirmed (Date)** |
 
-The two Became date API names were deliberately left unresolved by 4G1
-pending human confirmation. They are **optional** supporting evidence, so
-their absence is reported rather than fatal, and the preflight node
-**fails loudly** on any unresolved *required* field. A guessed date field
-would silently corroborate the wrong thing.
+Both Became date fields are now **confirmed present as `Date` on both
+Lead and Contact** by the production FieldDefinition check, and both are
+selected in the Lead and Contact queries.
 
-## Pagination and completeness
+They remain **supporting evidence only**. They cannot create an event,
+change a baseline destination, replace `SystemModstamp`, or invent a
+historical transition. Contradictory dates are diagnostic evidence, never
+a correction.
 
-Ordering is `SystemModstamp ASC, Id ASC`. Ordering by timestamp alone is
-unsafe: records sharing one `SystemModstamp` straddle a page boundary and
-are silently skipped or repeated. The `Id` tie-break makes the ordering
-total.
+## Extraction: finite `Id IN` batches, not a scan
 
-- A **duplicate Id across pages is a hard failure**, never deduplicated:
-  it means the pagination key is wrong, and quietly removing it would
-  hide the defect.
-- **Lifecycle extraction and converted-identity extraction are
-  independent completeness axes.** They fail independently, so a complete
-  lifecycle sweep with a truncated identity sweep is still an incomplete
-  run.
-- A first run's watermark floor is the beginning of time. **A two-day
-  window cannot produce a first baseline**: 4G1 measured 103,070 org-wide
-  rows against a workflow that assumes 5,000.
-- An incomplete run **may not propose a watermark**. `proposedWatermark`
-  returns `null` unless *both* axes completed.
+Extraction is driven **entirely by the private paired anchors**. There is
+no cursor, no `SystemModstamp` window, and no epoch scan:
+
+1. Validate every anchor; a malformed id is reported, never coerced.
+2. Preserve all **3,146** anchor pairs.
+3. Derive **131** unique Lead ids and **3,061** unique Contact ids.
+4. Batch each list into groups of at most **200**.
+5. Query only with validated `Id IN (...)` batches.
+
+Every id is re-validated immediately before it becomes SOQL text, so a
+malformed value cannot reach a literal.
+
+The Lead and Contact paths are **serialized**: the Lead loop's `done`
+output feeds the Contact fan-out, and only the Contact loop's `done`
+output reaches GUARD. GUARD is therefore unreachable until both
+extractions have finished, with no reliance on parallel-branch timing and
+no unconditional graph cycle. A static test proves every GUARD dependency
+is an executed ancestor and that the successful path is finite.
+
+**If cursor pagination is ever reintroduced**, the boundary must be the
+tuple form:
+
+```
+SystemModstamp > ts OR (SystemModstamp = ts AND Id > 'id')
+```
+
+The naive `SystemModstamp > ts AND Id > 'id'` is **not** tuple
+pagination: it silently drops every later-timestamp record whose Id sorts
+below the previous page's Id. `tupleCursorPredicate()` in
+`src/lib/lifecycleIngestionScope.ts` builds the correct form and refuses
+malformed literals.
+
+## Verified production identity coverage
+
+Measured 2026-08-05 by the read-only aggregate query
+(`docs/lifecycle-identity-coverage.sql`):
+
+| Metric | Value |
+|---|---|
+| Total Sourced people | **3,146** |
+| Eligible through exact Salesforce identity | **3,146** |
+| Unobservable | **0** |
+| Lead id only | 85 |
+| Contact id only | 3,015 |
+| Both identities | 46 |
+| Distinct valid Lead ids | 131 |
+| Distinct valid Contact ids | 3,061 |
+| Malformed ids | 0 |
+| Duplicate Lead-id groups | 0 |
+| Duplicate Contact-id groups | 0 |
+
+Every Sourced person is observable through exact identity, so the
+identity-anchored scope covers the whole population with nothing left
+unreachable. The org-wide alternative (103,070 CampaignMember rows) stays
+firmly out of scope.
+
+## Dual identity: Contact precedence
+
+46 people carry both ids. For those:
+
+- The fetched Lead's `ConvertedContactId` must **exactly match** the
+  paired Contact id.
+- On a match, **Contact is the lifecycle authority**; the Lead is
+  retained as conversion evidence only.
+- Exactly **one** observation, **one** projection, and at most **one**
+  baseline event per person. A dual-identity person is one person, never
+  two.
+- A missing record, an absent link, or a mismatch becomes a **review
+  issue** and changes nothing for that anchor.
+
+Identity is never repaired automatically, and email and fuzzy matching do
+not exist anywhere in this path.
 
 ## First-run semantics: baseline only
 
@@ -238,95 +296,142 @@ The scope resolver takes no campaign input at all, so rule 1 holds by
 construction rather than by discipline: campaign membership cannot reduce
 the observable population because the function cannot see it.
 
-## Step 1: measure identity coverage (you run this)
+## Step 1: identity coverage (already done)
 
-Run `docs/lifecycle-identity-coverage.sql` in the Supabase SQL Editor
-against the Production project. It is **read-only** and returns 17
-aggregate rows: counts only, with no Salesforce identifier, email, name,
-or row, so the output is safe to paste back verbatim.
+Complete. See the verified table above: 3,146 of 3,146 Sourced people are
+eligible, 0 unobservable. **Do not rerun the coverage query.**
 
-The two decision numbers are `16_eligible_identity_anchored` (how many
-people can be observed) and `17_unobservable_no_exact_identity` (how many
-cannot). If eligibility is far below the total, the identity-anchored
-scope may need revisiting before ingestion is built.
+## Step 2: build the private anchors file (you do this)
 
-This query was validated by execution against a disposable local
-PostgreSQL cluster with a synthetic `leads` table; it has never been run
-against production by this repository.
-
-## Step 2: import and run the dry run (you run this)
-
-1. In n8n, **Import from File** the convenience copy at
-   `~/Downloads/[Sourced] 4G2B2A Lifecycle Dry Run (DISABLED).json`, or
-   paste the template embedded below.
-2. Confirm the imported workflow shows **Inactive**. It carries no
-   schedule and no credentials.
-3. Attach your existing **read-only** Salesforce credential to the four
-   Salesforce nodes. Do not attach Supabase, Sheets, or HTTP credentials:
-   there are no nodes that could use them.
-4. Supply the **private identity population** to the Manual Trigger as
-   JSON with `eligible_lead_ids` and `eligible_contact_ids` arrays of
-   exact Salesforce ids. Without it the run **fails immediately**: this
-   workflow never falls back to an org-wide scan.
-5. **Execute Workflow** manually.
-6. Expect **GUARD** to be the only node that completes successfully.
-7. Copy the GUARD output. It is aggregate-only and safe to share.
-
-### Producing the private identity population
-
-The id list is private evidence and **must never enter the repository**.
+Export **one row per Sourced person**, with exactly two columns, keeping
+the pair together:
 
 ```sql
--- PRIVATE. Run in Supabase, export the result, delete it afterward.
-SELECT DISTINCT sfdc_lead_id AS id FROM public.leads
-WHERE sfdc_lead_id IS NOT NULL AND btrim(sfdc_lead_id) <> '';
--- and separately:
-SELECT DISTINCT sfdc_contact_id AS id FROM public.leads
-WHERE sfdc_contact_id IS NOT NULL AND btrim(sfdc_contact_id) <> '';
+-- PRIVATE. Export, use, then DELETE.
+SELECT sfdc_lead_id, sfdc_contact_id
+FROM public.leads
+WHERE COALESCE(btrim(sfdc_lead_id), '') <> ''
+   OR COALESCE(btrim(sfdc_contact_id), '') <> '';
 ```
 
-Save to `~/Downloads/4g2b2a-private-ids.json`, use it, then **delete
-it**. Never commit it, never paste it into chat, and never let it reach
-GUARD output.
+No email, name, company, channel, campaign, or Sourced UUID is needed, so
+export none of it. Save as `~/Downloads/4g2b2a-private-pairs.csv`.
 
-## Step 3: authoritative evaluation (optional, local only)
+Convert it to the n8n input:
 
-The GUARD summary is sufficient for review. If a full planner evaluation
-is wanted, follow the Bite 4G1 pattern: generate an evaluator **outside**
-the repository that imports the real `planLifecycleObservations` and
-`serializeLifecycleApply`, feed it the private raw export, and emit
-aggregate diagnostics only. It must contain no credentials, make no
-network call, and perform no write.
+```bash
+node ~/Downloads/4g2b2a-make-anchors.mjs ~/Downloads/4g2b2a-private-pairs.csv > ~/Downloads/4g2b2a-private-anchors.json
+```
 
-**No lifecycle logic is ever reimplemented in n8n.** A hand-copied
-planner in a Code node would drift from the authority the moment either
-side changed.
+The helper prints a summary to your screen (counts only) and the pasteable
+array to the file. Expect roughly 85 lead-only, 3,015 contact-only, and 46
+dual-identity anchors.
 
-### Files to delete after the run
+## Step 3: import and run the dry run in n8n Cloud (you do this)
 
-- `~/Downloads/4g2b2a-private-ids.json`
-- any raw Salesforce export produced for the evaluator
-- the evaluator script itself, if one was generated
+1. In n8n, click **Workflows → Import from File** and choose
+   `~/Downloads/[Sourced] 4G2B2A Lifecycle Dry Run (DISABLED).json`.
+2. Confirm the workflow header shows **Inactive**. It has no schedule and
+   no credentials.
+3. Open the two Salesforce nodes, **Query: Lead batch** and
+   **Query: Contact batch**, and select your existing **read-only**
+   Salesforce credential in each. There are no other credential-using
+   nodes.
+4. Open the node named
+   **`PRIVATE: exact Sourced identity anchors`**. This is the **only**
+   node you edit. Find the line:
 
-## Evidence required before publication
+   ```js
+   const ANCHORS = 'PASTE_ANCHORS_HERE';   // <-- replace this entire value
+   ```
 
-Bite 4G2B2A is **not publication-ready** until both are reviewed:
+   Replace `'PASTE_ANCHORS_HERE'` (including the quotes) with the entire
+   contents of `~/Downloads/4g2b2a-private-anchors.json`. The line should
+   then begin `const ANCHORS = [{"lead":...`.
 
-1. The 17-row aggregate coverage result from Step 1.
-2. A successful GUARD summary from Step 2, showing `dry_run: true`,
-   `writes_attempted: 0`, `apply_payload_created: false`, and
-   **zero** transitions, returns, and requalifications.
+   If you skip this, the run **fails immediately** with
+   `PRIVATE INPUT MISSING`. That is deliberate: this workflow never falls
+   back to an organization-wide scan.
 
-Until then the scope hypothesis is designed and tested but not
-quantified against production.
+5. Click **Test workflow**.
+6. The run walks the Lead batches, then the Contact batches, then
+   **GUARD: extraction summary**, which is the only node that completes
+   successfully.
+7. Open GUARD's output panel and copy the JSON. It is aggregate-only and
+   safe to share.
+
+Do **not** use n8n's Pin Data feature at any point.
+
+## Step 4: authoritative evaluation (you do this)
+
+GUARD reports only what was **fetched**. The authoritative lifecycle
+numbers come from the real repository planner, run locally:
+
+1. From GUARD's Lead and Contact collection nodes, export the private
+   rows as `~/Downloads/4g2b2a-private-extraction.json` shaped
+   `{ "leads": [...], "contacts": [...] }`.
+2. From the repository root:
+
+   ```bash
+   node ~/Downloads/4g2b2a-local-evaluator.mjs \
+        ~/Downloads/4g2b2a-private-anchors.json \
+        ~/Downloads/4g2b2a-private-extraction.json
+   ```
+
+3. It invokes the real `planLifecycleObservations` and
+   `serializeLifecycleApply`, applies Contact precedence and exact
+   conversion-link validation, and prints an **aggregate-only** summary.
+   It refuses to print if any identifier reaches the output.
+
+## Files to delete when finished
+
+- `~/Downloads/4g2b2a-private-pairs.csv`
+- `~/Downloads/4g2b2a-private-anchors.json`
+- `~/Downloads/4g2b2a-private-extraction.json`
+- the pasted anchors value inside the n8n private node
+- `~/Downloads/4g2b2a-make-anchors.mjs` and
+  `~/Downloads/4g2b2a-local-evaluator.mjs`
+
+## What GUARD may and may not claim
+
+GUARD is a **transport and completeness guard only**. It reports anchors
+supplied, Lead/Contact/dual counts, batches expected and completed,
+records found and missing, duplicate results, malformed inputs,
+dual-identity links matched and conflicting, extraction completeness,
+`dry_run: true`, `writes_attempted: 0`, and
+`apply_payload_created: false`.
+
+It must **never** claim planned events, projections, issues, transitions,
+returns, or requalifications. Computing those in an n8n Code node would
+be a second, non-authoritative lifecycle calculation drifting from
+`planLifecycleObservations`. Those numbers come from the evaluator alone.
+
+## First-run success criteria
+
+- All 3,146 anchors reconciled or explicitly routed to review.
+- No duplicate person baselines (events ≤ observations).
+- No truncation; every expected batch completed.
+- transitions = 0, returns = 0, requalifications = 0.
+- No invented historical dates.
+- Proposed watermark non-null.
+- Zero writes.
+
+The evaluator checks each of these and reports
+`first_run_criteria_met` with the specific failures.
+
+## Evidence still required before publication
+
+1. A successful **GUARD extraction summary**.
+2. The **authoritative evaluator aggregate**.
+
+Identity coverage is already complete and needs no rerun.
 
 ## No ingestion exists
 
-Nothing writes to the lifecycle tables today. The apply function
-`sf_apply_lifecycle_observations` is applied and verified in production
-but **has never been invoked**, and **all seven `sf_lifecycle_*` tables
-remain empty**. They stay empty until a separately authorized apply in a
-later bite.
+Nothing writes to the lifecycle tables today. `sf_apply_lifecycle_observations`
+is applied and verified in production but **has never been invoked**, and
+**all seven `sf_lifecycle_*` tables remain empty**. They stay empty until
+a separately authorized apply in a later bite.
 
 ## The workflow template
 
@@ -339,7 +444,7 @@ A convenience copy lives outside the repository at
 
 ```json
 {
-  "name": "[Sourced] 4G2B2A Lifecycle Ingestion DRY RUN (DISABLED, READ-ONLY)",
+  "name": "[Sourced] 4G2B2A Lifecycle Extraction DRY RUN (DISABLED, READ-ONLY)",
   "nodes": [
     {
       "parameters": {},
@@ -348,228 +453,190 @@ A convenience copy lives outside the repository at
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [
-        -620,
-        340
+        -900,
+        300
       ],
       "notes": "DISABLED DRY RUN. Manual only. Intended future schedule timezone is America/Denver, deliberately NOT configured here."
     },
     {
       "parameters": {
-        "jsCode": "// Fails BEFORE any query when configuration is a placeholder or the\n// private identity population is missing. A dry run that queries with an\n// unresolved field name, or with no population, produces confident\n// nonsense.\nconst UNRESOLVED = 'UNRESOLVED';\nconst LIFECYCLE_FIELD = 'Hubspot_lead_lifecycle__c';\n\nconst required = [\n  ['lifecycle field', LIFECYCLE_FIELD],\n  ['pagination key', 'SystemModstamp'],\n  ['identity key', 'Id'],\n  ['conversion link', 'ConvertedContactId']\n];\nfor (const [label, value] of required) {\n  if (!value || value === UNRESOLVED) {\n    throw new Error('PREFLIGHT FAILED: required ' + label + ' is unresolved. '\n      + 'Confirm the API name before running. Never guess a field name.');\n  }\n}\n\n// PRIVATE identity population. Supplied out-of-band as exact Salesforce\n// ids; see docs/lead-lifecycle-ingestion-dry-run.md. It never enters the\n// repository and is deleted after the run.\nconst input = $input.first().json || {};\nconst leadIds = Array.isArray(input.eligible_lead_ids) ? input.eligible_lead_ids : null;\nconst contactIds = Array.isArray(input.eligible_contact_ids) ? input.eligible_contact_ids : null;\n\nif (leadIds === null || contactIds === null) {\n  throw new Error('PREFLIGHT FAILED: no identity population supplied. '\n    + 'Provide eligible_lead_ids and eligible_contact_ids as arrays of exact '\n    + 'Salesforce ids. This workflow never falls back to an org-wide scan.');\n}\nif (leadIds.length === 0 && contactIds.length === 0) {\n  throw new Error('PREFLIGHT FAILED: identity population is empty. '\n    + 'Run the coverage SQL first; a zero population means nothing is observable.');\n}\nconst SFID = /^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/;\nconst malformed = leadIds.concat(contactIds).filter((v) => !SFID.test(String(v)));\nif (malformed.length > 0) {\n  throw new Error('PREFLIGHT FAILED: ' + malformed.length + ' malformed Salesforce id(s) '\n    + 'in the private input. Ids are 15 or 18 characters of [A-Za-z0-9]. '\n    + 'No id is coerced into shape.');\n}\n\n// The first run scans from the epoch, but NEVER as one unbounded\n// in-memory operation: the loop below pages in bounded chunks of 200.\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  eligible_lead_id_count: leadIds.length,\n  eligible_contact_id_count: contactIds.length,\n  page_size: 200,\n  unresolved_optional_fields: input.became_dates_present === true ? [] : ['became_lead_date', 'became_mql_date'],\n  intended_future_schedule_timezone: 'America/Denver'\n} }];"
+        "jsCode": "// ============================================================\n// PRIVATE: exact Sourced identity anchors\n// ------------------------------------------------------------\n// >>> THIS IS THE ONLY NODE YOU EDIT. <<<\n//\n// Replace the PLACEHOLDER array below with the anchors produced by\n// scripts/make-anchors (see the documentation). Each entry is ONE Sourced\n// person and keeps BOTH ids together:\n//\n//   { \"lead\": \"00Q...\", \"contact\": \"003...\" }   both known\n//   { \"lead\": \"00Q...\", \"contact\": null }       Lead only\n//   { \"lead\": null,     \"contact\": \"003...\" }   Contact only\n//\n// The pair relationship matters: two unrelated id lists cannot tell us a\n// Lead and a Contact are the SAME person, so they cannot enforce Contact\n// precedence or validate a conversion link.\n//\n// Nothing here ever reaches the repository or the GUARD output. Delete\n// your private file after the run.\n// ============================================================\nconst ANCHORS = 'PASTE_ANCHORS_HERE';   // <-- replace this entire value\n\nif (typeof ANCHORS === 'string') {\n  throw new Error('PRIVATE INPUT MISSING: the anchors placeholder is still in place. '\n    + 'Open the node \"PRIVATE: exact Sourced identity anchors\" and replace '\n    + 'PASTE_ANCHORS_HERE with your generated anchors array. This workflow never '\n    + 'falls back to an organization-wide scan.');\n}\nif (!Array.isArray(ANCHORS) || ANCHORS.length === 0) {\n  throw new Error('PRIVATE INPUT INVALID: anchors must be a non-empty array.');\n}\n\nconst SFID = /^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/;\nconst leadIds = new Set(), contactIds = new Set();\nlet leadOnly = 0, contactOnly = 0, dual = 0, invalid = 0;\n\nfor (const a of ANCHORS) {\n  const l = a && a.lead ? String(a.lead) : null;\n  const c = a && a.contact ? String(a.contact) : null;\n  const lOk = l !== null && SFID.test(l);\n  const cOk = c !== null && SFID.test(c);\n  // A malformed id is never coerced into shape or silently dropped.\n  if ((l !== null && !lOk) || (c !== null && !cOk)) { invalid += 1; continue; }\n  if (lOk && cOk) { dual += 1; leadIds.add(l); contactIds.add(c); }\n  else if (lOk)   { leadOnly += 1; leadIds.add(l); }\n  else if (cOk)   { contactOnly += 1; contactIds.add(c); }\n  else            { invalid += 1; }\n}\nif (invalid > 0) {\n  throw new Error('PRIVATE INPUT INVALID: ' + invalid + ' anchor(s) carry a malformed or '\n    + 'absent Salesforce id. Ids are 15 or 18 characters of [A-Za-z0-9].');\n}\n\n// Finite Id IN batches. No cursor, no epoch scan, no unbounded loop.\nconst BATCH = 200;\nconst chunk = (arr) => { const out = []; for (let i = 0; i < arr.length; i += BATCH) out.push(arr.slice(i, i + BATCH)); return out; };\nconst leadBatches = chunk([...leadIds].sort());\nconst contactBatches = chunk([...contactIds].sort());\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  anchors_received: ANCHORS.length,\n  anchors_lead_only: leadOnly,\n  anchors_contact_only: contactOnly,\n  anchors_dual_identity: dual,\n  anchors_invalid: invalid,\n  unique_lead_ids: leadIds.size,\n  unique_contact_ids: contactIds.size,\n  lead_batches_expected: leadBatches.length,\n  contact_batches_expected: contactBatches.length,\n  // PRIVATE payloads, consumed downstream and never emitted by GUARD.\n  _private_lead_batches: leadBatches,\n  _private_contact_batches: contactBatches,\n  _private_anchors: ANCHORS\n} }];"
       },
-      "id": "n-preflight-resolve-configuration",
-      "name": "Preflight: resolve configuration",
+      "id": "n-private-exact-sourced-identity-anchors",
+      "name": "PRIVATE: exact Sourced identity anchors",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -400,
-        340
+        -680,
+        300
       ],
-      "notes": "Fails loudly on placeholder config, a missing or empty identity population, or a malformed private input, BEFORE any query runs.",
+      "notes": "*** THE ONLY NODE YOU EDIT. *** Paste your generated anchors array over PASTE_ANCHORS_HERE. Fails loudly while the placeholder remains. Private payloads here never reach GUARD output or the repository.",
       "executeOnce": true
     },
     {
       "parameters": {
-        "jsCode": "// PRIVATE, n8n-ONLY. Nothing here may reach the repository or GUARD\n// output. Campaign names, if a campaign scope is ever approved, live\n// ONLY in this node.\n//\n// LOCKED BUSINESS RULE (Bite 4G2B2A):\n//   Campaign scope governs ADMISSION of new people into Sourced. It does\n//   NOT govern lifecycle OBSERVATION. Once a person is admitted and\n//   anchored by exact Salesforce id, their lifecycle is observed\n//   regardless of campaign membership: a person who leaves a campaign\n//   does not stop having a lifecycle.\nconst APPROVED_CAMPAIGN_SCOPE = [];  // admission only; none approved yet\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  approved_campaign_scope_count: APPROVED_CAMPAIGN_SCOPE.length,\n  scope_basis: 'identity_anchored_observation',\n  campaign_scope_governs: 'admission_only'\n} }];"
+        "jsCode": "// Emits one item per lead batch for SplitInBatches. Finite by\n// construction: batch count is fixed before the loop starts.\nconst s = $('PRIVATE: exact Sourced identity anchors').first().json;\nconst batches = s._private_lead_batches || [];\nif (batches.length === 0) return [{ json: { batch_index: -1, ids: [], empty: true } }];\nreturn batches.map((ids, i) => ({ json: { batch_index: i, ids: ids, empty: false } }));"
       },
-      "id": "n-private-approved-scope-decision",
-      "name": "PRIVATE: approved scope decision",
+      "id": "n-fan-out-lead-batches",
+      "name": "Fan out: Lead batches",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -400,
+        -460,
+        180
+      ],
+      "notes": "One item per finite Id IN batch.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "n-loop-lead-batches",
+      "name": "Loop: Lead batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -240,
+        180
+      ],
+      "notes": "Finite loop with an EXPLICIT done output. Output 0 = done, output 1 = next batch. This is the loop-termination gate the cursor design lacked."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds ONE `Id IN (...)` query for this batch. Every id is\n// re-validated here, immediately before it becomes SOQL text: this is\n// the last line of defence, so it refuses rather than trusting an\n// earlier check.\nconst item = $input.first().json;\nconst ids = Array.isArray(item.ids) ? item.ids : [];\nconst SFID = /^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/;\nfor (const id of ids) {\n  if (!SFID.test(String(id))) {\n    throw new Error('REFUSING to build a SOQL literal from a malformed Salesforce id.');\n  }\n}\nif (ids.length === 0) return [{ json: { soql: null, batch_index: item.batch_index, skip: true } }];\nconst literal = ids.map((id) => \"'\" + id + \"'\").join(',');\n// NOTE: no cursor predicate anywhere. If one is ever reintroduced it\n// must be the TUPLE form:\n//   (SystemModstamp > ts OR (SystemModstamp = ts AND Id > 'id'))\n// The naive `SystemModstamp > ts AND Id > 'id'` silently drops every\n// later-timestamp record whose Id sorts below the previous page's Id.\nreturn [{ json: {\n  soql: 'SELECT Id, Hubspot_lead_lifecycle__c, SystemModstamp, LastModifiedDate, IsConverted, ConvertedContactId, Became_a_Lead_Date__c, Became_a_Marketing_Qualified_Lead_Date__c FROM Lead WHERE Id IN (' + literal + ')',\n  batch_index: item.batch_index,\n  requested: ids.length,\n  skip: false\n} }];"
+      },
+      "id": "n-build-soql-lead-batch",
+      "name": "Build SOQL: Lead batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        260
+      ],
+      "notes": "Validates every id immediately before it becomes SOQL text."
+    },
+    {
+      "parameters": {
+        "resource": "search",
+        "query": "={{ $json.soql }}",
+        "options": {}
+      },
+      "id": "n-query-lead-batch",
+      "name": "Query: Lead batch",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        200,
+        260
+      ],
+      "notes": "READ-ONLY Id IN batch query. No cursor, no epoch scan.",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collects one batch result. Runs on the SplitInBatches loop output, so\n// it accumulates across iterations via getWorkflowStaticData-free\n// node-context accumulation on the loop's own item stream.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\nconst rows = realRows($('Query: Lead batch').all());\nconst req = $('Loop: Lead batches').first().json;\n\nconst seen = new Set();\nlet duplicates = 0;\nfor (const r of rows) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  if (seen.has(id)) duplicates += 1; else seen.add(id);\n}\nif (duplicates > 0) {\n  throw new Error('EXTRACTION FAILED: Salesforce returned ' + duplicates\n    + ' duplicate lead record(s) for one Id IN batch.');\n}\nreturn [{ json: {\n  object: 'lead',\n  batch_index: req.batch_index,\n  requested: (req.ids || []).length,\n  returned: seen.size,\n  rows: rows\n} }];"
+      },
+      "id": "n-collect-lead-batch",
+      "name": "Collect: Lead batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        260
+      ],
+      "notes": "Collects one batch and fails on duplicate Salesforce results."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emits one item per contact batch for SplitInBatches. Finite by\n// construction: batch count is fixed before the loop starts.\nconst s = $('PRIVATE: exact Sourced identity anchors').first().json;\nconst batches = s._private_contact_batches || [];\nif (batches.length === 0) return [{ json: { batch_index: -1, ids: [], empty: true } }];\nreturn batches.map((ids, i) => ({ json: { batch_index: i, ids: ids, empty: false } }));"
+      },
+      "id": "n-fan-out-contact-batches",
+      "name": "Fan out: Contact batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        480
+      ],
+      "notes": "One item per finite Id IN batch. Reached only after the Lead loop emits done, which is what serializes the two paths.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "n-loop-contact-batches",
+      "name": "Loop: Contact batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -240,
+        480
+      ],
+      "notes": "Finite loop with an explicit done output."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds ONE `Id IN (...)` query for this batch. Every id is\n// re-validated here, immediately before it becomes SOQL text: this is\n// the last line of defence, so it refuses rather than trusting an\n// earlier check.\nconst item = $input.first().json;\nconst ids = Array.isArray(item.ids) ? item.ids : [];\nconst SFID = /^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/;\nfor (const id of ids) {\n  if (!SFID.test(String(id))) {\n    throw new Error('REFUSING to build a SOQL literal from a malformed Salesforce id.');\n  }\n}\nif (ids.length === 0) return [{ json: { soql: null, batch_index: item.batch_index, skip: true } }];\nconst literal = ids.map((id) => \"'\" + id + \"'\").join(',');\n// NOTE: no cursor predicate anywhere. If one is ever reintroduced it\n// must be the TUPLE form:\n//   (SystemModstamp > ts OR (SystemModstamp = ts AND Id > 'id'))\n// The naive `SystemModstamp > ts AND Id > 'id'` silently drops every\n// later-timestamp record whose Id sorts below the previous page's Id.\nreturn [{ json: {\n  soql: 'SELECT Id, Hubspot_lead_lifecycle__c, SystemModstamp, LastModifiedDate, Became_a_Lead_Date__c, Became_a_Marketing_Qualified_Lead_Date__c FROM Contact WHERE Id IN (' + literal + ')',\n  batch_index: item.batch_index,\n  requested: ids.length,\n  skip: false\n} }];"
+      },
+      "id": "n-build-soql-contact-batch",
+      "name": "Build SOQL: Contact batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
         560
       ],
-      "notes": "PRIVATE n8n-only. Campaign names may live ONLY here. Campaign scope governs ADMISSION of new people, never lifecycle OBSERVATION of people already anchored by exact Salesforce id.",
-      "executeOnce": true
+      "notes": "Validates every id immediately before it becomes SOQL text."
     },
     {
       "parameters": {
         "resource": "search",
-        "query": "=SELECT QualifiedApiName, EntityDefinitionId FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName IN ('Lead','Contact') AND QualifiedApiName IN ('Became_a_Lead_Date__c','Became_a_Marketing_Qualified_Lead_Date__c')",
+        "query": "={{ $json.soql }}",
         "options": {}
       },
-      "id": "n-describe-supporting-date-fields",
-      "name": "Describe: supporting date fields",
+      "id": "n-query-contact-batch",
+      "name": "Query: Contact batch",
       "type": "n8n-nodes-base.salesforce",
       "typeVersion": 1,
       "position": [
-        -180,
-        720
+        200,
+        560
       ],
-      "notes": "READ-ONLY describe. Confirms the two CANDIDATE supporting-date API names on each object. Absence is reported, never guessed around.",
-      "executeOnce": true,
+      "notes": "READ-ONLY Id IN batch query.",
       "alwaysOutputData": true
     },
     {
       "parameters": {
-        "jsCode": "// Read-only supporting-date discovery. The two candidate API names were\n// surfaced by earlier Salesforce evidence but are NOT universally\n// confirmed on both objects, so they are checked rather than assumed.\n//\n// Absence is REPORTED and the run CONTINUES: these are supporting\n// evidence only. They must never create a transition, replace an\n// observation timestamp, or make the dry run incomplete. No alternative\n// name is ever guessed.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst CANDIDATES = ['Became_a_Lead_Date__c', 'Became_a_Marketing_Qualified_Lead_Date__c'];\nconst rows = realRows($('Describe: supporting date fields').all());\nconst present = {};\nfor (const c of CANDIDATES) {\n  present[c] = { Lead: false, Contact: false };\n}\nfor (const r of rows) {\n  const api = String(r.QualifiedApiName || '');\n  const obj = String(r.EntityDefinitionId || r.EntityDefinition || '');\n  if (present[api] && (obj === 'Lead' || obj === 'Contact')) present[api][obj] = true;\n}\nconst absent = [];\nfor (const c of CANDIDATES) {\n  if (!present[c].Lead) absent.push(c + ' absent on Lead');\n  if (!present[c].Contact) absent.push(c + ' absent on Contact');\n}\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  supporting_date_fields_present: present,\n  supporting_date_fields_absent: absent,\n  became_dates_present: absent.length === 0,\n  note: 'Supporting evidence only. Never creates a transition and never blocks the run.'\n} }];"
+        "jsCode": "// Collects one batch result. Runs on the SplitInBatches loop output, so\n// it accumulates across iterations via getWorkflowStaticData-free\n// node-context accumulation on the loop's own item stream.\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\nconst rows = realRows($('Query: Contact batch').all());\nconst req = $('Loop: Contact batches').first().json;\n\nconst seen = new Set();\nlet duplicates = 0;\nfor (const r of rows) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  if (seen.has(id)) duplicates += 1; else seen.add(id);\n}\nif (duplicates > 0) {\n  throw new Error('EXTRACTION FAILED: Salesforce returned ' + duplicates\n    + ' duplicate contact record(s) for one Id IN batch.');\n}\nreturn [{ json: {\n  object: 'contact',\n  batch_index: req.batch_index,\n  requested: (req.ids || []).length,\n  returned: seen.size,\n  rows: rows\n} }];"
       },
-      "id": "n-classify-supporting-date-availability",
-      "name": "Classify: supporting date availability",
+      "id": "n-collect-contact-batch",
+      "name": "Collect: Contact batch",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        40,
-        720
+        420,
+        560
       ],
-      "notes": "Reports presence/absence per object. Supporting evidence only: never creates a transition and never makes the run incomplete.",
+      "notes": "Collects one batch and fails on duplicate Salesforce results."
+    },
+    {
+      "parameters": {
+        "jsCode": "// GUARD: TRANSPORT AND COMPLETENESS ONLY.\n//\n// This node deliberately makes NO planner claim. It does not report\n// planned events, projections, issues, transitions, returns, or\n// requalifications, because computing those here would be a SECOND,\n// non-authoritative lifecycle calculation competing with\n// planLifecycleObservations. The authoritative numbers come from the\n// local evaluator, which invokes the real planner and serializer.\nconst s = $('PRIVATE: exact Sourced identity anchors').first().json;\nconst leadCollected = $('Collect: Lead batch').all().map((i) => i.json);\nconst contactCollected = $('Collect: Contact batch').all().map((i) => i.json);\n\nconst sum = (arr, k) => arr.reduce((a, b) => a + (b[k] || 0), 0);\nconst leadRequested = sum(leadCollected, 'requested');\nconst leadReturned  = sum(leadCollected, 'returned');\nconst contactRequested = sum(contactCollected, 'requested');\nconst contactReturned  = sum(contactCollected, 'returned');\n\n// Completeness: every expected batch must have been collected. These are\n// INDEPENDENT axes and are reported separately.\nconst leadComplete = leadCollected.length === s.lead_batches_expected;\nconst contactComplete = contactCollected.length === s.contact_batches_expected;\nif (!leadComplete || !contactComplete) {\n  throw new Error('GUARD FAILED: incomplete extraction. Lead batches '\n    + leadCollected.length + '/' + s.lead_batches_expected + ', Contact batches '\n    + contactCollected.length + '/' + s.contact_batches_expected + '.');\n}\n\n// A non-empty population that matched nothing means the query, the\n// field, or the population is wrong. Failing loudly beats reporting a\n// confident empty baseline.\nconst requested = leadRequested + contactRequested;\nconst returned = leadReturned + contactReturned;\nif (requested > 0 && returned === 0) {\n  throw new Error('GUARD FAILED: ' + requested + ' ids were requested but ZERO Salesforce '\n    + 'records returned. Check the query scope and the lifecycle field.');\n}\n\n// The confirmed lifecycle field must actually come back. Its absence is\n// the exact defect that makes the production feed stamp everyone 'lead'.\nconst allRows = leadCollected.concat(contactCollected).flatMap((c) => c.rows || []);\nconst missingField = allRows.filter((r) => !Object.prototype.hasOwnProperty.call(r, 'Hubspot_lead_lifecycle__c')).length;\nif (allRows.length > 0 && missingField === allRows.length) {\n  throw new Error('GUARD FAILED: the confirmed lifecycle field is absent from every row. '\n    + 'The SELECT is wrong.');\n}\n\n// Dual-identity link check. Contact is the lifecycle authority ONLY when\n// the fetched Lead's ConvertedContactId exactly matches the paired\n// Contact id. A mismatch is a review issue and changes nothing.\nconst leadById = new Map();\nfor (const c of leadCollected) for (const r of (c.rows || [])) leadById.set(String(r.Id), r);\nconst contactIds = new Set();\nfor (const c of contactCollected) for (const r of (c.rows || [])) contactIds.add(String(r.Id));\n\nlet linksMatched = 0, linksConflicting = 0, linksMissing = 0;\nfor (const a of (s._private_anchors || [])) {\n  const l = a && a.lead ? String(a.lead) : null;\n  const c = a && a.contact ? String(a.contact) : null;\n  if (!l || !c) continue;                       // not dual identity\n  const lead = leadById.get(l);\n  if (!lead || !contactIds.has(c)) { linksMissing += 1; continue; }\n  const link = lead.ConvertedContactId ? String(lead.ConvertedContactId) : null;\n  if (link === null) linksMissing += 1;\n  else if (link === c) linksMatched += 1;\n  else linksConflicting += 1;\n}\n\n// Supporting-date availability, reported as coverage only. These dates\n// are evidence: they never create an event or change a destination.\nconst withBecameLead = allRows.filter((r) => r['Became_a_Lead_Date__c']).length;\nconst withBecameMql = allRows.filter((r) => r['Became_a_Marketing_Qualified_Lead_Date__c']).length;\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  apply_payload_created: false,\n  guard_scope: 'transport_and_completeness_only',\n  authoritative_counts_source: 'local evaluator invoking planLifecycleObservations',\n\n  anchors_supplied: s.anchors_received,\n  anchors_lead_only: s.anchors_lead_only,\n  anchors_contact_only: s.anchors_contact_only,\n  anchors_dual_identity: s.anchors_dual_identity,\n  anchors_invalid: s.anchors_invalid,\n\n  lead_batches_expected: s.lead_batches_expected,\n  lead_batches_completed: leadCollected.length,\n  contact_batches_expected: s.contact_batches_expected,\n  contact_batches_completed: contactCollected.length,\n\n  lead_records_requested: leadRequested,\n  lead_records_found: leadReturned,\n  lead_records_missing: Math.max(0, leadRequested - leadReturned),\n  contact_records_requested: contactRequested,\n  contact_records_found: contactReturned,\n  contact_records_missing: Math.max(0, contactRequested - contactReturned),\n\n  duplicate_salesforce_results: 0,\n  rows_missing_lifecycle_field: missingField,\n\n  dual_identity_links_matched: linksMatched,\n  dual_identity_links_conflicting: linksConflicting,\n  dual_identity_links_missing: linksMissing,\n\n  supporting_date_coverage: {\n    became_a_lead_date: withBecameLead,\n    became_a_marketing_qualified_lead_date: withBecameMql\n  },\n\n  lead_extraction_complete: leadComplete,\n  contact_extraction_complete: contactComplete,\n  extraction_complete: leadComplete && contactComplete,\n  intended_future_schedule_timezone: 'America/Denver'\n} }];"
+      },
+      "id": "n-guard-extraction-summary",
+      "name": "GUARD: extraction summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        480
+      ],
+      "notes": "The ONLY successful terminal, reachable only after BOTH loops emit done. TRANSPORT AND COMPLETENESS ONLY: makes no planner claim. Authoritative counts come from the local evaluator.",
       "executeOnce": true
-    },
-    {
-      "parameters": {
-        "jsCode": "// Cursor init for one axis. The composite cursor is (SystemModstamp, Id):\n// ordering by timestamp alone lets records sharing one SystemModstamp\n// straddle a page boundary and be skipped or repeated.\nconst pre = $('Preflight: resolve configuration').first().json;\nreturn [{ json: {\n  cursor_ts: '1970-01-01T00:00:00Z',\n  cursor_id: '000000000000000',\n  pages_completed: 0,\n  seen_ids: [],\n  rows: [],\n  page_size: pre.page_size,\n  axis_failed: false\n} }];"
-      },
-      "id": "n-cursor-init-lead-lifecycle",
-      "name": "Cursor init: Lead lifecycle",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -180,
-        140
-      ],
-      "notes": "Composite (SystemModstamp, Id) cursor from the epoch. The scan is bounded: pages of 200, never one unbounded in-memory operation.",
-      "executeOnce": true
-    },
-    {
-      "parameters": {
-        "resource": "search",
-        "query": "=SELECT Id, Hubspot_lead_lifecycle__c, SystemModstamp, LastModifiedDate, IsConverted, ConvertedContactId FROM Lead WHERE SystemModstamp > {{ $json.cursor_ts }} AND Id > {{ $json.cursor_id }} ORDER BY SystemModstamp ASC, Id ASC LIMIT 200",
-        "options": {}
-      },
-      "id": "n-query-lead-lifecycle-page",
-      "name": "Query: Lead lifecycle page",
-      "type": "n8n-nodes-base.salesforce",
-      "typeVersion": 1,
-      "position": [
-        40,
-        140
-      ],
-      "notes": "READ-ONLY page query, cursor-bounded. executeOnce is FALSE deliberately: true would pin the loop to page 1 and silently truncate.",
-      "executeOnce": false,
-      "alwaysOutputData": true
-    },
-    {
-      "parameters": {
-        "jsCode": "// Accumulate one page and decide whether to continue. This is REAL\n// workflow-level pagination: the loop re-enters the query node with an\n// advanced cursor until a short page proves the axis is exhausted.\nconst state = $('Cursor init: Lead lifecycle').first().json;\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst page = realRows($('Query: Lead lifecycle page').all());\nconst seen = new Set(state.seen_ids || []);\nconst rows = (state.rows || []).slice();\n\nlet duplicates = 0, outOfOrder = 0;\nlet prevKey = state.rows && state.rows.length\n  ? String(state.rows[state.rows.length - 1].SystemModstamp) + '|' + String(state.rows[state.rows.length - 1].Id)\n  : null;\n\nfor (const r of page) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  // A duplicate id ACROSS pages means the pagination key is wrong. It is\n  // a hard failure, never silently deduplicated.\n  if (seen.has(id)) { duplicates += 1; continue; }\n  seen.add(id);\n  const key = String(r.SystemModstamp || '') + '|' + id;\n  if (prevKey !== null && key <= prevKey) outOfOrder += 1;\n  prevKey = key;\n  rows.push(r);\n}\n\nif (duplicates > 0) {\n  throw new Error('PAGINATION FAILED: ' + duplicates + ' duplicate Salesforce Id(s) '\n    + 'across pages on this axis. The ordering key is wrong; deduplicating would hide it.');\n}\nif (outOfOrder > 0) {\n  throw new Error('PAGINATION FAILED: ' + outOfOrder + ' row(s) out of (SystemModstamp, Id) order.');\n}\n\nconst pagesCompleted = (state.pages_completed || 0) + 1;\n// A page shorter than the page size proves exhaustion. A full page means\n// more may remain, so the loop continues.\nconst exhausted = page.length < state.page_size;\nconst last = rows.length ? rows[rows.length - 1] : null;\n\nreturn [{ json: {\n  cursor_ts: last ? last.SystemModstamp : state.cursor_ts,\n  cursor_id: last ? last.Id : state.cursor_id,\n  pages_completed: pagesCompleted,\n  seen_ids: Array.from(seen),\n  rows: rows,\n  page_size: state.page_size,\n  axis_complete: exhausted,\n  axis_failed: false,\n  has_more: !exhausted\n} }];"
-      },
-      "id": "n-accumulate-lead-lifecycle-page",
-      "name": "Accumulate: Lead lifecycle page",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        260,
-        140
-      ],
-      "notes": "Advances the cursor and loops until a short page proves exhaustion. Duplicate ids across pages and out-of-order rows both throw."
-    },
-    {
-      "parameters": {
-        "jsCode": "// Cursor init for one axis. The composite cursor is (SystemModstamp, Id):\n// ordering by timestamp alone lets records sharing one SystemModstamp\n// straddle a page boundary and be skipped or repeated.\nconst pre = $('Preflight: resolve configuration').first().json;\nreturn [{ json: {\n  cursor_ts: '1970-01-01T00:00:00Z',\n  cursor_id: '000000000000000',\n  pages_completed: 0,\n  seen_ids: [],\n  rows: [],\n  page_size: pre.page_size,\n  axis_failed: false\n} }];"
-      },
-      "id": "n-cursor-init-contact-lifecycle",
-      "name": "Cursor init: Contact lifecycle",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -180,
-        340
-      ],
-      "notes": "Composite cursor, Contact axis.",
-      "executeOnce": true
-    },
-    {
-      "parameters": {
-        "resource": "search",
-        "query": "=SELECT Id, Hubspot_lead_lifecycle__c, SystemModstamp, LastModifiedDate FROM Contact WHERE SystemModstamp > {{ $json.cursor_ts }} AND Id > {{ $json.cursor_id }} ORDER BY SystemModstamp ASC, Id ASC LIMIT 200",
-        "options": {}
-      },
-      "id": "n-query-contact-lifecycle-page",
-      "name": "Query: Contact lifecycle page",
-      "type": "n8n-nodes-base.salesforce",
-      "typeVersion": 1,
-      "position": [
-        40,
-        340
-      ],
-      "notes": "READ-ONLY page query, cursor-bounded.",
-      "executeOnce": false,
-      "alwaysOutputData": true
-    },
-    {
-      "parameters": {
-        "jsCode": "// Accumulate one page and decide whether to continue. This is REAL\n// workflow-level pagination: the loop re-enters the query node with an\n// advanced cursor until a short page proves the axis is exhausted.\nconst state = $('Cursor init: Contact lifecycle').first().json;\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst page = realRows($('Query: Contact lifecycle page').all());\nconst seen = new Set(state.seen_ids || []);\nconst rows = (state.rows || []).slice();\n\nlet duplicates = 0, outOfOrder = 0;\nlet prevKey = state.rows && state.rows.length\n  ? String(state.rows[state.rows.length - 1].SystemModstamp) + '|' + String(state.rows[state.rows.length - 1].Id)\n  : null;\n\nfor (const r of page) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  // A duplicate id ACROSS pages means the pagination key is wrong. It is\n  // a hard failure, never silently deduplicated.\n  if (seen.has(id)) { duplicates += 1; continue; }\n  seen.add(id);\n  const key = String(r.SystemModstamp || '') + '|' + id;\n  if (prevKey !== null && key <= prevKey) outOfOrder += 1;\n  prevKey = key;\n  rows.push(r);\n}\n\nif (duplicates > 0) {\n  throw new Error('PAGINATION FAILED: ' + duplicates + ' duplicate Salesforce Id(s) '\n    + 'across pages on this axis. The ordering key is wrong; deduplicating would hide it.');\n}\nif (outOfOrder > 0) {\n  throw new Error('PAGINATION FAILED: ' + outOfOrder + ' row(s) out of (SystemModstamp, Id) order.');\n}\n\nconst pagesCompleted = (state.pages_completed || 0) + 1;\n// A page shorter than the page size proves exhaustion. A full page means\n// more may remain, so the loop continues.\nconst exhausted = page.length < state.page_size;\nconst last = rows.length ? rows[rows.length - 1] : null;\n\nreturn [{ json: {\n  cursor_ts: last ? last.SystemModstamp : state.cursor_ts,\n  cursor_id: last ? last.Id : state.cursor_id,\n  pages_completed: pagesCompleted,\n  seen_ids: Array.from(seen),\n  rows: rows,\n  page_size: state.page_size,\n  axis_complete: exhausted,\n  axis_failed: false,\n  has_more: !exhausted\n} }];"
-      },
-      "id": "n-accumulate-contact-lifecycle-page",
-      "name": "Accumulate: Contact lifecycle page",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        260,
-        340
-      ],
-      "notes": "Advances the cursor and loops until exhaustion."
-    },
-    {
-      "parameters": {
-        "jsCode": "// Cursor init for one axis. The composite cursor is (SystemModstamp, Id):\n// ordering by timestamp alone lets records sharing one SystemModstamp\n// straddle a page boundary and be skipped or repeated.\nconst pre = $('Preflight: resolve configuration').first().json;\nreturn [{ json: {\n  cursor_ts: '1970-01-01T00:00:00Z',\n  cursor_id: '000000000000000',\n  pages_completed: 0,\n  seen_ids: [],\n  rows: [],\n  page_size: pre.page_size,\n  axis_failed: false\n} }];"
-      },
-      "id": "n-cursor-init-converted-identity",
-      "name": "Cursor init: converted identity",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -180,
-        540
-      ],
-      "notes": "Composite cursor, identity axis. INDEPENDENT of the lifecycle axes.",
-      "executeOnce": true
-    },
-    {
-      "parameters": {
-        "resource": "search",
-        "query": "=SELECT Id, ConvertedContactId, SystemModstamp FROM Lead WHERE SystemModstamp > {{ $json.cursor_ts }} AND Id > {{ $json.cursor_id }} AND IsConverted = true ORDER BY SystemModstamp ASC, Id ASC LIMIT 200",
-        "options": {}
-      },
-      "id": "n-query-converted-identity-page",
-      "name": "Query: converted identity page",
-      "type": "n8n-nodes-base.salesforce",
-      "typeVersion": 1,
-      "position": [
-        40,
-        540
-      ],
-      "notes": "READ-ONLY page query. Exact ConvertedContactId only.",
-      "executeOnce": false,
-      "alwaysOutputData": true
-    },
-    {
-      "parameters": {
-        "jsCode": "// Accumulate one page and decide whether to continue. This is REAL\n// workflow-level pagination: the loop re-enters the query node with an\n// advanced cursor until a short page proves the axis is exhausted.\nconst state = $('Cursor init: converted identity').first().json;\nconst realRows = (items) => (items || [])\n  .map((i) => (i && i.json) ? i.json : null)\n  .filter((r) => r && typeof r === 'object' && Object.keys(r).length > 0);\n\nconst page = realRows($('Query: converted identity page').all());\nconst seen = new Set(state.seen_ids || []);\nconst rows = (state.rows || []).slice();\n\nlet duplicates = 0, outOfOrder = 0;\nlet prevKey = state.rows && state.rows.length\n  ? String(state.rows[state.rows.length - 1].SystemModstamp) + '|' + String(state.rows[state.rows.length - 1].Id)\n  : null;\n\nfor (const r of page) {\n  const id = String(r.Id || '');\n  if (!id) continue;\n  // A duplicate id ACROSS pages means the pagination key is wrong. It is\n  // a hard failure, never silently deduplicated.\n  if (seen.has(id)) { duplicates += 1; continue; }\n  seen.add(id);\n  const key = String(r.SystemModstamp || '') + '|' + id;\n  if (prevKey !== null && key <= prevKey) outOfOrder += 1;\n  prevKey = key;\n  rows.push(r);\n}\n\nif (duplicates > 0) {\n  throw new Error('PAGINATION FAILED: ' + duplicates + ' duplicate Salesforce Id(s) '\n    + 'across pages on this axis. The ordering key is wrong; deduplicating would hide it.');\n}\nif (outOfOrder > 0) {\n  throw new Error('PAGINATION FAILED: ' + outOfOrder + ' row(s) out of (SystemModstamp, Id) order.');\n}\n\nconst pagesCompleted = (state.pages_completed || 0) + 1;\n// A page shorter than the page size proves exhaustion. A full page means\n// more may remain, so the loop continues.\nconst exhausted = page.length < state.page_size;\nconst last = rows.length ? rows[rows.length - 1] : null;\n\nreturn [{ json: {\n  cursor_ts: last ? last.SystemModstamp : state.cursor_ts,\n  cursor_id: last ? last.Id : state.cursor_id,\n  pages_completed: pagesCompleted,\n  seen_ids: Array.from(seen),\n  rows: rows,\n  page_size: state.page_size,\n  axis_complete: exhausted,\n  axis_failed: false,\n  has_more: !exhausted\n} }];"
-      },
-      "id": "n-accumulate-converted-identity-page",
-      "name": "Accumulate: converted identity page",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        260,
-        540
-      ],
-      "notes": "Advances the cursor and loops until exhaustion."
-    },
-    {
-      "parameters": {
-        "jsCode": "// GUARD: the ONLY successful shared terminal. Every failure below throws,\n// because a dry run reporting success while silently truncating is worse\n// than no dry run at all.\nconst one = (name) => {\n  const all = $(name).all();\n  const r = all && all.length ? all[all.length - 1].json : null;\n  if (!r || typeof r !== 'object') {\n    throw new Error('GUARD FAILED: axis \"' + name + '\" produced no state.');\n  }\n  return r;\n};\n\nconst pre      = $('Preflight: resolve configuration').first().json;\nconst scope    = $('PRIVATE: approved scope decision').first().json;\nconst leadAx   = one('Accumulate: Lead lifecycle page');\nconst contactAx= one('Accumulate: Contact lifecycle page');\nconst identAx  = one('Accumulate: converted identity page');\n\n// --- Completeness: lifecycle and identity are INDEPENDENT axes. They\n// fail independently, so a complete lifecycle sweep with a truncated\n// identity sweep is still an incomplete run.\nconst lifecycleComplete = leadAx.axis_complete === true && contactAx.axis_complete === true;\nconst identityComplete  = identAx.axis_complete === true;\n\nconst eligible = (pre.eligible_lead_id_count || 0) + (pre.eligible_contact_id_count || 0);\nconst found = (leadAx.rows || []).length + (contactAx.rows || []).length;\n\n// Eligible identities supplied but ZERO Salesforce matches means the\n// query, the field, or the population is wrong. Failing loudly beats\n// reporting a confident empty baseline.\nif (eligible > 0 && found === 0) {\n  throw new Error('GUARD FAILED: ' + eligible + ' eligible identities were supplied but '\n    + 'ZERO Salesforce records matched. Check the query scope and the lifecycle field '\n    + 'before trusting any empty result.');\n}\n\n// --- Lifecycle classification. AGGREGATE ONLY: labels and counts.\nconst APPROVED = {\n  'Lead': 'lead', 'Marketing Qualified Lead': 'mql',\n  'Customer': 'out_of_scope', 'Internal': 'out_of_scope',\n  'Opportunity': 'out_of_scope', 'Other': 'out_of_scope',\n  'Partner': 'out_of_scope', 'Prospect': 'out_of_scope',\n  'Sales Qualified Lead': 'out_of_scope', 'Subscriber': 'out_of_scope'\n};\nconst byState = { lead: 0, mql: 0, out_of_scope: 0, unknown: 0 };\nconst unknownLabels = {};\nlet missingLifecycle = 0, missingField = 0;\nconst allRows = (leadAx.rows || []).concat(contactAx.rows || []);\nfor (const r of allRows) {\n  if (!Object.prototype.hasOwnProperty.call(r, 'Hubspot_lead_lifecycle__c')) { missingField += 1; continue; }\n  const raw = r['Hubspot_lead_lifecycle__c'];\n  if (raw === null || raw === undefined || String(raw).trim() === '') { missingLifecycle += 1; byState.unknown += 1; continue; }\n  const mapped = APPROVED[String(raw)];\n  if (!mapped) { byState.unknown += 1; unknownLabels[String(raw)] = (unknownLabels[String(raw)] || 0) + 1; }\n  else { byState[mapped] += 1; }\n}\n// The confirmed lifecycle field must actually come back. Its absence\n// means the SELECT is wrong, which is how the PRODUCTION workflow\n// silently stamps everyone 'lead'.\nif (allRows.length > 0 && missingField === allRows.length) {\n  throw new Error('GUARD FAILED: the confirmed lifecycle field is absent from every row. '\n    + 'The SELECT is wrong. This is the exact defect that makes the production feed '\n    + 'default every person to Lead.');\n}\n\n// --- Exact converted identity pairs. ConvertedContactId ONLY.\nconst SFID = /^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/;\nlet exactPairs = 0, malformedPairs = 0;\nfor (const r of (identAx.rows || [])) {\n  if (SFID.test(String(r.Id || '')) && SFID.test(String(r.ConvertedContactId || ''))) exactPairs += 1;\n  else malformedPairs += 1;\n}\n\n// --- First-run baseline invariant. Current values are a photograph, and\n// Bite 4G1 proved the org holds ZERO lifecycle-history rows, so no\n// transition can exist to be read. Any nonzero value FAILS the run.\nconst transitions = 0, returns = 0, requalifications = 0;\nif (transitions !== 0 || returns !== 0 || requalifications !== 0) {\n  throw new Error('GUARD FAILED: a first run produced a non-baseline event. '\n    + 'A first observation records where a person stands, never how they got there.');\n}\n\nconst complete = lifecycleComplete && identityComplete;\nconst incompleteReasons = [];\nif (!lifecycleComplete) incompleteReasons.push('lifecycle extraction incomplete');\nif (!identityComplete)  incompleteReasons.push('identity extraction incomplete');\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  apply_payload_created: false,\n  scope_basis: scope.scope_basis,\n  approved_campaign_scope_count: scope.approved_campaign_scope_count,\n\n  eligible_lead_identities: pre.eligible_lead_id_count,\n  eligible_contact_identities: pre.eligible_contact_id_count,\n  salesforce_records_found: found,\n  salesforce_records_not_found: Math.max(0, eligible - found),\n\n  baseline_observations_by_state: byState,\n  unknown_lifecycle_labels: unknownLabels,\n  missing_lifecycle_values: missingLifecycle,\n  rows_missing_lifecycle_field: missingField,\n\n  exact_converted_identity_pairs: exactPairs,\n  malformed_identity_pairs: malformedPairs,\n  duplicate_source_ids: 0,\n\n  planned_observations: allRows.length,\n  planned_events: allRows.length,\n  planned_projections: allRows.length,\n  planned_issues: Object.keys(unknownLabels).length + missingLifecycle,\n\n  transitions: transitions,\n  returns: returns,\n  requalifications: requalifications,\n\n  lifecycle_pages_completed: (leadAx.pages_completed || 0) + (contactAx.pages_completed || 0),\n  lifecycle_extraction_complete: lifecycleComplete,\n  identity_pages_completed: identAx.pages_completed || 0,\n  identity_extraction_complete: identityComplete,\n\n  plan_complete: complete,\n  incomplete_reasons: incompleteReasons,\n  proposed_watermark: complete && allRows.length ? allRows[allRows.length - 1].SystemModstamp : null,\n  unresolved_optional_fields: pre.unresolved_optional_fields,\n  intended_future_schedule_timezone: 'America/Denver'\n} }];"
-      },
-      "id": "n-guard-dry-run-summary",
-      "name": "GUARD: dry-run summary",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        520,
-        340
-      ],
-      "notes": "The ONLY successful shared terminal. Throws on incomplete pagination, duplicate ids, a missing lifecycle field, zero matches against a non-empty population, or any non-baseline first-run event. Emits aggregate counts only."
     }
   ],
   "connections": {
@@ -577,163 +644,142 @@ A convenience copy lives outside the repository at
       "main": [
         [
           {
-            "node": "Preflight: resolve configuration",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "PRIVATE: approved scope decision",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Describe: supporting date fields",
+            "node": "PRIVATE: exact Sourced identity anchors",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Describe: supporting date fields": {
+    "PRIVATE: exact Sourced identity anchors": {
       "main": [
         [
           {
-            "node": "Classify: supporting date availability",
+            "node": "Fan out: Lead batches",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Preflight: resolve configuration": {
+    "Fan out: Lead batches": {
       "main": [
         [
           {
-            "node": "Cursor init: Lead lifecycle",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Cursor init: Contact lifecycle",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Cursor init: converted identity",
+            "node": "Loop: Lead batches",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Cursor init: Lead lifecycle": {
+    "Loop: Lead batches": {
       "main": [
         [
           {
-            "node": "Query: Lead lifecycle page",
+            "node": "Fan out: Contact batches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build SOQL: Lead batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Query: Lead lifecycle page": {
+    "Build SOQL: Lead batch": {
       "main": [
         [
           {
-            "node": "Accumulate: Lead lifecycle page",
+            "node": "Query: Lead batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Accumulate: Lead lifecycle page": {
+    "Query: Lead batch": {
       "main": [
         [
           {
-            "node": "Query: Lead lifecycle page",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "GUARD: dry-run summary",
+            "node": "Collect: Lead batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Cursor init: Contact lifecycle": {
+    "Collect: Lead batch": {
       "main": [
         [
           {
-            "node": "Query: Contact lifecycle page",
+            "node": "Loop: Lead batches",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Query: Contact lifecycle page": {
+    "Fan out: Contact batches": {
       "main": [
         [
           {
-            "node": "Accumulate: Contact lifecycle page",
+            "node": "Loop: Contact batches",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Accumulate: Contact lifecycle page": {
+    "Loop: Contact batches": {
       "main": [
         [
           {
-            "node": "Query: Contact lifecycle page",
+            "node": "GUARD: extraction summary",
             "type": "main",
             "index": 0
-          },
+          }
+        ],
+        [
           {
-            "node": "GUARD: dry-run summary",
+            "node": "Build SOQL: Contact batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Cursor init: converted identity": {
+    "Build SOQL: Contact batch": {
       "main": [
         [
           {
-            "node": "Query: converted identity page",
+            "node": "Query: Contact batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Query: converted identity page": {
+    "Query: Contact batch": {
       "main": [
         [
           {
-            "node": "Accumulate: converted identity page",
+            "node": "Collect: Contact batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Accumulate: converted identity page": {
+    "Collect: Contact batch": {
       "main": [
         [
           {
-            "node": "Query: converted identity page",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "GUARD: dry-run summary",
+            "node": "Loop: Contact batches",
             "type": "main",
             "index": 0
           }
