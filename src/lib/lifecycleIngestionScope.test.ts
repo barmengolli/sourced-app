@@ -721,13 +721,13 @@ describe('corrected dry-run workflow', () => {
       expect(t.some((x) => x.startsWith('Loop:'))).toBe(true);
       expect(t).not.toContain('GUARD: extraction summary');
     }
-    // DEFECT 3: each collector must read the CURRENT loop item. A reset
-    // or hardcoded request object would silently report batch 0 forever
-    // and lose the per-batch requested counts.
+    // DEFECT 3: each collector must read the CURRENT loop item. It now
+    // does so by EXPLICIT run index rather than the implicit latest-run
+    // default, which is what let the package see 1 of 16 Contact batches.
     expect(js('Collect: Lead batch'))
-      .toContain("const req = $('Loop: Lead batches').first().json;");
+      .toContain("const reqItems = $('Loop: Lead batches').all(0, runIndex);");
     expect(js('Collect: Contact batch'))
-      .toContain("const req = $('Loop: Contact batches').first().json;");
+      .toContain("const reqItems = $('Loop: Contact batches').all(0, runIndex);");
     for (const c of ['Collect: Lead batch', 'Collect: Contact batch']) {
       expect(js(c), c).toContain('req.batch_index');
       expect(js(c), c).toContain('(req.ids || []).length');
@@ -966,8 +966,12 @@ describe('execution readiness', () => {
 
   it('collects every Lead and Contact result exactly once', () => {
     const code = js(PKG);
-    expect(code).toContain("$('Collect: Lead batch').all()");
-    expect(code).toContain("$('Collect: Contact batch').all()");
+    // Run-indexed access ONLY. A bare .all() would return just the
+    // latest run and silently drop 15 of 16 Contact batches.
+    expect(code).toContain("$(nodeName).all(0, runIndex)");
+    expect(code).not.toMatch(/\$\('Collect: (Lead|Contact) batch'\)\.all\(\)/);
+    expect(code).toContain("collectRuns('Collect: Lead batch'");
+    expect(code).toContain("collectRuns('Collect: Contact batch'");
     // Deduplicated by Id, and a within-batch duplicate fails loudly.
     expect(code).toContain('byId.set(id, r)');
     expect(code).toContain('PACKAGE FAILED');
@@ -1015,6 +1019,237 @@ describe('execution readiness', () => {
     expect(evalSrc).toContain('proposed_watermark');
     // observedAt is the observation instant, never an effective date.
     expect(evalSrc).not.toMatch(/effectiveDate:\s*observedAt/);
+  });
+});
+
+// --- run-index aggregation: EXECUTES the real package code -----------------
+
+describe('package node run-index aggregation (behavioral)', () => {
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'), 'utf8');
+  const wf = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    nodes: Array<Record<string, unknown>>;
+  };
+  const PKG = 'PRIVATE: evaluator extraction package - DO NOT SHARE';
+  const pkgCode = String(
+    (wf.nodes.find((n) => String(n.name) === PKG)!.parameters as Record<string, unknown>).jsCode,
+  );
+
+  type Item = { json: Record<string, unknown> };
+  interface StubOpts {
+    leadRuns?: Array<Item[] | 'MISSING'>;
+    contactRuns?: Array<Item[] | 'MISSING'>;
+    leadExpected?: number;
+    contactExpected?: number;
+    // When true, the stub throws if a Collect node is read WITHOUT a run
+    // index, proving the package never falls back to a bare .all().
+    forbidBareAll?: boolean;
+  }
+
+  const collection = (batchIndex: number, rows: Array<Record<string, unknown>>): Item[] => [
+    { json: { object: 'x', batch_index: batchIndex, run_index: batchIndex,
+              requested: rows.length, returned: rows.length, rows } },
+  ];
+
+  // Executes the REAL package source against a stubbed n8n $ interface.
+  function runPackage(opts: StubOpts): Record<string, unknown> {
+    const leadExpected = opts.leadExpected ?? 1;
+    const contactExpected = opts.contactExpected ?? 16;
+    const leadRuns = opts.leadRuns
+      ?? [collection(0, [{ Id: 'SYNTHLEAD00001A' }])];
+    const contactRuns = opts.contactRuns
+      ?? Array.from({ length: contactExpected }, (_, i) =>
+        collection(i, [{ Id: `SYNTHCONT${String(i).padStart(6, '0')}` }]));
+
+    const anchors = {
+      lead_batches_expected: leadExpected,
+      contact_batches_expected: contactExpected,
+      unique_lead_ids: 131,
+      unique_contact_ids: 3061,
+      _private_anchors: [],
+    };
+
+    const $ = (name: string) => ({
+      first: () => {
+        if (name === 'PRIVATE: exact Sourced identity anchors') return { json: anchors };
+        throw new Error(`unexpected first() on ${name}`);
+      },
+      all: (branch?: number, runIndex?: number) => {
+        if (name.startsWith('Collect:')) {
+          if (runIndex === undefined) {
+            if (opts.forbidBareAll) {
+              throw new Error('BARE_ALL_FORBIDDEN: ' + name);
+            }
+            // n8n semantics: no runIndex returns the LATEST run only.
+            const runs = name.includes('Lead') ? leadRuns : contactRuns;
+            const last = runs[runs.length - 1];
+            return last === 'MISSING' ? [] : last;
+          }
+          const runs = name.includes('Lead') ? leadRuns : contactRuns;
+          const r = runs[runIndex];
+          if (r === undefined || r === 'MISSING') {
+            throw new Error(`no run ${runIndex} for ${name}`);
+          }
+          return r;
+        }
+        throw new Error(`unexpected all() on ${name}`);
+      },
+    });
+
+    const fn = new Function('$', `${pkgCode}`) as (d: typeof $) => Item[];
+    return fn($)[0].json;
+  }
+
+  it('packages all 1 Lead and all 16 Contact runs', () => {
+    const out = runPackage({ forbidBareAll: true });
+    expect(out.leadBatchesExpected).toBe(1);
+    expect(out.leadBatchesCompleted).toBe(1);
+    expect(out.contactBatchesExpected).toBe(16);
+    expect(out.contactBatchesCompleted).toBe(16);
+    expect((out.leads as unknown[]).length).toBe(1);
+    // Every one of the 16 Contact runs contributed exactly one row.
+    expect((out.contacts as unknown[]).length).toBe(16);
+    expect(typeof out.executedAt).toBe('string');
+  });
+
+  it('never reads a Collect node with a bare .all()', () => {
+    // The stub throws on any bare access; a clean run proves every read
+    // was run-indexed. This is the exact defect that produced "1/16".
+    expect(() => runPackage({ forbidBareAll: true })).not.toThrow();
+    expect(pkgCode).not.toMatch(/\$\('Collect: (Lead|Contact) batch'\)\.all\(\)/);
+    expect(pkgCode).toContain('.all(0, runIndex)');
+  });
+
+  it('reproduces the live 1/16 failure under bare .all() semantics', () => {
+    // Simulate the OLD behavior: only the latest run is visible.
+    const latestOnly = pkgCode.replace('$(nodeName).all(0, runIndex)', '$(nodeName).all()');
+    const runs = Array.from({ length: 16 }, (_, i) => collection(i, [{ Id: 'X' }]));
+    const $ = (name: string) => ({
+      first: () => ({ json: { lead_batches_expected: 1, contact_batches_expected: 16,
+                              unique_lead_ids: 131, unique_contact_ids: 3061, _private_anchors: [] } }),
+      all: (_b?: number, r?: number) => {
+        void r;
+        return name.includes('Lead') ? collection(0, [{ Id: 'Y' }]) : runs[runs.length - 1];
+      },
+    });
+    const fn = new Function('$', latestOnly) as (d: typeof $) => Item[];
+    // Under the old semantics every run resolves to batch 15, so the
+    // duplicate guard fires: the extraction is correctly refused.
+    expect(() => fn($)).toThrow(/PACKAGE FAILED/);
+  });
+
+  it('fails when an expected run is missing (throws)', () => {
+    const contactRuns: Array<Item[] | 'MISSING'> =
+      Array.from({ length: 16 }, (_, i) => collection(i, [{ Id: 'C' }]));
+    contactRuns[7] = 'MISSING';
+    expect(() => runPackage({ contactRuns })).toThrow(/Contact run 7 is missing|Refusing to package/);
+  });
+
+  it('fails when a run returns an EMPTY array rather than throwing', () => {
+    // n8n may hand back an empty array instead of raising. Skipping such
+    // a run would let an incomplete extraction look complete.
+    const contactRuns: Array<Item[]> =
+      Array.from({ length: 16 }, (_, i) => (i === 4 ? [] : collection(i, [{ Id: 'C' }])));
+    expect(() => runPackage({ contactRuns })).toThrow(/run 4 returned no collection item/);
+  });
+
+  it('fails when the collected set omits an expected index', () => {
+    // 16 runs, all present and unique, but index 15 never appears: the
+    // set {0..15} is incomplete even though the COUNT looks right.
+    const contactRuns = Array.from({ length: 16 }, (_, i) =>
+      collection(i === 15 ? 14 : i, [{ Id: 'C' }]));
+    // Caught either as a duplicate or as a never-collected index; both
+    // refuse to package.
+    expect(() => runPackage({ contactRuns })).toThrow(/PACKAGE FAILED/);
+  });
+
+  it('fails on a duplicated batch index', () => {
+    const contactRuns = Array.from({ length: 16 }, (_, i) =>
+      collection(i === 9 ? 8 : i, [{ Id: 'C' }]));
+    expect(() => runPackage({ contactRuns })).toThrow(/appears more than once/);
+  });
+
+  it('fails on an out-of-range batch index', () => {
+    const contactRuns = Array.from({ length: 16 }, (_, i) =>
+      collection(i === 3 ? 99 : i, [{ Id: 'C' }]));
+    expect(() => runPackage({ contactRuns })).toThrow(/outside the expected range/);
+  });
+
+  it('fails when two runs return the same batch', () => {
+    const contactRuns = Array.from({ length: 16 }, (_, i) =>
+      collection(i === 15 ? 0 : i, [{ Id: 'C' }]));
+    // A duplicate must never satisfy the expected count.
+    expect(() => runPackage({ contactRuns })).toThrow(/appears more than once/);
+  });
+
+  it('fails when a Collect run returns more than one item', () => {
+    const contactRuns: Array<Item[]> = Array.from({ length: 16 }, (_, i) =>
+      collection(i, [{ Id: 'C' }]));
+    contactRuns[2] = [...collection(2, [{ Id: 'C' }]), ...collection(2, [{ Id: 'D' }])];
+    expect(() => runPackage({ contactRuns })).toThrow(/returned 2 items; expected exactly 1/);
+  });
+
+  it('fails on a non-integer batch index', () => {
+    const contactRuns = Array.from({ length: 16 }, (_, i) =>
+      i === 5
+        ? [{ json: { batch_index: 'five', rows: [] } }] as Item[]
+        : collection(i, [{ Id: 'C' }]));
+    expect(() => runPackage({ contactRuns })).toThrow(/non-integer batch_index/);
+  });
+
+  it('validates Lead and Contact independently', () => {
+    // Complete Contact sweep, broken Lead sweep.
+    const leadRuns: Array<Item[] | 'MISSING'> = ['MISSING'];
+    expect(() => runPackage({ leadRuns })).toThrow(/Lead run 0/);
+  });
+
+  it.each(['Collect: Lead batch', 'Collect: Contact batch'])(
+    '%s EXECUTES against a stubbed run and cross-checks position', (nodeName) => {
+    const collectCode = String((wf.nodes.find(
+      (n) => String(n.name) === nodeName)!
+      .parameters as Record<string, unknown>).jsCode);
+
+    const makeStub = (loopBatchIndex: number, loopItems = 1) => (name: string) => ({
+      all: (_b?: number, runIndex?: number) => {
+        expect(runIndex, `${name} was read without a run index`).toBeDefined();
+        if (name.startsWith('Query:')) return [{ json: { Id: 'SYNTHCONT00001A' } }];
+        if (name.startsWith('Loop:')) {
+          return Array.from({ length: loopItems }, () =>
+            ({ json: { batch_index: loopBatchIndex, ids: ['SYNTHCONT00001A'] } }));
+        }
+        throw new Error(`unexpected all() on ${name}`);
+      },
+    });
+    const exec = (runIndex: number, loopBatchIndex: number, loopItems = 1) => {
+      const fn = new Function('$', '$runIndex', collectCode) as (
+        d: ReturnType<typeof makeStub>, r: number) => Array<{ json: Record<string, unknown> }>;
+      return fn(makeStub(loopBatchIndex, loopItems), runIndex)[0].json;
+    };
+
+    // Happy path: run 7 collecting batch 7.
+    const ok = exec(7, 7);
+    expect(ok.batch_index).toBe(7);
+    expect(ok.run_index).toBe(7);
+
+    // The collector must NOT accept a loop item from a different batch.
+    expect(() => exec(7, 3)).toThrow(/loop and the collector disagree about position/);
+    // Nor a run producing more than one loop item.
+    expect(() => exec(7, 7, 2)).toThrow(/expected exactly 1/);
+  });
+
+  it('collectors read their own run index and cross-check position', () => {
+    const collectCode = (name: string) =>
+      String((wf.nodes.find((n) => String(n.name) === name)!
+        .parameters as Record<string, unknown>).jsCode);
+    for (const n of ['Collect: Lead batch', 'Collect: Contact batch']) {
+      const code = collectCode(n);
+      expect(code, n).toContain('const runIndex = $runIndex;');
+      expect(code, n).toContain(".all(0, runIndex)");
+      // No bare .first() on the loop node.
+      expect(code, n).not.toMatch(/\$\('Loop: (Lead|Contact) batches'\)\.first\(\)/);
+      // The loop and the collector must agree about position.
+      expect(code, n).toContain('req.batch_index !== runIndex');
+    }
   });
 });
 
