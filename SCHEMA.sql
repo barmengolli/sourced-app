@@ -1600,8 +1600,15 @@ ALTER TABLE sf_lifecycle_issues         ENABLE ROW LEVEL SECURITY;
 -- Bite 4G2B1: lifecycle observation ledger, atomic apply boundary
 -- (docs/lead-lifecycle-atomic-apply.md). Added by
 -- migrations/2026-08-04_lifecycle_observation_apply_fn.sql.
--- STATUS: PENDING. NOT YET APPLIED to production. This block documents
--- the intended shape once that migration is applied.
+-- STATUS: Applied manually to production on 2026-08-05. Verified through
+-- direct catalog inspection: all seven sf_lifecycle_* tables exist with
+-- RLS enabled, zero policies, and no supabase_realtime membership; all
+-- three idempotency key columns and unique constraints exist; both
+-- lifecycle functions are SECURITY DEFINER with search_path=pg_catalog
+-- and executable only by service_role, not PUBLIC, anon, or
+-- authenticated; both append-only triggers are enabled. All seven tables
+-- contained zero rows, so this created structure only and imported no
+-- lifecycle data. Bite 4G2B2 ingestion remains unstarted and inactive.
 --
 -- Three idempotency constraints the original 4G2A schema lacked, plus one
 -- restricted function. The event key is the load-bearing one: without it
