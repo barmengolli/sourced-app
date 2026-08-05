@@ -454,9 +454,12 @@ describe('dry-run workflow safety', () => {
     for (const n of sf) {
       const p = n.parameters as Record<string, unknown>;
       expect(p.resource).toBe('search');
-      // Query amplification guard.
-      expect(n.executeOnce).toBe(true);
     }
+    // Query amplification guard applies to SINGLE-SHOT nodes only. The
+    // paged query nodes must NOT be executeOnce, or the loop would be
+    // pinned to page 1. Covered precisely in the pagination suite.
+    const singleShot = sf.filter((n) => String(n.name).startsWith('Describe'));
+    for (const n of singleShot) expect(n.executeOnce, String(n.name)).toBe(true);
     expect(raw).not.toMatch(/"operation"\s*:\s*"(create|update|upsert|delete)"/i);
   });
 
@@ -485,10 +488,19 @@ describe('dry-run workflow safety', () => {
     expect(guard).toBeTruthy();
     // GUARD has no outgoing connection: nothing succeeds after it.
     expect(Object.keys(template.connections)).not.toContain(String(guard!.name));
-    // It fails loudly on each required condition.
+    // It fails loudly on each required condition. Duplicate-id and
+    // ordering failures are raised per axis in the Accumulate nodes, so
+    // a bad page throws before GUARD ever runs.
     const js = String((guard!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('GUARD FAILED: duplicate Salesforce Ids');
-    expect(js).toContain('GUARD FAILED: rows are not strictly ordered');
+    expect(js).toContain('GUARD FAILED');
+    const accJs = template.nodes
+      .filter((n) => String(n.name).startsWith('Accumulate'))
+      .map((n) => String((n.parameters as Record<string, unknown>).jsCode));
+    expect(accJs.length).toBe(3);
+    for (const a of accJs) {
+      expect(a).toContain('PAGINATION FAILED');
+      expect(a).toContain('duplicate Salesforce Id');
+    }
   });
 
   it('fails loudly on placeholder configuration before querying', () => {
@@ -500,7 +512,12 @@ describe('dry-run workflow safety', () => {
   });
 
   it('orders every extraction query by SystemModstamp then Id', () => {
-    const sf = template.nodes.filter((n) => String(n.type).includes('salesforce'));
+    // Paged EXTRACTION queries only. The FieldDefinition describe is
+    // metadata, has no SystemModstamp, and is not paginated.
+    const sf = template.nodes.filter(
+      (n) => String(n.type).includes('salesforce') && String(n.name).startsWith('Query:'),
+    );
+    expect(sf.length).toBe(3);
     for (const n of sf) {
       const q = String((n.parameters as Record<string, unknown>).query);
       expect(q, String(n.name)).toContain('ORDER BY SystemModstamp ASC, Id ASC');
@@ -537,10 +554,318 @@ describe('dry-run workflow safety', () => {
   it('tracks lifecycle and identity truncation independently', () => {
     const guard = template.nodes.find((n) => String(n.name).startsWith('GUARD'));
     const js = String((guard!.parameters as Record<string, unknown>).jsCode);
-    expect(js).toContain('lifecycle_possibly_truncated');
-    expect(js).toContain('identity_possibly_truncated');
+    expect(js).toContain('lifecycle_extraction_complete');
+    expect(js).toContain('identity_extraction_complete');
     // An incomplete run proposes no watermark.
-    expect(js).toContain('proposed_watermark: complete ?');
+    expect(js).toMatch(/proposed_watermark: complete && allRows\.length \?/);
+  });
+});
+
+// --- locked business rule: identity governs observation --------------------
+
+describe('locked rule: campaigns govern admission, identity governs observation', () => {
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
+    'utf8',
+  );
+  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    nodes: Array<Record<string, unknown>>;
+  };
+  const nodeJs = (prefix: string) => {
+    const n = template.nodes.find((x) => String(x.name).startsWith(prefix));
+    expect(n, `${prefix} node missing`).toBeTruthy();
+    return String((n!.parameters as Record<string, unknown>).jsCode ?? '');
+  };
+
+  it('observes an anchored person regardless of campaign membership', () => {
+    // The scope resolver takes NO campaign input at all, so campaign
+    // membership cannot reduce the observable population by construction.
+    const src = readFileSync(resolve(process.cwd(), 'src/lib/lifecycleIngestionScope.ts'), 'utf8')
+      .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(src.toLowerCase()).not.toContain('campaign');
+
+    const r = resolveIngestionScope(scopeInput({ sourcedAnchors: [anchor({ sfdcLeadId: L1 })] }));
+    expect(r.proposedObservationTargets.Lead).toBe(1);
+  });
+
+  it('states in the workflow that campaign scope is admission-only', () => {
+    const js = nodeJs('PRIVATE');
+    expect(js).toContain('campaign_scope_governs');
+    expect(js).toContain('admission_only');
+    expect(js).toContain('scope_basis');
+    // No campaign scope approved yet.
+    expect(js).toContain('APPROVED_CAMPAIGN_SCOPE = []');
+  });
+
+  it('routes conflicting identity evidence to review and changes nothing', () => {
+    const r = resolveIngestionScope(
+      scopeInput({
+        sourcedAnchors: [
+          anchor({ sourcedLeadId: 'sourced-1', sfdcLeadId: L1 }),
+          anchor({ sourcedLeadId: 'sourced-2', sfdcLeadId: L1 }),
+        ],
+      }),
+    );
+    expect(r.issues.some((i) => i.kind === 'identity_claimed_by_two_people')).toBe(true);
+    // The first claimant is retained; nothing is merged or rewritten.
+    expect(r.proposedObservationTargets.Lead).toBe(1);
+  });
+
+  it('counts unobservable people separately, never as zero', () => {
+    const r = resolveIngestionScope(
+      scopeInput({
+        sourcedAnchors: [
+          anchor({ sfdcLeadId: L1 }),
+          anchor({ sourcedLeadId: 'sourced-2', sfdcLeadId: null, sfdcContactId: null }),
+        ],
+      }),
+    );
+    expect(r.populations.anchorsWithNoIdentity).toBe(1);
+    expect(r.proposedObservationTargets.Lead).toBe(1);
+  });
+});
+
+// --- coverage SQL safety ---------------------------------------------------
+
+describe('aggregate coverage SQL', () => {
+  const SQL = readFileSync(resolve(process.cwd(), 'docs/lifecycle-identity-coverage.sql'), 'utf8');
+  const code = SQL.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+
+  it('is read-only', () => {
+    for (const w of ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'TRUNCATE', 'ALTER', 'GRANT', 'CREATE']) {
+      expect(code.toUpperCase(), w).not.toContain(w + ' ');
+    }
+  });
+
+  it('selects no row-level identifier into the result', () => {
+    // The final projection is (metric, value) only. Identifier columns
+    // appear solely inside aggregate predicates, never as output.
+    expect(code).toMatch(/SELECT metric, value FROM/);
+    expect(code).not.toMatch(/SELECT[^;]*\bemail\b/i);
+    expect(code).not.toMatch(/SELECT[^;]*first_name|last_name/i);
+  });
+
+  it('separates blank strings from NULL', () => {
+    expect(code).toContain('lead_id_blank');
+    expect(code).toContain('contact_id_blank');
+    expect(code).toMatch(/12_lead_id_blank_string/);
+  });
+
+  it('reports eligible and unobservable as distinct decision numbers', () => {
+    expect(code).toContain('16_eligible_identity_anchored');
+    expect(code).toContain('17_unobservable_no_exact_identity');
+  });
+
+  it('validates Salesforce id shape rather than coercing it', () => {
+    expect(code).toContain("~ '^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$'");
+    expect(code).toContain('14_lead_id_malformed');
+  });
+});
+
+// --- real multi-page pagination in the workflow ----------------------------
+
+describe('workflow pagination is genuinely multi-page', () => {
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
+    'utf8',
+  );
+  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    nodes: Array<Record<string, unknown>>;
+    connections: Record<string, { main: Array<Array<{ node: string }>> }>;
+  };
+  const queryNodes = template.nodes.filter((n) => String(n.name).startsWith('Query:'));
+  const accNodes = template.nodes.filter((n) => String(n.name).startsWith('Accumulate:'));
+
+  it('loops each axis back to its own query node', () => {
+    expect(accNodes.length).toBe(3);
+    for (const acc of accNodes) {
+      const targets = template.connections[String(acc.name)].main[0].map((c) => c.node);
+      // Back to the query (another page) AND forward to GUARD (done).
+      expect(targets.some((t) => t.startsWith('Query:')), String(acc.name)).toBe(true);
+      expect(targets).toContain('GUARD: dry-run summary');
+    }
+  });
+
+  it('does NOT set executeOnce on paged queries', () => {
+    // executeOnce here would pin the loop to page 1 and silently
+    // truncate, which is the exact defect this rebuild removed.
+    expect(queryNodes.length).toBe(3);
+    for (const q of queryNodes) {
+      expect(q.executeOnce, String(q.name)).toBe(false);
+    }
+  });
+
+  it('keeps executeOnce on genuinely single-shot nodes', () => {
+    for (const name of ['Preflight', 'PRIVATE', 'Cursor init', 'Describe']) {
+      const n = template.nodes.filter((x) => String(x.name).startsWith(name));
+      expect(n.length, name).toBeGreaterThan(0);
+      for (const x of n) expect(x.executeOnce, String(x.name)).toBe(true);
+    }
+  });
+
+  it('bounds every page query by the composite cursor', () => {
+    for (const q of queryNodes) {
+      const sql = String((q.parameters as Record<string, unknown>).query);
+      expect(sql, String(q.name)).toContain('SystemModstamp > {{ $json.cursor_ts }}');
+      expect(sql).toContain('Id > {{ $json.cursor_id }}');
+      expect(sql).toContain('ORDER BY SystemModstamp ASC, Id ASC');
+      expect(sql).toMatch(/LIMIT 200/);
+    }
+  });
+
+  it('never attempts the epoch scan as one unbounded operation', () => {
+    const pre = template.nodes.find((n) => String(n.name).startsWith('Preflight'));
+    const js = String((pre!.parameters as Record<string, unknown>).jsCode);
+    expect(js).toContain('page_size: 200');
+    expect(js).toContain('NEVER as one unbounded');
+    // No query requests everything at once.
+    for (const q of queryNodes) {
+      const sql = String((q.parameters as Record<string, unknown>).query);
+      expect(sql).not.toMatch(/returnAll/i);
+    }
+  });
+
+  it('fails loudly on duplicate ids and broken ordering across pages', () => {
+    for (const acc of accNodes) {
+      const js = String((acc.parameters as Record<string, unknown>).jsCode);
+      expect(js, String(acc.name)).toContain('PAGINATION FAILED');
+      expect(js).toContain('duplicate Salesforce Id');
+      expect(js).toContain('out of (SystemModstamp, Id) order');
+      // Duplicates are never silently deduplicated.
+      expect(js).toContain('deduplicating would hide it');
+    }
+  });
+
+  it('continues paging until a short page proves exhaustion', () => {
+    for (const acc of accNodes) {
+      const js = String((acc.parameters as Record<string, unknown>).jsCode);
+      expect(js).toContain('page.length < state.page_size');
+      expect(js).toContain('has_more');
+    }
+  });
+});
+
+// --- hardened GUARD --------------------------------------------------------
+
+describe('GUARD fail-fast checks', () => {
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
+    'utf8',
+  );
+  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    nodes: Array<Record<string, unknown>>;
+  };
+  const guardJs = String(
+    (template.nodes.find((n) => String(n.name).startsWith('GUARD'))!.parameters as Record<string, unknown>).jsCode,
+  );
+  const preJs = String(
+    (template.nodes.find((n) => String(n.name).startsWith('Preflight'))!.parameters as Record<string, unknown>).jsCode,
+  );
+
+  it('fails when no identity population is supplied', () => {
+    expect(preJs).toContain('no identity population supplied');
+    expect(preJs).toContain('never falls back to an org-wide scan');
+  });
+
+  it('fails on an empty population or a malformed private input', () => {
+    expect(preJs).toContain('identity population is empty');
+    expect(preJs).toContain('malformed Salesforce id');
+    expect(preJs).toContain('No id is coerced into shape');
+  });
+
+  it('fails on zero matches when eligible identities were supplied', () => {
+    expect(guardJs).toContain('ZERO Salesforce records matched');
+  });
+
+  it('fails when the confirmed lifecycle field is absent from every row', () => {
+    expect(guardJs).toContain('lifecycle field is absent from every row');
+    expect(guardJs).toContain('default every person to Lead');
+  });
+
+  it('fails on any non-baseline event in a first run', () => {
+    expect(guardJs).toContain('a first run produced a non-baseline event');
+    expect(guardJs).toMatch(/transitions !== 0 \|\| returns !== 0 \|\| requalifications !== 0/);
+  });
+
+  it('reports lifecycle and identity completeness independently', () => {
+    expect(guardJs).toContain('lifecycle_extraction_complete');
+    expect(guardJs).toContain('identity_extraction_complete');
+    expect(guardJs).toMatch(/const complete = lifecycleComplete && identityComplete/);
+    // An incomplete run proposes no watermark.
+    expect(guardJs).toMatch(/proposed_watermark: complete && allRows\.length \?/);
+  });
+
+  it('emits the required aggregate fields and nothing identifying', () => {
+    for (const f of [
+      'dry_run', 'writes_attempted', 'apply_payload_created',
+      'baseline_observations_by_state', 'planned_observations', 'planned_events',
+      'planned_projections', 'planned_issues', 'transitions', 'returns',
+      'requalifications', 'salesforce_records_found', 'salesforce_records_not_found',
+      'exact_converted_identity_pairs', 'proposed_watermark',
+    ]) {
+      expect(guardJs, f).toContain(f);
+    }
+    // No identifier or campaign name ever reaches GUARD output.
+    expect(guardJs).not.toMatch(/\b(001|003|00Q|005|006)[A-Za-z0-9]{12}\b/);
+    expect(guardJs).not.toMatch(/campaign_name|Campaign\.Name/i);
+    expect(guardJs).not.toMatch(/\bemail\b/i);
+  });
+});
+
+// --- supporting date fields ------------------------------------------------
+
+describe('supporting date fields are candidates, never assumptions', () => {
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'),
+    'utf8',
+  );
+  const template = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    nodes: Array<Record<string, unknown>>;
+  };
+
+  it('checks both candidate names on BOTH objects, read-only', () => {
+    const describe_ = template.nodes.find((n) => String(n.name).startsWith('Describe'));
+    expect(describe_).toBeTruthy();
+    const p = describe_!.parameters as Record<string, unknown>;
+    expect(p.resource).toBe('search');
+    const q = String(p.query);
+    expect(q).toContain('FieldDefinition');
+    expect(q).toContain('Became_a_Lead_Date__c');
+    expect(q).toContain('Became_a_Marketing_Qualified_Lead_Date__c');
+    expect(q).toContain("IN ('Lead','Contact')");
+  });
+
+  it('reports absence explicitly and continues', () => {
+    const cls = template.nodes.find((n) => String(n.name).startsWith('Classify'));
+    const js = String((cls!.parameters as Record<string, unknown>).jsCode);
+    expect(js).toContain('supporting_date_fields_absent');
+    expect(js).toContain('Never creates a transition and never blocks the run');
+    // No alternative name is guessed.
+    expect(js).toContain('CANDIDATES');
+  });
+
+  it('cannot create a transition even when both dates are present', () => {
+    // Proven through the REAL planner, not by inspecting the workflow.
+    const RUN_AT = '2026-08-05T03:00:00.000Z';
+    const p = planLifecycleObservations({
+      rows: [{
+        sourceObject: 'Lead', sourceRecordId: L1, rawLifecycleValue: 'Lead',
+        sourceModifiedAt: 'T1', observedAt: RUN_AT,
+        becameLeadDate: '2026-01-05', becameMqlDate: '2026-03-01',
+      }],
+      identityPairs: [],
+      prior: { aliasToPerson: {}, persons: {} },
+      config: {
+        syncRunId: 'SYNTH-DATES', runStartedAt: RUN_AT,
+        lifecyclePages: { pagesExpected: 1, pagesCompleted: 1, failed: false },
+        identityPages: { pagesExpected: 1, pagesCompleted: 1, failed: false },
+        proposedWatermarkSystemModstamp: 'T1',
+      },
+    });
+    expect(p.diagnostics.leadToMql).toBe(0);
+    const events = p.operations.filter((o) => o.op === 'lifecycle_event');
+    expect(events).toHaveLength(1);
+    expect(events[0].op === 'lifecycle_event' && events[0].eventKind).toBe('baseline');
   });
 });
 
