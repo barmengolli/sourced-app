@@ -352,13 +352,43 @@ describe('atomic-apply migration safety (static SQL)', () => {
   const SQL = readFileSync(FILE, 'utf8');
   const code = SQL.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
 
-  it('is PENDING and not yet applied', () => {
-    expect(SQL).toContain('STATUS: PENDING. NOT YET APPLIED');
+  // Applied manually to production on 2026-08-05 and verified through
+  // direct catalog inspection. The guard is that every status artifact
+  // stays ACCURATE and mutually consistent, not that it stays PENDING.
+  // Each assertion is scoped to the 4G2B1 row or section so stale wording
+  // from unrelated historical migrations cannot fail it.
+  it('records the applied status consistently across every artifact', () => {
+    // 1. The migration header.
+    expect(SQL).toContain('STATUS: Applied manually to production on 2026-08-05');
+    expect(SQL).toContain('imported no');
+    expect(SQL).toContain('Bite 4G2B2 ingestion remains unstarted');
+    expect(SQL).not.toContain('STATUS: PENDING');
+    expect(SQL).not.toContain('NOT YET APPLIED');
+
+    // 2. The ledger row, isolated to this migration's own line.
     const readme = readFileSync(resolve(process.cwd(), 'migrations/README.md'), 'utf8');
-    const rowLine = readme.split('\n').find((l) => l.includes('2026-08-04_lifecycle_observation_apply_fn.sql'))!;
+    const rowLine = readme
+      .split('\n')
+      .find((l) => l.includes('2026-08-04_lifecycle_observation_apply_fn.sql'))!;
     expect(rowLine).toBeDefined();
-    expect(rowLine).toContain('PENDING');
-    expect(rowLine).toContain('NOT YET APPLIED');
+    expect(rowLine).toContain('| APPLIED |');
+    expect(rowLine).toContain('Applied manually to production on 2026-08-05');
+    expect(rowLine).toContain('structure only and imported no lifecycle data');
+    expect(rowLine).toContain('Bite 4G2B2 remains unstarted');
+    expect(rowLine).not.toContain('NOT YET APPLIED');
+
+    // 3. The SCHEMA.sql block, sliced to the 4G2B1 section only, because
+    //    SCHEMA documents older migrations whose own headers differ.
+    const schema = readFileSync(resolve(process.cwd(), 'SCHEMA.sql'), 'utf8');
+    const start = schema.indexOf('-- Bite 4G2B1: lifecycle observation ledger, atomic apply boundary');
+    expect(start).toBeGreaterThan(-1);
+    const end = schema.indexOf('ALTER TABLE sf_lifecycle_events', start);
+    expect(end).toBeGreaterThan(start);
+    const section = schema.slice(start, end);
+    expect(section).toContain('Applied manually to production on 2026-08-05');
+    expect(section).toContain('imported no');
+    expect(section).not.toContain('PENDING');
+    expect(section).not.toContain('NOT YET APPLIED');
   });
 
   it('is SECURITY DEFINER with a locked search_path', () => {

@@ -2,7 +2,15 @@
 -- Bite 4G2B1: lifecycle observation ledger, atomic apply function
 -- (docs/lead-lifecycle-atomic-apply.md)
 --
--- STATUS: PENDING. NOT YET APPLIED to production.
+-- STATUS: Applied manually to production on 2026-08-05. Verified through
+-- direct catalog inspection: all seven sf_lifecycle_* tables exist with
+-- RLS enabled, zero policies, and no supabase_realtime membership; all
+-- three idempotency key columns and unique constraints exist; both
+-- lifecycle functions are SECURITY DEFINER with search_path=pg_catalog
+-- and executable only by service_role, not PUBLIC, anon, or
+-- authenticated; both append-only triggers are enabled. All seven tables
+-- contained zero rows, so this created structure only and imported no
+-- lifecycle data. Bite 4G2B2 ingestion remains unstarted and inactive.
 --
 -- Requires 2026-08-04_lifecycle_observation_ledger.sql (applied
 -- 2026-08-04), which created the seven sf_lifecycle_* tables.

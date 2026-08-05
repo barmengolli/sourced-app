@@ -5,9 +5,12 @@ The write boundary between the pure planner
 `sf_lifecycle_*` storage.
 
 **Nothing in this bite ingests, activates, schedules, or writes
-anything.** The serializer is pure, the migration is PENDING and
-unapplied, and no n8n workflow exists. Bite 4G2B2 (ingestion) and 4G2C
-(reporting and UI) are unstarted.
+anything.** The serializer is pure and no n8n workflow exists. The
+migration was applied manually to production on 2026-08-05 and verified
+through direct catalog inspection; it created structure only and imported
+no lifecycle data, so all seven lifecycle tables remain empty. Bite 4G2B2
+(ingestion) and 4G2C (reporting and UI) are unstarted and inactive:
+nothing calls the apply function today.
 
 ## What this bite adds
 
@@ -224,8 +227,8 @@ emails, Salesforce Ids, or source rows appear in shared diagnostics.
 The contract above is not only statically asserted: the migration and
 function were executed against a real PostgreSQL 15.18 cluster in a
 disposable local environment (never production, never a shared database).
-Two defects surfaced that static analysis had missed, and both are fixed
-in the still-unapplied migration:
+Two defects surfaced that static analysis had missed, and both were fixed
+before the migration was applied:
 
 1. **Every exact retry failed with a bogus `LC003`.** On a retry the
    payload still contains `create_person` for a `new_handle`, so the
