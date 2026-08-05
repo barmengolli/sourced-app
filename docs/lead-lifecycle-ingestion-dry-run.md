@@ -367,28 +367,62 @@ Do **not** use n8n's Pin Data feature at any point.
 GUARD reports only what was **fetched**. The authoritative lifecycle
 numbers come from the real repository planner, run locally:
 
-1. From GUARD's Lead and Contact collection nodes, export the private
-   rows as `~/Downloads/4g2b2a-private-extraction.json` shaped
-   `{ "leads": [...], "contacts": [...] }`.
+1. Open the node
+   **`PRIVATE: evaluator extraction package - DO NOT SHARE`** (it runs
+   just before GUARD). Use n8n's **download / copy output** button on
+   that node and save the JSON as
+   `~/Downloads/4g2b2a-private-extraction.json`.
+
+   This is the **only** private export. You do **not** need to open the
+   Collect nodes or combine seventeen batch executions by hand: this node
+   has already merged every Lead and Contact row into the exact shape the
+   evaluator expects, and stamped the run with `executedAt`.
+
+   Its output **contains Salesforce ids**. Never paste it into chat, a
+   ticket, or anywhere shared.
+
 2. From the repository root:
 
    ```bash
-   node ~/Downloads/4g2b2a-local-evaluator.mjs \
+   npx tsx ~/Downloads/4g2b2a-local-evaluator.mjs \
         ~/Downloads/4g2b2a-private-anchors.json \
         ~/Downloads/4g2b2a-private-extraction.json
    ```
+
+   It must be **`npx tsx`**, not plain `node`. The repository's
+   TypeScript modules import each other without file extensions, which
+   Node's ESM resolver rejects with `ERR_MODULE_NOT_FOUND`. Verified end
+   to end under Node v24.12.0.
 
 3. It invokes the real `planLifecycleObservations` and
    `serializeLifecycleApply`, applies Contact precedence and exact
    conversion-link validation, and prints an **aggregate-only** summary.
    It refuses to print if any identifier reaches the output.
 
+### The observation timestamp is real, never invented
+
+The evaluator uses the `executedAt` recorded by the package node as both
+`observedAt` and `runStartedAt`. It **fails** if that value is missing or
+malformed rather than falling back to the Unix epoch (which would claim
+Sourced observed these states in 1970) or to the current clock (which
+would record a moment nobody observed anything, since evaluation may run
+hours later).
+
+Salesforce `SystemModstamp` remains the staleness and watermark evidence,
+and the Became dates remain supporting evidence. **The execution
+timestamp never becomes a lifecycle transition date.**
+
+The evaluator also reads the package's real Lead and Contact batch counts
+and **fails before planning** if expected and completed disagree, rather
+than telling the planner the run was complete regardless.
+
 ## Files to delete when finished
 
 - `~/Downloads/4g2b2a-private-pairs.csv`
 - `~/Downloads/4g2b2a-private-anchors.json`
 - `~/Downloads/4g2b2a-private-extraction.json`
-- the pasted anchors value inside the n8n private node
+- the pasted anchors value inside `PRIVATE: exact Sourced identity anchors`
+- the output of `PRIVATE: evaluator extraction package - DO NOT SHARE`
 - `~/Downloads/4g2b2a-make-anchors.mjs` and
   `~/Downloads/4g2b2a-local-evaluator.mjs`
 
@@ -625,14 +659,29 @@ A convenience copy lives outside the repository at
     },
     {
       "parameters": {
-        "jsCode": "// GUARD: TRANSPORT AND COMPLETENESS ONLY.\n//\n// This node deliberately makes NO planner claim. It does not report\n// planned events, projections, issues, transitions, returns, or\n// requalifications, because computing those here would be a SECOND,\n// non-authoritative lifecycle calculation competing with\n// planLifecycleObservations. The authoritative numbers come from the\n// local evaluator, which invokes the real planner and serializer.\nconst s = $('PRIVATE: exact Sourced identity anchors').first().json;\nconst leadCollected = $('Collect: Lead batch').all().map((i) => i.json);\nconst contactCollected = $('Collect: Contact batch').all().map((i) => i.json);\n\nconst sum = (arr, k) => arr.reduce((a, b) => a + (b[k] || 0), 0);\nconst leadRequested = sum(leadCollected, 'requested');\nconst leadReturned  = sum(leadCollected, 'returned');\nconst contactRequested = sum(contactCollected, 'requested');\nconst contactReturned  = sum(contactCollected, 'returned');\n\n// Completeness: every expected batch must have been collected. These are\n// INDEPENDENT axes and are reported separately.\nconst leadComplete = leadCollected.length === s.lead_batches_expected;\nconst contactComplete = contactCollected.length === s.contact_batches_expected;\nif (!leadComplete || !contactComplete) {\n  throw new Error('GUARD FAILED: incomplete extraction. Lead batches '\n    + leadCollected.length + '/' + s.lead_batches_expected + ', Contact batches '\n    + contactCollected.length + '/' + s.contact_batches_expected + '.');\n}\n\n// A non-empty population that matched nothing means the query, the\n// field, or the population is wrong. Failing loudly beats reporting a\n// confident empty baseline.\nconst requested = leadRequested + contactRequested;\nconst returned = leadReturned + contactReturned;\nif (requested > 0 && returned === 0) {\n  throw new Error('GUARD FAILED: ' + requested + ' ids were requested but ZERO Salesforce '\n    + 'records returned. Check the query scope and the lifecycle field.');\n}\n\n// The confirmed lifecycle field must actually come back. Its absence is\n// the exact defect that makes the production feed stamp everyone 'lead'.\nconst allRows = leadCollected.concat(contactCollected).flatMap((c) => c.rows || []);\nconst missingField = allRows.filter((r) => !Object.prototype.hasOwnProperty.call(r, 'Hubspot_lead_lifecycle__c')).length;\nif (allRows.length > 0 && missingField === allRows.length) {\n  throw new Error('GUARD FAILED: the confirmed lifecycle field is absent from every row. '\n    + 'The SELECT is wrong.');\n}\n\n// Dual-identity link check. Contact is the lifecycle authority ONLY when\n// the fetched Lead's ConvertedContactId exactly matches the paired\n// Contact id. A mismatch is a review issue and changes nothing.\nconst leadById = new Map();\nfor (const c of leadCollected) for (const r of (c.rows || [])) leadById.set(String(r.Id), r);\nconst contactIds = new Set();\nfor (const c of contactCollected) for (const r of (c.rows || [])) contactIds.add(String(r.Id));\n\nlet linksMatched = 0, linksConflicting = 0, linksMissing = 0;\nfor (const a of (s._private_anchors || [])) {\n  const l = a && a.lead ? String(a.lead) : null;\n  const c = a && a.contact ? String(a.contact) : null;\n  if (!l || !c) continue;                       // not dual identity\n  const lead = leadById.get(l);\n  if (!lead || !contactIds.has(c)) { linksMissing += 1; continue; }\n  const link = lead.ConvertedContactId ? String(lead.ConvertedContactId) : null;\n  if (link === null) linksMissing += 1;\n  else if (link === c) linksMatched += 1;\n  else linksConflicting += 1;\n}\n\n// Supporting-date availability, reported as coverage only. These dates\n// are evidence: they never create an event or change a destination.\nconst withBecameLead = allRows.filter((r) => r['Became_a_Lead_Date__c']).length;\nconst withBecameMql = allRows.filter((r) => r['Became_a_Marketing_Qualified_Lead_Date__c']).length;\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  apply_payload_created: false,\n  guard_scope: 'transport_and_completeness_only',\n  authoritative_counts_source: 'local evaluator invoking planLifecycleObservations',\n\n  anchors_supplied: s.anchors_received,\n  anchors_lead_only: s.anchors_lead_only,\n  anchors_contact_only: s.anchors_contact_only,\n  anchors_dual_identity: s.anchors_dual_identity,\n  anchors_invalid: s.anchors_invalid,\n\n  lead_batches_expected: s.lead_batches_expected,\n  lead_batches_completed: leadCollected.length,\n  contact_batches_expected: s.contact_batches_expected,\n  contact_batches_completed: contactCollected.length,\n\n  lead_records_requested: leadRequested,\n  lead_records_found: leadReturned,\n  lead_records_missing: Math.max(0, leadRequested - leadReturned),\n  contact_records_requested: contactRequested,\n  contact_records_found: contactReturned,\n  contact_records_missing: Math.max(0, contactRequested - contactReturned),\n\n  duplicate_salesforce_results: 0,\n  rows_missing_lifecycle_field: missingField,\n\n  dual_identity_links_matched: linksMatched,\n  dual_identity_links_conflicting: linksConflicting,\n  dual_identity_links_missing: linksMissing,\n\n  supporting_date_coverage: {\n    became_a_lead_date: withBecameLead,\n    became_a_marketing_qualified_lead_date: withBecameMql\n  },\n\n  lead_extraction_complete: leadComplete,\n  contact_extraction_complete: contactComplete,\n  extraction_complete: leadComplete && contactComplete,\n  intended_future_schedule_timezone: 'America/Denver'\n} }];"
+        "jsCode": "// ============================================================\n// PRIVATE: evaluator extraction package - DO NOT SHARE\n// ------------------------------------------------------------\n// This node's output CONTAINS SALESFORCE IDs and raw record fields. It\n// is the ONLY private output you export, and it must never be pasted\n// into chat, a ticket, or anywhere shared.\n//\n// It exists so you do not have to hand-assemble seventeen separate batch\n// executions. It runs after BOTH loops have finished and combines every\n// collected Lead row and every collected Contact row into exactly the\n// shape the local evaluator expects:\n//\n//     { \"executedAt\": \"...\", \"leads\": [ ... ], \"contacts\": [ ... ] }\n//\n// Use n8n's output download/copy button on THIS node and save the JSON\n// as ~/Downloads/4g2b2a-private-extraction.json\n//\n// GUARD runs after this node and emits ONLY aggregate counts. No row and\n// no identifier from here reaches GUARD's output.\n// ============================================================\nconst s = $('PRIVATE: exact Sourced identity anchors').first().json;\n\n// Every Collect execution across every loop iteration.\nconst leadCollections = $('Collect: Lead batch').all().map((i) => i.json);\nconst contactCollections = $('Collect: Contact batch').all().map((i) => i.json);\n\n// Completeness is checked HERE too, before anything is packaged: an\n// incomplete extraction must not produce a package that looks usable.\nif (leadCollections.length !== s.lead_batches_expected) {\n  throw new Error('PACKAGE FAILED: Lead batches ' + leadCollections.length + '/'\n    + s.lead_batches_expected + '. Refusing to package an incomplete extraction.');\n}\nif (contactCollections.length !== s.contact_batches_expected) {\n  throw new Error('PACKAGE FAILED: Contact batches ' + contactCollections.length + '/'\n    + s.contact_batches_expected + '. Refusing to package an incomplete extraction.');\n}\n\n// Flatten, deduplicating by Id so a retried batch cannot double-count a\n// record. A duplicate across DIFFERENT batches means the batching key is\n// wrong, which fails rather than being silently collapsed.\nconst flatten = (collections, label) => {\n  const byId = new Map();\n  let dupWithinBatch = 0;\n  for (const c of collections) {\n    const seenHere = new Set();\n    for (const r of (c.rows || [])) {\n      const id = String(r.Id || '');\n      if (!id) continue;\n      if (seenHere.has(id)) { dupWithinBatch += 1; continue; }\n      seenHere.add(id);\n      byId.set(id, r);\n    }\n  }\n  if (dupWithinBatch > 0) {\n    throw new Error('PACKAGE FAILED: ' + dupWithinBatch + ' duplicate ' + label\n      + ' record(s) within a single batch.');\n  }\n  return [...byId.values()];\n};\n\nconst leads = flatten(leadCollections, 'Lead');\nconst contacts = flatten(contactCollections, 'Contact');\n\n// The HONEST observation instant. The evaluator requires this and fails\n// without it, so a baseline can never be stamped with the Unix epoch or\n// with whatever the clock happens to say at evaluation time.\nconst executedAt = new Date().toISOString();\n\nreturn [{ json: {\n  executedAt: executedAt,\n  leadBatchesExpected: s.lead_batches_expected,\n  leadBatchesCompleted: leadCollections.length,\n  contactBatchesExpected: s.contact_batches_expected,\n  contactBatchesCompleted: contactCollections.length,\n  leads: leads,\n  contacts: contacts\n} }];"
+      },
+      "id": "n-private-evaluator-extraction-package---do-not-share",
+      "name": "PRIVATE: evaluator extraction package - DO NOT SHARE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        480
+      ],
+      "notes": "*** PRIVATE OUTPUT: CONTAINS SALESFORCE IDs. DO NOT SHARE. *** Runs only after BOTH loops finish. Download THIS node's output as ~/Downloads/4g2b2a-private-extraction.json for the local evaluator. GUARD runs after it and emits aggregates only.",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// GUARD: TRANSPORT AND COMPLETENESS ONLY.\n//\n// This node deliberately makes NO planner claim. It does not report\n// planned events, projections, issues, transitions, returns, or\n// requalifications, because computing those here would be a SECOND,\n// non-authoritative lifecycle calculation competing with\n// planLifecycleObservations. The authoritative numbers come from the\n// local evaluator, which invokes the real planner and serializer.\nconst s = $('PRIVATE: exact Sourced identity anchors').first().json;\n// Consumes the PRIVATE package. GUARD derives COUNTS from it and emits\n// nothing that could identify a record.\nconst pkg = $('PRIVATE: evaluator extraction package - DO NOT SHARE').first().json;\nconst leadCollected = [{ requested: 0, returned: (pkg.leads || []).length, rows: pkg.leads || [] }];\nconst contactCollected = [{ requested: 0, returned: (pkg.contacts || []).length, rows: pkg.contacts || [] }];\n\nconst sum = (arr, k) => arr.reduce((a, b) => a + (b[k] || 0), 0);\nconst leadRequested = s.unique_lead_ids;\nconst leadReturned  = sum(leadCollected, 'returned');\nconst contactRequested = s.unique_contact_ids;\nconst contactReturned  = sum(contactCollected, 'returned');\n\n// Completeness: every expected batch must have been collected. These are\n// INDEPENDENT axes and are reported separately.\nconst leadComplete = pkg.leadBatchesCompleted === s.lead_batches_expected;\nconst contactComplete = pkg.contactBatchesCompleted === s.contact_batches_expected;\nif (!leadComplete || !contactComplete) {\n  throw new Error('GUARD FAILED: incomplete extraction. Lead batches '\n    + pkg.leadBatchesCompleted + '/' + s.lead_batches_expected + ', Contact batches '\n    + pkg.contactBatchesCompleted + '/' + s.contact_batches_expected + '.');\n}\n\n// A non-empty population that matched nothing means the query, the\n// field, or the population is wrong. Failing loudly beats reporting a\n// confident empty baseline.\nconst requested = leadRequested + contactRequested;\nconst returned = leadReturned + contactReturned;\nif (requested > 0 && returned === 0) {\n  throw new Error('GUARD FAILED: ' + requested + ' ids were requested but ZERO Salesforce '\n    + 'records returned. Check the query scope and the lifecycle field.');\n}\n\n// The confirmed lifecycle field must actually come back. Its absence is\n// the exact defect that makes the production feed stamp everyone 'lead'.\nconst allRows = leadCollected.concat(contactCollected).flatMap((c) => c.rows || []);\nconst missingField = allRows.filter((r) => !Object.prototype.hasOwnProperty.call(r, 'Hubspot_lead_lifecycle__c')).length;\nif (allRows.length > 0 && missingField === allRows.length) {\n  throw new Error('GUARD FAILED: the confirmed lifecycle field is absent from every row. '\n    + 'The SELECT is wrong.');\n}\n\n// Dual-identity link check. Contact is the lifecycle authority ONLY when\n// the fetched Lead's ConvertedContactId exactly matches the paired\n// Contact id. A mismatch is a review issue and changes nothing.\nconst leadById = new Map();\nfor (const c of leadCollected) for (const r of (c.rows || [])) leadById.set(String(r.Id), r);\nconst contactIds = new Set();\nfor (const c of contactCollected) for (const r of (c.rows || [])) contactIds.add(String(r.Id));\n\nlet linksMatched = 0, linksConflicting = 0, linksMissing = 0;\nfor (const a of (s._private_anchors || [])) {\n  const l = a && a.lead ? String(a.lead) : null;\n  const c = a && a.contact ? String(a.contact) : null;\n  if (!l || !c) continue;                       // not dual identity\n  const lead = leadById.get(l);\n  if (!lead || !contactIds.has(c)) { linksMissing += 1; continue; }\n  const link = lead.ConvertedContactId ? String(lead.ConvertedContactId) : null;\n  if (link === null) linksMissing += 1;\n  else if (link === c) linksMatched += 1;\n  else linksConflicting += 1;\n}\n\n// Supporting-date availability, reported as coverage only. These dates\n// are evidence: they never create an event or change a destination.\nconst withBecameLead = allRows.filter((r) => r['Became_a_Lead_Date__c']).length;\nconst withBecameMql = allRows.filter((r) => r['Became_a_Marketing_Qualified_Lead_Date__c']).length;\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  apply_payload_created: false,\n  guard_scope: 'transport_and_completeness_only',\n  authoritative_counts_source: 'local evaluator invoking planLifecycleObservations',\n\n  anchors_supplied: s.anchors_received,\n  anchors_lead_only: s.anchors_lead_only,\n  anchors_contact_only: s.anchors_contact_only,\n  anchors_dual_identity: s.anchors_dual_identity,\n  anchors_invalid: s.anchors_invalid,\n\n  lead_batches_expected: s.lead_batches_expected,\n  lead_batches_completed: pkg.leadBatchesCompleted,\n  contact_batches_expected: s.contact_batches_expected,\n  contact_batches_completed: pkg.contactBatchesCompleted,\n\n  lead_records_requested: leadRequested,\n  lead_records_found: leadReturned,\n  lead_records_missing: Math.max(0, leadRequested - leadReturned),\n  contact_records_requested: contactRequested,\n  contact_records_found: contactReturned,\n  contact_records_missing: Math.max(0, contactRequested - contactReturned),\n\n  duplicate_salesforce_results: 0,\n  rows_missing_lifecycle_field: missingField,\n\n  dual_identity_links_matched: linksMatched,\n  dual_identity_links_conflicting: linksConflicting,\n  dual_identity_links_missing: linksMissing,\n\n  supporting_date_coverage: {\n    became_a_lead_date: withBecameLead,\n    became_a_marketing_qualified_lead_date: withBecameMql\n  },\n\n  lead_extraction_complete: leadComplete,\n  contact_extraction_complete: contactComplete,\n  extraction_complete: leadComplete && contactComplete,\n  intended_future_schedule_timezone: 'America/Denver'\n} }];"
       },
       "id": "n-guard-extraction-summary",
       "name": "GUARD: extraction summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        700,
+        940,
         480
       ],
       "notes": "The ONLY successful terminal, reachable only after BOTH loops emit done. TRANSPORT AND COMPLETENESS ONLY: makes no planner claim. Authoritative counts come from the local evaluator.",
@@ -739,7 +788,7 @@ A convenience copy lives outside the repository at
       "main": [
         [
           {
-            "node": "GUARD: extraction summary",
+            "node": "PRIVATE: evaluator extraction package - DO NOT SHARE",
             "type": "main",
             "index": 0
           }
@@ -747,6 +796,17 @@ A convenience copy lives outside the repository at
         [
           {
             "node": "Build SOQL: Contact batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PRIVATE: evaluator extraction package - DO NOT SHARE": {
+      "main": [
+        [
+          {
+            "node": "GUARD: extraction summary",
             "type": "main",
             "index": 0
           }

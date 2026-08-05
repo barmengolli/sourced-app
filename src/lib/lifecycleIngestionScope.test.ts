@@ -738,10 +738,11 @@ describe('corrected dry-run workflow', () => {
     const into = Object.entries(wf.connections)
       .filter(([, v]) => v.main.some((m) => m.some((c) => c.node.startsWith('GUARD'))))
       .map(([k]) => k);
-    expect(into).toEqual(['Loop: Contact batches']);
-    // Reached only via the Contact loop's DONE output.
+    // GUARD's sole predecessor is the private package, which is itself
+    // reached only from the Contact loop's DONE output.
+    expect(into).toEqual(['PRIVATE: evaluator extraction package - DO NOT SHARE']);
     expect(wf.connections['Loop: Contact batches'].main[0][0].node)
-      .toBe('GUARD: extraction summary');
+      .toBe('PRIVATE: evaluator extraction package - DO NOT SHARE');
     // And the Lead loop's done output serializes into the Contact path.
     expect(wf.connections['Loop: Lead batches'].main[0][0].node)
       .toBe('Fan out: Contact batches');
@@ -761,10 +762,15 @@ describe('corrected dry-run workflow', () => {
     expect(seen.size).toBe(wf.nodes.length);
     expect(seen.has('GUARD: extraction summary')).toBe(true);
     // Every node GUARD reads from is an ancestor that must have run.
+    // GUARD now reads the private package rather than the collectors
+    // directly, so no raw row can reach it.
     for (const dep of ['PRIVATE: exact Sourced identity anchors',
-      'Collect: Lead batch', 'Collect: Contact batch']) {
+      'PRIVATE: evaluator extraction package - DO NOT SHARE']) {
       expect(js('GUARD: extraction summary'), dep).toContain(`$('${dep}')`);
       expect(seen.has(dep), dep).toBe(true);
+    }
+    for (const c of ['Collect: Lead batch', 'Collect: Contact batch']) {
+      expect(seen.has(c), c).toBe(true);
     }
     // The successful path terminates: GUARD has no outgoing edge.
     expect(adj.get('GUARD: extraction summary')).toBeUndefined();
@@ -879,6 +885,136 @@ describe('authoritative evaluator', () => {
     expect(src).toContain('transitions must be 0 on a first run');
     expect(src).toContain('duplicate baselines');
     expect(src).toContain('proposed watermark is null');
+  });
+});
+
+// --- execution readiness ---------------------------------------------------
+
+describe('execution readiness', () => {
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'), 'utf8');
+  const wf = JSON.parse(DOC.split('```json\n')[1].split('\n```')[0]) as {
+    nodes: Array<Record<string, unknown>>;
+    connections: Record<string, { main: Array<Array<{ node: string }>> }>;
+  };
+  const byName = new Map(wf.nodes.map((n) => [String(n.name), n]));
+  const js = (name: string) =>
+    String((byName.get(name)!.parameters as Record<string, unknown>).jsCode ?? '');
+  const PKG = 'PRIVATE: evaluator extraction package - DO NOT SHARE';
+  const EVAL_PATH = '/Users/barmengolli/Downloads/4g2b2a-local-evaluator.mjs';
+  let evalSrc = '';
+  try { evalSrc = readFileSync(EVAL_PATH, 'utf8'); } catch { /* asserted below */ }
+
+  // ISSUE 1 -----------------------------------------------------------
+  it('documents npx tsx, never plain node, for the evaluator', () => {
+    // Plain `node` fails with ERR_MODULE_NOT_FOUND on the extensionless
+    // TypeScript imports. Verified under Node v24.12.0.
+    expect(DOC).toContain('npx tsx ~/Downloads/4g2b2a-local-evaluator.mjs');
+    expect(DOC).not.toMatch(/^\s*node ~\/Downloads\/4g2b2a-local-evaluator\.mjs/m);
+    expect(DOC).toContain('ERR_MODULE_NOT_FOUND');
+    expect(evalSrc).toContain('npx tsx ~/Downloads/4g2b2a-local-evaluator.mjs');
+  });
+
+  // ISSUE 2 -----------------------------------------------------------
+  it('provides a single private extraction package node', () => {
+    expect(byName.has(PKG), 'the private package node is missing').toBe(true);
+    const code = js(PKG);
+    expect(code).toContain('DO NOT SHARE');
+    expect(code).toContain('executedAt');
+    expect(code).toContain('leads: leads');
+    expect(code).toContain('contacts: contacts');
+    // Carries the real batch counts for the evaluator's completeness gate.
+    for (const f of ['leadBatchesExpected', 'leadBatchesCompleted',
+      'contactBatchesExpected', 'contactBatchesCompleted']) {
+      expect(code, f).toContain(f);
+    }
+  });
+
+  it('static graph: the package is downstream of BOTH loops, upstream of GUARD', () => {
+    const adj = new Map(Object.entries(wf.connections).map(
+      ([k, v]) => [k, v.main.flat().map((c) => c.node)]));
+
+    // Reached only from the Contact loop's DONE output, which is itself
+    // reached only from the Lead loop's DONE output. Both loops must
+    // therefore have finished.
+    const preds = [...adj.entries()].filter(([, t]) => t.includes(PKG)).map(([k]) => k);
+    expect(preds).toEqual(['Loop: Contact batches']);
+    expect(wf.connections['Loop: Contact batches'].main[0][0].node).toBe(PKG);
+    expect(wf.connections['Loop: Lead batches'].main[0][0].node)
+      .toBe('Fan out: Contact batches');
+
+    // Upstream of GUARD, and GUARD's ONLY predecessor.
+    expect(adj.get(PKG)).toEqual(['GUARD: extraction summary']);
+    const guardPreds = [...adj.entries()]
+      .filter(([, t]) => t.includes('GUARD: extraction summary')).map(([k]) => k);
+    expect(guardPreds).toEqual([PKG]);
+
+    // Both collectors are executed ancestors of the package.
+    const ancestors = new Set<string>();
+    const walk = (n: string) => {
+      for (const [k, t] of adj.entries()) {
+        if (t.includes(n) && !ancestors.has(k)) { ancestors.add(k); walk(k); }
+      }
+    };
+    walk(PKG);
+    expect(ancestors.has('Collect: Lead batch')).toBe(true);
+    expect(ancestors.has('Collect: Contact batch')).toBe(true);
+
+    // GUARD is still the only terminal.
+    expect(adj.get('GUARD: extraction summary')).toBeUndefined();
+  });
+
+  it('collects every Lead and Contact result exactly once', () => {
+    const code = js(PKG);
+    expect(code).toContain("$('Collect: Lead batch').all()");
+    expect(code).toContain("$('Collect: Contact batch').all()");
+    // Deduplicated by Id, and a within-batch duplicate fails loudly.
+    expect(code).toContain('byId.set(id, r)');
+    expect(code).toContain('PACKAGE FAILED');
+    // Refuses to package an incomplete extraction.
+    expect(code).toContain('Refusing to package an incomplete extraction');
+  });
+
+  it('keeps every raw row and identifier out of GUARD output', () => {
+    const guard = js('GUARD: extraction summary');
+    const returned = guard.slice(guard.lastIndexOf('return [{ json:'));
+    // GUARD reads the package but returns only counts.
+    expect(guard).toContain(`$('${PKG}')`);
+    expect(returned).not.toMatch(/leads:|contacts:|rows:/);
+    expect(returned).not.toMatch(/\bId\b/);
+    expect(returned).not.toContain('_private_');
+  });
+
+  // ISSUE 3 -----------------------------------------------------------
+  it('never uses the Unix epoch as the observation time', () => {
+    const code = evalSrc.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(code).not.toContain('new Date(0)');
+    expect(code).toContain('const observedAt = new Date(executedAtMs).toISOString()');
+  });
+
+  it('requires a real executedAt and never falls back to the clock', () => {
+    expect(evalSrc).toContain('const executedAt = extraction.executedAt;');
+    expect(evalSrc).toContain('has no executedAt timestamp');
+    expect(evalSrc).toContain('is not a valid ISO timestamp');
+    expect(evalSrc).toContain('never taken from the current clock');
+    // The only Date.now-style call would be a silent fallback.
+    const code = evalSrc.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(code).not.toMatch(/new Date\(\)\.toISOString\(\)/);
+  });
+
+  it('passes truthful batch completeness to the planner', () => {
+    expect(evalSrc).not.toContain('pagesExpected: 1, pagesCompleted: 1');
+    expect(evalSrc).toContain('pagesExpected: leadExpected + contactExpected');
+    expect(evalSrc).toContain('pagesCompleted: leadCompleted + contactCompleted');
+    // Disagreement fails BEFORE planning.
+    expect(evalSrc).toContain('An incomplete run must never be planned');
+  });
+
+  it('keeps SystemModstamp as the watermark, not the execution time', () => {
+    expect(evalSrc).toContain('.map((r) => r.sourceModifiedAt)');
+    expect(evalSrc).toContain('proposed_watermark');
+    // observedAt is the observation instant, never an effective date.
+    expect(evalSrc).not.toMatch(/effectiveDate:\s*observedAt/);
   });
 });
 
