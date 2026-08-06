@@ -7,7 +7,7 @@
 // change.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/react';
+import { render, screen, cleanup, within, fireEvent } from '@testing-library/react';
 import ReportingFilterBar from './ReportingFilterBar';
 import type { ComparisonMode, ReportingPeriod } from '../../types/reporting';
 
@@ -77,5 +77,68 @@ describe('ReportingFilterBar — Year comparison normalization', () => {
     const compare = screen.getByRole('radiogroup', { name: 'Compare to' });
     expect(within(compare).getByRole('radio', { checked: true }).getAttribute('aria-label')).toBe('Previous year');
     expect(within(compare).queryByRole('radio', { name: 'Previous period' })).toBeNull();
+  });
+});
+
+describe('ReportingFilterBar unsupported grains', () => {
+  function setupGated(period: ReportingPeriod) {
+    const onPeriodChange = vi.fn();
+    render(
+      <ReportingFilterBar
+        period={period}
+        comparison="previous_period"
+        years={[2025, 2026]}
+        supportedGrains={['quarter', 'year']}
+        disabledGrainReason="Month is not available for this source yet."
+        onPeriodChange={onPeriodChange}
+        onComparisonChange={() => {}}
+      />,
+    );
+    const timeframe = screen.getByRole('radiogroup', { name: 'Timeframe' });
+    return { onPeriodChange, timeframe };
+  }
+
+  it('disables an unsupported grain instead of hiding it', () => {
+    // Hiding Month would leave a reader wondering whether the app forgot it.
+    // Disabling it with a reason answers the question in place.
+    const { timeframe } = setupGated(quarter(2026, 2));
+    const month = within(timeframe).getByRole('radio', { name: 'Month' });
+    expect(month.hasAttribute('disabled')).toBe(true);
+    expect(month.getAttribute('title')).toMatch(/not available/i);
+  });
+
+  it('cannot select an unsupported grain by click', () => {
+    // A month selection here would silently be served as its containing
+    // quarter, roughly tripling the number the reader asked for.
+    const { onPeriodChange, timeframe } = setupGated(quarter(2026, 2));
+    within(timeframe).getByRole('radio', { name: 'Month' }).click();
+    expect(onPeriodChange).not.toHaveBeenCalled();
+  });
+
+  it('skips an unsupported grain in the keyboard roving order', () => {
+    // Arrow keys must step Quarter -> Year -> Quarter, never landing on the
+    // disabled Month. Otherwise a keyboard user could select it even though a
+    // mouse user cannot.
+    const { onPeriodChange, timeframe } = setupGated(quarter(2026, 2));
+    const quarterRadio = within(timeframe).getByRole('radio', { name: 'Quarter' });
+
+    fireEvent.keyDown(quarterRadio, { key: 'ArrowLeft' });
+    // Wrapping left from Quarter reaches Year, skipping the disabled Month.
+    expect(onPeriodChange).toHaveBeenCalledWith({ grain: 'year', year: 2026 });
+    for (const call of onPeriodChange.mock.calls) {
+      expect(call[0].grain).not.toBe('month');
+    }
+  });
+
+  it('leaves supported grains fully selectable', () => {
+    const { onPeriodChange, timeframe } = setupGated(quarter(2026, 2));
+    within(timeframe).getByRole('radio', { name: 'Year' }).click();
+    expect(onPeriodChange).toHaveBeenCalledWith({ grain: 'year', year: 2026 });
+  });
+
+  it('keeps every grain enabled when no restriction is given', () => {
+    const { timeframe } = setup(quarter(2026, 2), 'previous_period');
+    const month = within(timeframe).getByRole('radio', { name: 'Month' });
+    expect(month.hasAttribute('disabled')).toBe(false);
   });
 });

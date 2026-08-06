@@ -1044,10 +1044,11 @@ export interface ComputeMonthlyLeadsForYearInput {
   channels: Channel[];
   year: number;
   regions: Set<RegionKey>;
-  // Optional historical-year fallback. Quarterly lead actuals are
-  // spread across the three months of the quarter when no real leads
-  // cover the (channel, month) cell. Omitted callers get the same
-  // behavior as before (no fallback).
+  // Optional historical-year fallback. Quarterly lead actuals are returned
+  // SEPARATELY as `quarterlyFallback` and are never spread into the monthly
+  // arrays: a stored quarterly number cannot honestly become three monthly
+  // bars (CLAUDE.md section 4). A (channel, quarter) with any real-lead
+  // coverage is suppressed entirely. Omitted callers get no fallback.
   manualActuals?: FunnelActual[];
 }
 
