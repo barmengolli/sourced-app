@@ -133,9 +133,24 @@ export interface OutreachSubPageProps {
 export interface SixSenseSubPageProps {
   snapshots: SixSenseSnapshot[];
   loading: boolean;
+  // Shared reporting selection, so a period chosen here survives navigation to
+  // and from the other reporting pages.
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
   upsertSnapshot: (input: SixSenseSnapshotInput) => Promise<SixSenseSnapshot>;
   renameSegment: (from: string, to: string) => Promise<void>;
   onNavigate: (p: PageKey) => void;
+}
+
+// The shared reporting selection, passed to sections that own their own data
+// hooks (BDR, Campaigns, LinkedIn) rather than receiving a props bundle.
+export interface SharedReportingProps {
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
 
 function PageBody({
@@ -144,12 +159,14 @@ function PageBody({
   funnelProps,
   outreachProps,
   sixSenseProps,
+  reportingProps,
 }: {
   page: PageKey;
   onNavigate: (p: PageKey) => void;
   funnelProps: FunnelSubPageProps;
   outreachProps: OutreachSubPageProps;
   sixSenseProps: SixSenseSubPageProps;
+  reportingProps: SharedReportingProps;
 }) {
   switch (page) {
     case 'funnel-data':
@@ -177,7 +194,9 @@ function PageBody({
       return <SixSenseImportPage {...sixSenseProps} />;
     case 'bdr-quota-dashboard':
     case 'bdr-quota-quotas':
-      return <BdrSection page={page} onNavigate={onNavigate} />;
+      return (
+        <BdrSection page={page} onNavigate={onNavigate} {...reportingProps} />
+      );
     case 'campaigns-overview':
     case 'campaigns-tags':
       return <CampaignsSection page={page} onNavigate={onNavigate} />;
@@ -390,7 +409,18 @@ export default function App() {
     loading: outreachLoading,
   };
 
+  const reportingProps: SharedReportingProps = {
+    explicitPeriod: reporting.explicitPeriod,
+    comparison: reporting.comparison,
+    onPeriodChange: reporting.setPeriod,
+    onComparisonChange: reporting.setComparison,
+  };
+
   const sixSenseProps: SixSenseSubPageProps = {
+    explicitPeriod: reporting.explicitPeriod,
+    comparison: reporting.comparison,
+    onPeriodChange: reporting.setPeriod,
+    onComparisonChange: reporting.setComparison,
     snapshots: sixSenseSnapshots,
     loading: sixSenseLoading,
     upsertSnapshot: upsertSixSenseSnapshot,
@@ -407,6 +437,7 @@ export default function App() {
             page={page}
             onNavigate={navigate}
             funnelProps={funnelProps}
+            reportingProps={reportingProps}
             outreachProps={outreachProps}
             sixSenseProps={sixSenseProps}
           />

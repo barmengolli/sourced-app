@@ -6,7 +6,7 @@
 //
 // Data is read-only here; imports happen on the 6sense Import sub-tab.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   CartesianGrid,
   Legend,
@@ -28,12 +28,24 @@ import {
 import { OVERALL_SEGMENT, orderSegments } from '../constants/sixsense';
 import { CHART_COLORS } from '../constants/chartColors';
 import ChartCard from '../components/charts/ChartCard';
+import ReportingFilterBar from '../components/reporting/ReportingFilterBar';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
+import { selectSnapshotComparison } from '../lib/snapshotSelection';
+import { comparisonPeriod, comparisonLabel } from '../lib/reportingPeriods';
+import type { ComparisonMode, ReportingPeriod } from '../types/reporting';
 
 interface SixSenseDashboardPageProps {
   snapshots: SixSenseSnapshot[]; // newest snapshot_date first
   loading: boolean;
   renameSegment: (from: string, to: string) => Promise<void>;
   onNavigate: (p: PageKey) => void;
+  // Shared reporting selection. null period = the user has not chosen, so the
+  // page derives its own default from its own data.
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
 
 const fmtInt = (n: number | null): string =>
@@ -64,15 +76,58 @@ function monthShort(monthNum: number): string {
   return MONTHS_SHORT[monthNum - 1] ?? `M${monthNum}`;
 }
 
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('sixsense-dashboard')!;
+
+// The Month containing the latest imported snapshot. Derived during render, so
+// no effect ever resets a user selection and the browser clock never picks the
+// reported period.
+function defaultPeriodFrom(
+  snapshots: readonly SixSenseSnapshot[],
+): ReportingPeriod | null {
+  let latest: string | null = null;
+  for (const s of snapshots) {
+    if (typeof s.snapshot_date !== 'string' || s.snapshot_date === '') continue;
+    if (latest === null || s.snapshot_date > latest) latest = s.snapshot_date;
+  }
+  if (latest === null) return null;
+  const year = Number(latest.slice(0, 4));
+  const month = Number(latest.slice(5, 7));
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+  return { grain: 'month', year, month: month as 1 };
+}
+
 export default function SixSenseDashboardPage({
   snapshots,
   loading,
   renameSegment,
   onNavigate,
+  explicitPeriod,
+  comparison,
+  onPeriodChange,
+  onComparisonChange,
 }: SixSenseDashboardPageProps) {
   // Group snapshots by segment, then order: overall ('Target Accounts in CRM')
   // first, campaigns after alphabetically. Each segment renders its own
   // stacked section with its own month selector + prior-month compare.
+  // ONE page-level period drives every segment, so the page can no longer show
+  // several different months at once with no indication which is which.
+  const period = explicitPeriod ?? defaultPeriodFrom(snapshots);
+  const cmpPeriod = period && comparison !== 'off'
+    ? comparisonPeriod(period, comparison)
+    : null;
+
+  const years = useMemo(() => {
+    const set = new Set<number>();
+    for (const s of snapshots) {
+      const y = Number(s.snapshot_date?.slice(0, 4));
+      if (Number.isFinite(y)) set.add(y);
+    }
+    if (period) set.add(period.year);
+    return [...set].sort((a, b) => b - a);
+  }, [snapshots, period]);
+
   const sections = useMemo(() => {
     const bySegment = new Map<string, SixSenseSnapshot[]>();
     for (const s of snapshots) {
@@ -119,6 +174,21 @@ export default function SixSenseDashboardPage({
   return (
     <div className="p-8 space-y-8">
       <Header onNavigate={onNavigate} />
+      <div className="space-y-3">
+        <ReportingBasisDisclosure
+          basis={REPORTING_BASIS.basis}
+          explanation={REPORTING_BASIS.anchor}
+        />
+        {period ? (
+          <ReportingFilterBar
+            period={period}
+            comparison={comparison}
+            years={years}
+            onPeriodChange={onPeriodChange}
+            onComparisonChange={onComparisonChange}
+          />
+        ) : null}
+      </div>
       {sections.map(({ segment, snapshots: segSnaps }) => (
         <SegmentSection
           key={segment}
@@ -129,6 +199,9 @@ export default function SixSenseDashboardPage({
           renamable={segment !== OVERALL_SEGMENT}
           onRename={renameSegment}
           snapshots={segSnaps}
+          period={period}
+          cmpPeriod={cmpPeriod}
+          cmpLabel={period ? comparisonLabel(period, comparison) : ''}
         />
       ))}
     </div>
@@ -143,6 +216,9 @@ function SegmentSection({
   renamable,
   onRename,
   snapshots,
+  period,
+  cmpPeriod,
+  cmpLabel,
 }: {
   // The actual segment value (DB key); rename targets this. `title` is the
   // display label (the overall segment shows a friendlier title).
@@ -151,25 +227,34 @@ function SegmentSection({
   renamable: boolean;
   onRename: (from: string, to: string) => Promise<void>;
   snapshots: SixSenseSnapshot[];
+  period: ReportingPeriod | null;
+  cmpPeriod: ReportingPeriod | null;
+  cmpLabel: string;
 }) {
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (snapshots.length === 0) {
-      setSelectedDate(null);
-      return;
-    }
-    setSelectedDate((prev) =>
-      prev && snapshots.some((s) => s.snapshot_date === prev)
-        ? prev
-        : snapshots[0].snapshot_date,
-    );
-  }, [snapshots]);
-
-  const current = useMemo(
-    () => snapshots.find((s) => s.snapshot_date === selectedDate) ?? null,
-    [snapshots, selectedDate],
+  // Selection is driven by the ONE page-level period. Each segment resolves
+  // its own latest eligible snapshot at or before the period end, because
+  // segments have different import coverage: a single page-level date would
+  // show one segment its current month and another a stale one, with nothing
+  // on screen saying which.
+  const selection = useMemo(
+    () =>
+      period
+        ? selectSnapshotComparison(snapshots, period, cmpPeriod)
+        : null,
+    [snapshots, period, cmpPeriod],
   );
+
+  const current = selection?.current.state === 'present'
+    ? selection.current.snapshot
+    : null;
+  const prior = selection?.comparable && selection.comparison.state === 'present'
+    ? selection.comparison.snapshot
+    : null;
+  const currentDate = selection?.current.state === 'present'
+    ? selection.current.snapshotDate
+    : null;
+  const carriedForward = selection?.current.state === 'present'
+    && !selection.current.withinPeriod;
 
   const orderedMonths = useMemo(
     () =>
@@ -179,14 +264,26 @@ function SegmentSection({
     [snapshots],
   );
 
-  const prior = useMemo(() => {
-    if (!current) return null;
+  // No eligible snapshot at or before the period end. MISSING, not zero: this
+  // segment has no reading for the selected period, which is not the same as
+  // "it reached nobody".
+  if (!current || !currentDate) {
     return (
-      snapshots.find((s) => s.snapshot_date < current.snapshot_date) ?? null
+      <section className="space-y-3">
+        <SegmentTitle
+          segment={segment}
+          title={title}
+          renamable={renamable}
+          onRename={onRename}
+        />
+        <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
+          No snapshot for this segment on or before the end of the selected
+          period. Earlier snapshots are never carried backward from a later
+          month, so there is nothing to report here yet.
+        </p>
+      </section>
     );
-  }, [snapshots, current]);
-
-  if (!current) return null;
+  }
 
   return (
     <section className="space-y-3">
@@ -200,41 +297,17 @@ function SegmentSection({
       {/* Reach & engagement % trend across all of this segment's months. */}
       <ReachEngagementTrend months={orderedMonths} />
 
-      {/* Month pills, mirroring the Outreach Dashboard. Selecting a month
-          shows its metrics and auto-compares to the prior imported month. */}
-      <div className="flex flex-wrap items-center gap-1">
-        <span className="text-xs text-slate-muted mr-1">Month</span>
-        {orderedMonths.map((s) => {
-          const active = s.snapshot_date === current.snapshot_date;
-          return (
-            <button
-              key={s.id}
-              type="button"
-              title={fmtMonth(s.snapshot_date)}
-              onClick={() => setSelectedDate(s.snapshot_date)}
-              className={
-                'text-xs px-2 py-1 rounded border transition-colors ' +
-                (active
-                  ? 'bg-indigo text-white border-indigo'
-                  : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-              }
-            >
-              {monthShort(s.week_number)}
-            </button>
-          );
-        })}
-        {prior && (
-          <span className="text-xs text-slate-muted ml-2">
-            vs {monthShort(prior.week_number)}
-          </span>
-        )}
-      </div>
-
+      {/* The EFFECTIVE DATE of this segment's reading. Point-in-time sources
+          must state as-of when, and segments resolve independently, so the
+          date is shown per segment rather than once for the page. */}
       <p className="text-xs text-slate-muted">
-        {fmtMonth(current.snapshot_date)}.
+        Snapshot as of {fmtMonth(currentDate)}.
+        {carriedForward
+          ? ' No snapshot was imported within the selected period, so this is the most recent earlier reading.'
+          : ''}
         {prior
-          ? ` Change vs ${fmtMonth(prior.snapshot_date)}.`
-          : ' No earlier month to compare.'}
+          ? ` Change vs ${fmtMonth(prior.snapshot_date)}${cmpLabel ? ` (${cmpLabel})` : ''}.`
+          : ' No comparable earlier snapshot, so no change is shown.'}
       </p>
 
       {/* Headline KPI cards: the reach/engagement percentages the team
