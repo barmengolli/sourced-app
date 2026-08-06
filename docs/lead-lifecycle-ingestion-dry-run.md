@@ -571,6 +571,113 @@ while thousands of people were falsely reported missing. A run now fails
 readiness if more than 2% of anchors land in review, or if the
 conversion-link diagnostics do not account for every dual anchor.
 
+## Accepted first-run evidence (2026-08-05)
+
+Both halves of the dry run are complete. **No data was written, no apply
+payload was created, and the seven `sf_lifecycle_*` tables remain
+empty.**
+
+### Transport (n8n GUARD)
+
+`dry_run: true`, `writes_attempted: 0`, 3,146 anchors, Lead batches 1/1,
+Contact batches 16/16, Lead 131 requested / 131 found / 0 missing,
+Contact 3,061 requested / 3,060 found / 1 missing, zero duplicate
+results, zero lifecycle-field gaps, `extraction_complete: true`.
+Supporting-date coverage: 2,709 Became-Lead, 816 Became-MQL.
+
+### Authoritative evaluator (real planner and serializer)
+
+Observed at `2026-08-05T20:23:19.909Z`.
+
+| Measure | Value |
+|---|---|
+| Anchors received | 3,146 (85 Lead-only, 3,015 Contact-only, 46 dual) |
+| Anchors reconciled | **3,144** |
+| Anchors routed to review | **2** |
+| Lead records found / missing | 131 / **0** |
+| Contact records found / missing | 3,060 / **1** |
+| Conversion links matched / conflicting / missing | 45 / 0 / 1 |
+| Observations planned | **3,144** |
+| Events planned | **2,868** |
+| Projections planned | 3,144 |
+| Issues planned | 268 |
+| Transitions / returns / requalifications | **0 / 0 / 0** |
+| Proposed watermark | `2026-08-05T19:33:52.000+0000` |
+| `apply_payload_created` | **false** |
+| `writes_attempted` | **0** |
+
+### Baselines by normalized state
+
+| State | Count | Produces an event? |
+|---|---|---|
+| `lead` | 2,380 | yes |
+| `mql` | 488 | yes |
+| `out_of_scope` | 275 | no |
+| `unknown` (blank value) | 1 | no |
+| `unknown` (unmapped label) | 0 | no |
+| **Total** | **3,144** | **2,868 events** |
+
+The earlier aggregate showed 2,380 + 488 + 275 = 3,143 against 3,144
+observations, and the missing one was invisible. It is **one record whose
+lifecycle value is blank**: a blank normalizes to `unknown` but produces
+no label key, so it never appeared in `unknown_lifecycle_labels`. Blank
+and unmapped are now reported separately, because "Salesforce holds
+nothing" and "Salesforce holds something new" are different facts needing
+different responses.
+
+`2,380 + 488 = 2,868` exactly matches `events_planned`: only `lead` and
+`mql` produce a funnel event. The 276 remaining observations
+(275 out-of-scope + 1 blank) are stored as evidence with **no invented
+funnel event**.
+
+### Issues by kind
+
+| Kind | Count |
+|---|---|
+| `reversed_supporting_dates` | 267 |
+| `blank_lifecycle_value` | 1 |
+| **Total** | **268** |
+
+268 distinct records carry at least one issue. **The 267 reversed
+supporting dates are diagnostic only.** A Became-MQL date earlier than a
+Became-Lead date is recorded and flagged, never swapped or corrected, and
+supporting dates cannot create an event: transitions, returns, and
+requalifications are all zero. At roughly 8.5% of the population this is
+worth a look as a Salesforce data-quality question, but it changes
+nothing about this run.
+
+### The two review cases
+
+Described as categories only:
+
+- **1** Contact anchor whose record was not returned by Salesforce
+  (`contact_record_missing`).
+- **1** dual anchor whose Lead carries no `ConvertedContactId`
+  (`conversion_link_absent`).
+
+Nothing was repaired, merged, or guessed for either.
+
+### Invariants that hold
+
+- Normalized states sum to `observations_planned` (3,144).
+- `issues_by_kind` sums to `issues_planned` (268).
+- Lead + MQL baselines equal `events_planned` (2,868).
+- Conversion diagnostics total exactly the 46 dual anchors.
+- Reconciled + review equals every anchor (3,146).
+
+### The rejected run
+
+An earlier evaluator run reported 709 anchors reconciled. That figure is
+a **measurement artefact** of the 15/18-character Salesforce-Id defect
+described above, not a business result, and no lifecycle breakdown from
+it is recorded anywhere in this repository.
+
+### Still no ingestion
+
+`sf_apply_lifecycle_observations` has never been invoked. **All seven
+`sf_lifecycle_*` tables remain empty.** Bite 4G2B2B (ingestion) is
+unstarted, as is 4G2C. A first apply requires separate authorization.
+
 ## Files to delete when finished
 
 - `~/Downloads/4g2b2a-private-pairs.csv`

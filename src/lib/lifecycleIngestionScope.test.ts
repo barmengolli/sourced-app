@@ -1575,6 +1575,157 @@ describe('evaluator readiness gate', () => {
   });
 });
 
+// --- accepted first-run evidence invariants --------------------------------
+
+describe('accepted first-run evidence (2026-08-05)', () => {
+  // The ACCEPTED corrected evaluator result. The earlier 709-person
+  // output is rejected measurement evidence from the 15/18-Id defect and
+  // is deliberately not represented here as a result.
+  const EV = {
+    anchorsReceived: 3146,
+    anchorsLeadOnly: 85,
+    anchorsContactOnly: 3015,
+    anchorsDual: 46,
+    conversionMatched: 45,
+    conversionConflicting: 0,
+    conversionMissing: 1,
+    leadFound: 131,
+    leadMissing: 0,
+    contactFound: 3060,
+    contactMissing: 1,
+    reconciled: 3144,
+    review: 2,
+    baselineLead: 2380,
+    baselineMql: 488,
+    outOfScope: 275,
+    unknownBlank: 1,
+    unknownNonblank: 0,
+    observationsPlanned: 3144,
+    eventsPlanned: 2868,
+    projectionsPlanned: 3144,
+    issuesPlanned: 268,
+    issuesByKind: { reversed_supporting_dates: 267, blank_lifecycle_value: 1 },
+    transitions: 0,
+    returns: 0,
+    requalifications: 0,
+  };
+
+  it('every normalized state accounts for every observation', () => {
+    // The gap this closes: lead + mql + out_of_scope was 3,143 against
+    // 3,144 observations, and the remaining state was invisible because
+    // a BLANK value normalizes to unknown without producing a label key.
+    const states = EV.baselineLead + EV.baselineMql + EV.outOfScope
+      + EV.unknownBlank + EV.unknownNonblank;
+    expect(states).toBe(EV.observationsPlanned);
+    // Blank and nonblank-unknown are DIFFERENT facts and stay separate.
+    expect(EV.unknownBlank).toBe(1);
+    expect(EV.unknownNonblank).toBe(0);
+  });
+
+  it('issues_by_kind accounts for every planned issue', () => {
+    const total = Object.values(EV.issuesByKind).reduce((a, b) => a + b, 0);
+    expect(total).toBe(EV.issuesPlanned);
+  });
+
+  it('Lead and MQL baselines equal the planned events', () => {
+    // Only lead and mql produce a funnel event on this first-run design.
+    expect(EV.baselineLead + EV.baselineMql).toBe(EV.eventsPlanned);
+    // out_of_scope and unknown are observed but produce NO event.
+    expect(EV.observationsPlanned - EV.eventsPlanned)
+      .toBe(EV.outOfScope + EV.unknownBlank + EV.unknownNonblank);
+  });
+
+  it('conversion diagnostics account for every dual anchor', () => {
+    expect(EV.conversionMatched + EV.conversionConflicting + EV.conversionMissing)
+      .toBe(EV.anchorsDual);
+    expect(EV.anchorsDual).toBe(46);
+  });
+
+  it('reconciled plus review equals every anchor', () => {
+    expect(EV.reconciled + EV.review).toBe(EV.anchorsReceived);
+    expect(EV.anchorsLeadOnly + EV.anchorsContactOnly + EV.anchorsDual)
+      .toBe(EV.anchorsReceived);
+  });
+
+  it('is a baselines-only first run', () => {
+    expect(EV.transitions).toBe(0);
+    expect(EV.returns).toBe(0);
+    expect(EV.requalifications).toBe(0);
+    // One projection per reconciled anchor: no person counted twice.
+    expect(EV.projectionsPlanned).toBe(EV.reconciled);
+    expect(EV.observationsPlanned).toBe(EV.reconciled);
+  });
+
+  it('the rejected 709 result never appears as an accepted result', () => {
+    const DOCX = readFileSync(
+      resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'), 'utf8');
+    // 709 may be discussed ONLY as a rejected measurement artefact, and
+    // the document must SAY SO in the section that mentions it.
+    // Match the STANDALONE figure. A naive substring search also hits
+    // "2,709" (Became-Lead coverage), which is unrelated evidence.
+    // The figure may legitimately appear as arithmetic explaining why the
+    // OLD readiness gate passed. What it must never do is appear framed
+    // as an accepted result.
+    for (const m of DOCX.matchAll(/(?<![\d,])709(?![\d])/g)) {
+      const section = DOCX.slice(Math.max(0, m.index - 500), m.index + 500);
+      expect(section, 'the 709 figure must never be framed as accepted')
+        .not.toMatch(/an accepted result|accepted evidence|business result of/i);
+    }
+    // At least one mention must state the rejection explicitly.
+    expect(DOCX).toMatch(/measurement artefact|measurement artifact/i);
+    // And the rejection must be stated in its own section.
+    expect(DOCX).toContain('### The rejected run');
+    expect(DOCX).toMatch(/not a business result/i);
+    // The accepted figures must be present.
+    expect(DOCX).toContain('3,144');
+    expect(DOCX).toContain('2,868');
+  });
+
+  it('the documented evidence carries no identifier or issue detail', () => {
+    const DOCX = readFileSync(
+      resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'), 'utf8');
+    expect(DOCX).not.toMatch(/\b(001|003|00Q|005|006|00v|701)[A-Za-z0-9]{12}\b/);
+    expect(DOCX).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.(com|org|net)\b/);
+  });
+});
+
+describe('evaluator aggregate contract', () => {
+  const src = (() => {
+    try {
+      return readFileSync('/Users/barmengolli/Downloads/4g2b2a-local-evaluator.mjs', 'utf8');
+    } catch { return ''; }
+  })();
+
+  it('reports every normalized state, splitting blank from unmapped', () => {
+    // Anchored to the emitted summary FIELD. Asserting the identifier
+    // appears anywhere would survive deleting the field while leaving
+    // the variable behind.
+    expect(src).toMatch(/baselines_by_normalized_state:\s*byState,/);
+    expect(src).toContain('unknown_blank_lifecycle_values');
+    expect(src).toContain('unknown_nonblank_lifecycle_values');
+    // Blank is classified before a label key is ever recorded.
+    expect(src).toMatch(/String\(raw\)\.trim\(\) === ''/);
+  });
+
+  it('counts issues directly from the planner raise_issue operations', () => {
+    expect(src).toContain("plan.operations.filter((o) => o.op === 'raise_issue')");
+    expect(src).toMatch(/issues_by_kind:\s*issuesByKind,/);
+    expect(src).toContain('records_with_at_least_one_issue');
+    // Counted, never emitted.
+    expect(src).toContain('recordsWithIssue.size');
+    expect(src).not.toMatch(/recordsWithIssue\s*\]|\.\.\.recordsWithIssue/);
+    // `detail` can quote a source value and is never read.
+    expect(src).not.toMatch(/issuesByKind\[o\.detail\]|o\.detail/);
+  });
+
+  it('fails readiness when a breakdown does not account for its total', () => {
+    expect(src).toContain('baseline states total');
+    expect(src).toMatch(/stateTotal !== summary\.observations_planned/);
+    expect(src).toContain('issues_by_kind totals');
+    expect(src).toMatch(/issueTotal !== summary\.issues_planned/);
+  });
+});
+
 // --- fixture hygiene -------------------------------------------------------
 
 describe('fixture hygiene', () => {
