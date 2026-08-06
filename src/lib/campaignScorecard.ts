@@ -19,9 +19,11 @@
 //   - Conversion rates cross two silos (marketing leads vs SFDC opps). A
 //     channel can hold sales-sourced opps with no marketing MQL, so MQL->Opp
 //     may read "-" (never a >100% impossibility; ratio() guards the zero).
-//   - 6Sense multi-segment reach/engagement is an UNWEIGHTED mean of each
-//     segment's latest snapshot. Fine for single-segment campaigns; revisit if
-//     a campaign spans segments of very different account sizes.
+//   - 6Sense multi-segment reach/engagement is BLENDED from summed numerators
+//     and denominators across each segment's latest snapshot. It was formerly
+//     an unweighted mean of per-segment percentages, which overstated a
+//     campaign spanning segments of different sizes; see the note at the
+//     calculation.
 //   - Outreach/email figures are lifetime-to-date (latest cumulative snapshot),
 //     so they don't change with the year filter the way volume would.
 //   - Open deals are scoped per DEAL, not per attribution row: a deal is in
@@ -49,7 +51,6 @@ import type {
   LinkedinAdSnapshot,
   CampaignTagLink,
 } from '../types/db';
-import { reachPct, engagementPct } from './sixsense';
 import { compareTouchesChronologically } from './compute';
 
 // One channel's contribution to the campaign funnel (the channel that sourced
@@ -645,9 +646,23 @@ export function computeScorecard(
   let engagement: number | null = null;
   let sixSenseAccounts: number | null = null;
   if (segmentRefs.size > 0) {
-    let rSum = 0,
-      eSum = 0,
-      aSum = 0,
+    // Rates are recomputed from SUMMED numerators and denominators, never
+    // averaged across segments (CLAUDE.md section 4).
+    //
+    // This previously averaged each segment's own percentage. That is only
+    // correct when segments are the same size, and campaigns routinely span
+    // very different ones: a 10,000-account segment at 10% reach beside a
+    // 100-account segment at 90% reached "50%", when the true blended figure
+    // is (1,000 + 90) / 10,100 = 10.8%. The unweighted mean overstated the
+    // campaign by a factor of nearly five.
+    //
+    // Each segment still contributes only its LATEST snapshot, because 6sense
+    // is a point-in-time source and snapshots are never summed across time.
+    // Summing across SEGMENTS at one point in time is a different operation
+    // and is correct.
+    let reachSum = 0,
+      engagementSum = 0,
+      accountsSum = 0,
       n = 0;
     for (const seg of segmentRefs) {
       const rows = data.sixSenseSnapshots
@@ -659,16 +674,19 @@ export function computeScorecard(
         .sort((a, b) => (a.snapshot_date < b.snapshot_date ? 1 : -1));
       const latest = rows[0];
       if (latest) {
-        rSum += reachPct(latest);
-        eSum += engagementPct(latest);
-        aSum += latest.total_accounts;
+        reachSum += latest.reach;
+        engagementSum += latest.engagement;
+        accountsSum += latest.total_accounts;
         n++;
       }
     }
     if (n > 0) {
-      reach = rSum / n;
-      engagement = eSum / n;
-      sixSenseAccounts = aSum;
+      // A zero denominator stays null, not 0: "no target accounts" is not
+      // "0% reach".
+      reach = accountsSum > 0 ? (reachSum / accountsSum) * 100 : null;
+      engagement =
+        accountsSum > 0 ? (engagementSum / accountsSum) * 100 : null;
+      sixSenseAccounts = accountsSum;
     }
   }
 
