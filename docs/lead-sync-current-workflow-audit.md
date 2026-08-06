@@ -58,6 +58,15 @@ Schedule trigger -> Salesforce search -> Code transform
    currently incapable of maintaining memberships. Since Bite 4E, the
    funnel counts touches, which means **new memberships reach reporting
    only through the manual report import** until this is rebuilt.
+7a. **PERSON identity IS retained, unlike campaign identity.** Findings 5
+   and 6 concern campaign-membership identity, and both remain accurate.
+   They must not be read as "the workflow keeps no Salesforce identity at
+   all": the transform does emit `sfdc_contact_id: row.ContactId` and
+   `sfdc_lead_id: row.LeadId`, so the exact Salesforce person ids reach
+   `leads.sfdc_lead_id` and `leads.sfdc_contact_id`. The distinction
+   matters because Bite 4G2B2A anchors lifecycle observation on exactly
+   those columns (`docs/lead-lifecycle-ingestion-dry-run.md`). Campaign
+   identity is lost; person identity is not.
 
 ### Lifecycle handling
 
@@ -121,8 +130,9 @@ Schedule trigger -> Salesforce search -> Code transform
 
 The two findings that matter most for reporting correctness today are
 **9** (every synced person is stamped `lead`, so MQL state never arrives
-through this feed) and **5 plus 6** (no campaign identity survives, so the
-feed cannot maintain the membership contract the funnel now counts). The
+through this feed) and **5 plus 6** (no CAMPAIGN identity survives, so the
+feed cannot maintain the membership contract the funnel now counts; see
+**7a**, person identity does survive). The
 two that matter most operationally are **15** (failures continue silently)
 and **17** (nobody is told). Finding **16** is a standing data-handling
 concern independent of the rebuild.

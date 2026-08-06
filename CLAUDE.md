@@ -117,10 +117,13 @@ alone is not proof of production state.
   accumulated forward. A first observation is a BASELINE recording the state
   first seen, never a transition: `null -> mql` means "first observed as
   MQL", not "moved from Lead to MQL". The contracts are in
-  `docs/lead-lifecycle-observation-ledger.md` (storage and planning) and
+  `docs/lead-lifecycle-observation-ledger.md` (storage and planning),
   `docs/lead-lifecycle-atomic-apply.md` (serialization and the restricted
-  apply function). Read them only when working on lifecycle sync. Ingestion
-  is not built or active: nothing writes to these tables today.
+  apply function), and `docs/lead-lifecycle-ingestion-dry-run.md` (scope,
+  extraction, and the disabled dry run). Read them only when working on
+  lifecycle sync. Ingestion is not built or active: nothing writes to
+  these tables today, and the ledger observes only people Sourced already
+  anchors by exact Salesforce id, never the whole org.
 
 #### Opportunities and attribution
 
