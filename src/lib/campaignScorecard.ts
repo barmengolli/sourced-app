@@ -19,9 +19,11 @@
 //   - Conversion rates cross two silos (marketing leads vs SFDC opps). A
 //     channel can hold sales-sourced opps with no marketing MQL, so MQL->Opp
 //     may read "-" (never a >100% impossibility; ratio() guards the zero).
-//   - 6Sense multi-segment reach/engagement is an UNWEIGHTED mean of each
-//     segment's latest snapshot. Fine for single-segment campaigns; revisit if
-//     a campaign spans segments of very different account sizes.
+//   - 6Sense multi-segment reach/engagement is BLENDED from summed numerators
+//     and denominators across each segment's latest snapshot. It was formerly
+//     an unweighted mean of per-segment percentages, which overstated a
+//     campaign spanning segments of different sizes; see the note at the
+//     calculation.
 //   - Outreach/email figures are lifetime-to-date (latest cumulative snapshot),
 //     so they don't change with the year filter the way volume would.
 //   - Open deals are scoped per DEAL, not per attribution row: a deal is in
@@ -49,8 +51,16 @@ import type {
   LinkedinAdSnapshot,
   CampaignTagLink,
 } from '../types/db';
-import { reachPct, engagementPct } from './sixsense';
 import { compareTouchesChronologically } from './compute';
+import {
+  dedupeSnapshots,
+  sequencePeriodActivity,
+  type OutreachReportingRow,
+  type ActivityCounter,
+} from './outreachReporting';
+import type { ReportingPeriod } from '../types/reporting';
+import { periodBounds } from './reportingPeriods';
+import { selectSnapshotForPeriod } from './snapshotSelection';
 
 // One channel's contribution to the campaign funnel (the channel that sourced
 // the leads / was first-touch on the opps).
@@ -352,7 +362,32 @@ export function computeScorecard(
     linkedinSnapshots: LinkedinAdSnapshot[];
   },
   filterYear: number | null,
+  // The selected reporting period. When supplied, Outreach figures are DERIVED
+  // ACTIVITY for that period (end-of-period counter minus a real pre-period
+  // baseline) instead of lifetime-to-date counters.
+  //
+  // Outreach stores cumulative lifetime totals, so reading the latest row gives
+  // everything the sequence ever sent, not what it sent in the selected period.
+  // Those numbers sat in the same KPI row as year-filtered Leads and MQLs with
+  // no qualifier, so a reader comparing "2026 Leads" against "Sent" was
+  // comparing one year against all time.
+  //
+  // Optional so callers that genuinely want lifetime totals (and say so) keep
+  // working; the Campaigns Overview page always passes a period.
+  period?: ReportingPeriod,
 ): CampaignScorecard {
+  // ONE set of period boundaries for every source on the card, so the funnel
+  // cohort, the LinkedIn weeks, and the 6sense snapshot cannot disagree about
+  // what "this period" means. Falls back to the legacy year filter when no
+  // period is supplied.
+  const bounds = period ? periodBounds(period) : null;
+  const inPeriod = (iso: string | null | undefined): boolean => {
+    if (!iso) return false;
+    if (bounds) return iso >= bounds.start && iso <= bounds.end;
+    if (filterYear == null) return true;
+    return Number(iso.slice(0, 4)) === filterYear;
+  };
+
   const links = allLinks.filter((l) => l.tag_id === tagId);
   // Every tag carried by each channel. A channel can be tagged to SEVERAL
   // campaigns, so "claimed by someone else" is a property of its whole tag set,
@@ -400,14 +435,15 @@ export function computeScorecard(
   );
 
   // --- Leads / MQLs (by source channel) ---
-  const yearOf = (iso?: string | null) =>
-    iso ? Number(iso.slice(0, 4)) : null;
   const campaignLeads = data.leads.filter(
     (l) =>
       l.source_channel_id != null &&
       channelSet.has(l.source_channel_id) &&
-      (filterYear == null ||
-        yearOf(l.marketing_sourced_date) === filterYear),
+      // Cohort on marketing sourced date, unchanged in basis; only the window
+      // narrows from a whole year to the selected period.
+      (bounds || filterYear != null
+        ? inPeriod(l.marketing_sourced_date)
+        : true),
   );
   const leads = campaignLeads.length;
   const mqls = campaignLeads.filter(isMql).length;
@@ -458,8 +494,14 @@ export function computeScorecard(
   const campaignDealRows: Attribution[] = [];
   const touchesByDealKey = new Map<string, AttributionTouch[]>();
   for (const [k, rows] of rowsByDeal) {
-    // Year filter at the DEAL level: in scope if any row falls in the year.
-    if (filterYear != null && !rows.some((r) => r.year === filterYear)) continue;
+    // Period filter at the DEAL level: in scope if any stage row falls in the
+    // period. Deal-level (not row-level) so a deal's stage is a property of
+    // the deal rather than of the filter.
+    if (bounds) {
+      if (!rows.some((r) => inPeriod(r.stage_entered_at))) continue;
+    } else if (filterYear != null && !rows.some((r) => r.year === filterYear)) {
+      continue;
+    }
     const touches = touchesForDeal(rows);
     const inScope =
       rows.some((r) => r.channel_id != null && channelSet.has(r.channel_id)) ||
@@ -645,66 +687,155 @@ export function computeScorecard(
   let engagement: number | null = null;
   let sixSenseAccounts: number | null = null;
   if (segmentRefs.size > 0) {
-    let rSum = 0,
-      eSum = 0,
-      aSum = 0,
+    // Rates are recomputed from SUMMED numerators and denominators, never
+    // averaged across segments (CLAUDE.md section 4).
+    //
+    // This previously averaged each segment's own percentage. That is only
+    // correct when segments are the same size, and campaigns routinely span
+    // very different ones: a 10,000-account segment at 10% reach beside a
+    // 100-account segment at 90% reached "50%", when the true blended figure
+    // is (1,000 + 90) / 10,100 = 10.8%. The unweighted mean overstated the
+    // campaign by a factor of nearly five.
+    //
+    // Each segment still contributes only its LATEST snapshot, because 6sense
+    // is a point-in-time source and snapshots are never summed across time.
+    // Summing across SEGMENTS at one point in time is a different operation
+    // and is correct.
+    let reachSum = 0,
+      engagementSum = 0,
+      accountsSum = 0,
       n = 0;
     for (const seg of segmentRefs) {
-      const rows = data.sixSenseSnapshots
-        .filter(
-          (s) =>
-            s.segment === seg &&
-            (filterYear == null || s.year === filterYear),
-        )
-        .sort((a, b) => (a.snapshot_date < b.snapshot_date ? 1 : -1));
-      const latest = rows[0];
+      const segRows = data.sixSenseSnapshots.filter((s) => s.segment === seg);
+      // Point-in-time: the latest eligible snapshot at or before period end.
+      // Never a sum across months, and never a future reading borrowed
+      // backwards. Falls back to the legacy year filter without a period.
+      let latest: SixSenseSnapshot | undefined;
+      if (period) {
+        const sel = selectSnapshotForPeriod(segRows, period);
+        latest = sel.state === 'present' ? sel.snapshot : undefined;
+      } else {
+        latest = segRows
+          .filter((s) => filterYear == null || s.year === filterYear)
+          .sort((a, b) => (a.snapshot_date < b.snapshot_date ? 1 : -1))[0];
+      }
       if (latest) {
-        rSum += reachPct(latest);
-        eSum += engagementPct(latest);
-        aSum += latest.total_accounts;
+        reachSum += latest.reach;
+        engagementSum += latest.engagement;
+        accountsSum += latest.total_accounts;
         n++;
       }
     }
     if (n > 0) {
-      reach = rSum / n;
-      engagement = eSum / n;
-      sixSenseAccounts = aSum;
+      // A zero denominator stays null, not 0: "no target accounts" is not
+      // "0% reach".
+      reach = accountsSum > 0 ? (reachSum / accountsSum) * 100 : null;
+      engagement =
+        accountsSum > 0 ? (engagementSum / accountsSum) * 100 : null;
+      sixSenseAccounts = accountsSum;
     }
   }
 
-  // --- Outreach (latest cumulative snapshot per tagged sequence) ---
+  // --- Outreach ---
+  // With a period: DERIVED ACTIVITY via the audited outreachReporting module,
+  // which handles pre-period baselines, resets, duplicate natural keys, and
+  // metric-specific coverage gaps. Without one: lifetime-to-date counters, the
+  // legacy behaviour, kept only for callers that ask for it explicitly.
   let outreachSent = 0;
   let outreachReplied = 0;
   const emailBySequence: SequenceEmailStats[] = [];
   if (sequenceRefs.size > 0) {
-    for (const seqId of sequenceRefs) {
-      const rows = data.outreachSnapshots
-        .filter(
-          (s) =>
-            s.sequence_id === seqId &&
-            (filterYear == null || s.year === filterYear),
-        )
-        .sort((a, b) =>
-          a.export_date < b.export_date ? -1 : a.export_date > b.export_date ? 1 : 0,
-        );
-      if (rows.length === 0) continue;
-      // Cumulative lifetime counters: the latest row holds the running total.
-      const last = rows[rows.length - 1];
-      outreachSent += last.total_sent;
-      outreachReplied += last.replied;
-      emailBySequence.push({
-        sequenceId: seqId,
-        name: last.sequence_name.replace(/^\[\d{4}\]\s*-\s*/, ''),
-        sent: last.total_sent,
-        delivered: last.delivered,
-        bounced: last.bounced,
-        opened: last.opened,
-        clicked: last.clicked,
-        replied: last.replied,
-        optedOut: last.opted_out,
-        calls: last.outbound_calls,
-        linkedinMessages: last.linkedin_tasks_completed,
-      });
+    if (period) {
+      const rows: OutreachReportingRow[] = data.outreachSnapshots
+        .filter((s2) => sequenceRefs.has(s2.sequence_id))
+        .map((s2) => ({
+          export_date: s2.export_date,
+          sequence_id: s2.sequence_id,
+          sequence_name: s2.sequence_name,
+          created_at: s2.created_at ?? null,
+          counters: {
+            total_sent: s2.total_sent,
+            delivered: s2.delivered,
+            bounced: s2.bounced,
+            opened: s2.opened,
+            clicked: s2.clicked,
+            replied: s2.replied,
+            opted_out: s2.opted_out,
+            outbound_calls: s2.outbound_calls,
+            linkedin_tasks_completed: s2.linkedin_tasks_completed,
+          },
+        }));
+      const deduped = dedupeSnapshots(rows);
+
+      // A metric whose activity cannot be established (no baseline, a reset, an
+      // ambiguous duplicate) contributes 0 to the visible count but is NOT the
+      // same as measured zero. The page shows a dash when nothing is
+      // measurable at all, which is why `measured` is tracked separately.
+      const activityOf = (
+        series: readonly OutreachReportingRow[],
+        metric: ActivityCounter,
+      ): { value: number; measured: boolean } => {
+        const a = sequencePeriodActivity(series, metric, period, deduped.feedStart ?? undefined);
+        return a.state === 'present'
+          ? { value: a.value, measured: true }
+          : { value: 0, measured: false };
+      };
+
+      let anyMeasured = false;
+      for (const [seqId, series] of deduped.bySequence) {
+        const sent = activityOf(series, 'total_sent');
+        const replied = activityOf(series, 'replied');
+        if (sent.measured || replied.measured) anyMeasured = true;
+        outreachSent += sent.value;
+        outreachReplied += replied.value;
+        const last = series[series.length - 1];
+        emailBySequence.push({
+          sequenceId: seqId,
+          name: (last?.sequence_name ?? '').replace(/^\[\d{4}\]\s*-\s*/, ''),
+          sent: sent.value,
+          delivered: activityOf(series, 'delivered').value,
+          bounced: activityOf(series, 'bounced').value,
+          opened: activityOf(series, 'opened').value,
+          clicked: activityOf(series, 'clicked').value,
+          replied: replied.value,
+          optedOut: activityOf(series, 'opted_out').value,
+          calls: activityOf(series, 'outbound_calls').value,
+          linkedinMessages: activityOf(series, 'linkedin_tasks_completed').value,
+        });
+      }
+      // Nothing measurable anywhere: report missing rather than a row of zeros
+      // that would read as "this campaign sent nothing".
+      if (!anyMeasured) emailBySequence.length = 0;
+    } else {
+      for (const seqId of sequenceRefs) {
+        const rows = data.outreachSnapshots
+          .filter(
+            (s2) =>
+              s2.sequence_id === seqId &&
+              (filterYear == null || s2.year === filterYear),
+          )
+          .sort((a, b) =>
+            a.export_date < b.export_date ? -1 : a.export_date > b.export_date ? 1 : 0,
+          );
+        if (rows.length === 0) continue;
+        // Cumulative lifetime counters: the latest row holds the running total.
+        const last = rows[rows.length - 1];
+        outreachSent += last.total_sent;
+        outreachReplied += last.replied;
+        emailBySequence.push({
+          sequenceId: seqId,
+          name: last.sequence_name.replace(/^\[\d{4}\]\s*-\s*/, ''),
+          sent: last.total_sent,
+          delivered: last.delivered,
+          bounced: last.bounced,
+          opened: last.opened,
+          clicked: last.clicked,
+          replied: last.replied,
+          optedOut: last.opted_out,
+          calls: last.outbound_calls,
+          linkedinMessages: last.linkedin_tasks_completed,
+        });
+      }
     }
     emailBySequence.sort((a, b) => b.sent - a.sent);
   }
@@ -718,10 +849,15 @@ export function computeScorecard(
   const adsByAdset: LinkedinAdsetStats[] = [];
   if (linkedinAdsetRefs.size > 0) {
     for (const adsetId of linkedinAdsetRefs) {
+      // Additive weekly flow: sum every week whose week-ending Sunday falls
+      // in the period. Rates are recomputed from these totals in the UI, never
+      // averaged across weeks.
       const rows = data.linkedinSnapshots.filter(
         (s) =>
           s.adset_id === adsetId &&
-          (filterYear == null || s.year === filterYear),
+          (bounds
+            ? inPeriod(s.snapshot_date)
+            : filterYear == null || s.year === filterYear),
       );
       if (rows.length === 0) continue;
       let spend = 0,

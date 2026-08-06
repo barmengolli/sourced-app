@@ -28,7 +28,7 @@ import {
 } from '../lib/compute';
 import { quarterOfIsoDate } from '../lib/dates';
 import { formatCurrency } from '../lib/formatters';
-import PeriodSelector from '../components/funnel/PeriodSelector';
+import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView, {
   type InfluenceStatus,
@@ -43,6 +43,9 @@ import {
 import { FUNNEL_STAGE_LABELS } from '../constants/funnelStages';
 import type { AttributionStageKey } from '../types/db';
 import type { RegionKey } from '../constants/regions';
+import type { ComparisonMode } from '../types/reporting';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
 
 interface FunnelVelocityPageProps {
   year: number;
@@ -51,6 +54,9 @@ interface FunnelVelocityPageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+  // Comparison mode from the shared reporting selection.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
 
 // Transitions surfaced on this page, in display order. Sourced from
@@ -106,6 +112,10 @@ function colorClass(
   return 'text-danger';
 }
 
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('funnel-velocity')!;
+
 export default function FunnelVelocityPage({
   year,
   filter,
@@ -113,6 +123,8 @@ export default function FunnelVelocityPage({
   onFilterChange,
   regions,
   onRegionsChange,
+  comparison,
+  onComparisonChange,
 }: FunnelVelocityPageProps) {
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
@@ -261,12 +273,16 @@ export default function FunnelVelocityPage({
           <h1 className="text-2xl font-semibold text-charcoal">
             Marketing Funnel: Opportunities
           </h1>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-sm text-slate-muted">
             Per-transition velocity averages and per-deal time-in-stage.
             Active deals are scoped to the selected period and region.
           </p>
         </div>
-        <PeriodSelector
+        <FunnelReportingFilters
           year={year}
           filter={filter}
           yearOptions={yearOptions}
@@ -274,6 +290,8 @@ export default function FunnelVelocityPage({
           onFilterChange={onFilterChange}
           regions={regions}
           onRegionsChange={onRegionsChange}
+          comparison={comparison}
+          onComparisonChange={onComparisonChange}
         />
       </header>
 

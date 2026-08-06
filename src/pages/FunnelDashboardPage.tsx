@@ -13,7 +13,7 @@ import {
 } from '../lib/compute';
 import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
-import PeriodSelector from '../components/funnel/PeriodSelector';
+import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import ChartCard from '../components/charts/ChartCard';
 import BarChartView from '../components/charts/BarChartView';
 import DonutChartView from '../components/charts/DonutChartView';
@@ -22,6 +22,9 @@ import TrendLineChartView from '../components/charts/TrendLineChartView';
 import FunnelSankeyView from '../components/charts/FunnelSankeyView';
 import YearLeadCharts from '../components/charts/YearLeadCharts';
 import type { RegionKey } from '../constants/regions';
+import type { ComparisonMode } from '../types/reporting';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
 
 interface FunnelDashboardPageProps {
   year: number;
@@ -30,7 +33,14 @@ interface FunnelDashboardPageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+  // Comparison mode from the shared reporting selection.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
+
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('funnel-dashboard')!;
 
 export default function FunnelDashboardPage({
   year,
@@ -39,6 +49,8 @@ export default function FunnelDashboardPage({
   onFilterChange,
   regions,
   onRegionsChange,
+  comparison,
+  onComparisonChange,
 }: FunnelDashboardPageProps) {
   // Keep FunnelSankeyView reachable for TS while the Funnel Flow
   // card is commented out below. The void reference satisfies the
@@ -54,6 +66,9 @@ export default function FunnelDashboardPage({
   // Used only to widen the year selector below; this page's charts
   // don't read budgets directly.
   const costsHook = useCampaignCosts();
+
+  // "Q2 2026" or "2026", matching the other funnel pages' wording.
+  const periodLabel = filter === 'year' ? `${year}` : `${filter} ${year}`;
 
   const yearOptions = useMemo(() => {
     // Unified derivation: any year touched by a lead, attribution,
@@ -234,6 +249,10 @@ export default function FunnelDashboardPage({
           <h1 className="text-2xl font-semibold text-charcoal">
             Marketing Funnel: Leads & MQLs
           </h1>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-sm text-slate-muted">
             Read-only funnel charts for the selected period. Edit values on
             the Data Entry tab.
@@ -248,7 +267,7 @@ export default function FunnelDashboardPage({
             lower, above the period-specific charts they actually filter, so
             the top annual charts aren't sitting under a control that doesn't
             affect them. */}
-        <PeriodSelector
+        <FunnelReportingFilters
           year={year}
           filter={filter}
           yearOptions={yearOptions}
@@ -256,7 +275,8 @@ export default function FunnelDashboardPage({
           onFilterChange={onFilterChange}
           regions={regions}
           onRegionsChange={onRegionsChange}
-          variant="global"
+          comparison={comparison}
+          onComparisonChange={onComparisonChange}
         />
       </header>
 
@@ -269,9 +289,20 @@ export default function FunnelDashboardPage({
       )}
 
       <section className="space-y-4">
-        {/* Year-wide bar charts sit at the top so the user lands on
-            the portfolio shape before drilling into per-period
-            details. These two ignore the quarter selector. */}
+        {/* LABELLED CONTEXT SECTION. These charts deliberately span the whole
+            year and are NOT governed by the period control above. The standard
+            requires a fixed full-year view to say so in place, rather than
+            leaving a reader to infer it from a selector positioned elsewhere.
+            The previous design moved the quarter buttons below these charts to
+            hint at the scope split; a visible label is the honest form. */}
+        <div className="flex items-baseline gap-2 pb-1 border-b border-border">
+          <h2 className="text-sm font-medium text-charcoal">
+            Full year context
+          </h2>
+          <span className="text-xs text-slate-muted">
+            {year} in full. Not affected by the selected period.
+          </span>
+        </div>
         <YearLeadCharts
           data={yearLeads}
           year={year}
@@ -280,23 +311,13 @@ export default function FunnelDashboardPage({
           priorYear={year - 1}
           loading={leadsLoading || actualsHook.loading}
         />
-        {/* Period (quarter) selector for the charts below only. The three
-            annual charts above span the full year and ignore it; placing it
-            here makes that scope visible. */}
-        <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border">
-          <PeriodSelector
-            year={year}
-            filter={filter}
-            yearOptions={yearOptions}
-            onYearChange={onYearChange}
-            onFilterChange={onFilterChange}
-            regions={regions}
-            onRegionsChange={onRegionsChange}
-            variant="period"
-          />
+        {/* Everything below follows the period selected in the header. */}
+        <div className="flex items-baseline gap-2 pt-2 border-t border-border">
+          <h2 className="text-sm font-medium text-charcoal">
+            Selected period
+          </h2>
           <span className="text-xs text-slate-muted">
-            Applies to the charts below. The three charts above cover the full
-            year.
+            {periodLabel}. Follows the timeframe chosen above.
           </span>
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">

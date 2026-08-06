@@ -58,6 +58,16 @@ interface ReportingFilterBarProps {
   comparison: ComparisonMode;
   // Selectable years, newest-first is the caller's choice.
   years: ReadonlyArray<number>;
+  // Grains this page's SOURCE can honestly serve. A grain omitted here renders
+  // disabled with `disabledGrainReason` rather than vanishing, so the control
+  // explains itself instead of looking broken or, worse, silently reporting a
+  // wider period than the reader asked for. Defaults to all three.
+  supportedGrains?: ReadonlyArray<ReportingGrain>;
+  disabledGrainReason?: string;
+  // Hide the comparison control entirely. A data-entry surface edits stored
+  // values rather than reporting a change over time, so offering "Compare to"
+  // there would promise a delta the page never computes.
+  showComparison?: boolean;
   onPeriodChange: (period: ReportingPeriod) => void;
   onComparisonChange: (mode: ComparisonMode) => void;
   // Business filters (region, campaign, channel, sequence, search) render after
@@ -85,10 +95,20 @@ export default function ReportingFilterBar({
   period,
   comparison,
   years,
+  supportedGrains,
+  disabledGrainReason,
+  showComparison = true,
   onPeriodChange,
   onComparisonChange,
   children,
 }: ReportingFilterBarProps) {
+  const allowed = supportedGrains ?? ['month', 'quarter', 'year'];
+  const grainOptions: ReadonlyArray<SegmentedOption<ReportingGrain>> =
+    GRAIN_OPTIONS.map((o) =>
+      allowed.includes(o.value)
+        ? o
+        : { ...o, disabled: true, title: disabledGrainReason },
+    );
   const yearOptions: ReadonlyArray<ReportingSelectOption<string>> = years.map(
     (y) => ({ value: String(y), label: String(y) }),
   );
@@ -100,6 +120,11 @@ export default function ReportingFilterBar({
   // existing previous_year are preserved, and no comparison change is emitted
   // for grains that keep both options (month, quarter).
   function handleGrainChange(grain: ReportingGrain) {
+    // No guard for unsupported grains here on purpose. SegmentedControl omits
+    // disabled options from its keyboard roving order AND sets the disabled
+    // attribute, so an unsupported grain cannot reach this handler by click or
+    // by keyboard. A guard here was verified unreachable by mutation testing,
+    // and dead code that looks like a safety check is worse than none.
     onPeriodChange(changeGrain(period, grain));
     if (grain === 'year' && comparison === 'previous_period') {
       onComparisonChange('previous_year');
@@ -111,7 +136,7 @@ export default function ReportingFilterBar({
       {/* 1. Timeframe grain */}
       <SegmentedControl<ReportingGrain>
         label="Timeframe"
-        options={GRAIN_OPTIONS}
+        options={grainOptions}
         value={period.grain}
         onChange={handleGrainChange}
       />
@@ -164,11 +189,13 @@ export default function ReportingFilterBar({
       />
 
       {/* 4. Comparison */}
-      <ComparisonControl
-        grain={period.grain}
-        value={comparison}
-        onChange={onComparisonChange}
-      />
+      {showComparison ? (
+        <ComparisonControl
+          grain={period.grain}
+          value={comparison}
+          onChange={onComparisonChange}
+        />
+      ) : null}
 
       {/* 5. Business filters (region, campaign, channel, sequence, search) */}
       {children}

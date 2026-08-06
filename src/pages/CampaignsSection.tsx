@@ -14,8 +14,14 @@ import { useSixSenseSnapshots } from '../hooks/useSixSenseSnapshots';
 import { useLinkedinSnapshots } from '../hooks/useLinkedinSnapshots';
 import CampaignTagsPage from './CampaignTagsPage';
 import CampaignsOverviewPage from './CampaignsOverviewPage';
+import type { ComparisonMode, ReportingPeriod } from '../types/reporting';
 
 interface CampaignsSectionProps {
+  // Shared reporting selection, threaded to the Overview page.
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
   page: 'campaigns-overview' | 'campaigns-tags';
   onNavigate: (p: PageKey) => void;
 }
@@ -23,6 +29,10 @@ interface CampaignsSectionProps {
 export default function CampaignsSection({
   page,
   onNavigate,
+  explicitPeriod,
+  comparison,
+  onPeriodChange,
+  onComparisonChange,
 }: CampaignsSectionProps) {
   const tagsHook = useCampaignTags();
   const channels = useChannels();
@@ -53,6 +63,10 @@ export default function CampaignsSection({
 
   return (
     <CampaignsOverviewPage
+      explicitPeriod={explicitPeriod}
+      comparison={comparison}
+      onPeriodChange={onPeriodChange}
+      onComparisonChange={onComparisonChange}
       tagsHook={tagsHook}
       channels={channels}
       leads={leads}

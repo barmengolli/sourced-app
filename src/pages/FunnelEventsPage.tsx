@@ -33,7 +33,7 @@ import {
 } from '../lib/compute';
 import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
-import PeriodSelector from '../components/funnel/PeriodSelector';
+import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import ChartCard from '../components/charts/ChartCard';
 import { CHART_COLORS } from '../constants/chartColors';
 import {
@@ -43,6 +43,9 @@ import {
   type EventActivationValue,
 } from '../constants/eventActivations';
 import type { RegionKey } from '../constants/regions';
+import type { ComparisonMode } from '../types/reporting';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
 
 // Pluralized labels for the KPI tiles. The compute layer keys on the
 // singular SFDC names, but at the top of the page we're showing a sum
@@ -64,7 +67,14 @@ interface FunnelEventsPageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+  // Comparison mode from the shared reporting selection.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
+
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('funnel-events')!;
 
 export default function FunnelEventsPage({
   year,
@@ -73,6 +83,8 @@ export default function FunnelEventsPage({
   onFilterChange,
   regions,
   onRegionsChange,
+  comparison,
+  onComparisonChange,
 }: FunnelEventsPageProps) {
   const { leads } = useLeads();
   const channels = useChannels();
@@ -129,7 +141,7 @@ export default function FunnelEventsPage({
     [channels, year],
   );
 
-  const rows: EventActivationCounts[] = useMemo(
+  const activations = useMemo(
     () =>
       computeEventActivations({
         leads,
@@ -141,6 +153,11 @@ export default function FunnelEventsPage({
       }),
     [leads, visibleChannels, year, filter, regions],
   );
+  const rows: EventActivationCounts[] = activations.rows;
+  // Whether the events taxonomy for the SELECTED year exists at all. When it
+  // does not, every count below is unknown rather than zero, and the tiles
+  // must say so.
+  const taxonomyMissing = activations.status !== 'ok';
 
   // KPI tile totals: sum each activation type across every event in
   // the current view. Column totals in the table equal these by
@@ -190,6 +207,10 @@ export default function FunnelEventsPage({
           <h1 className="text-2xl font-semibold text-charcoal">
             Marketing Funnel: Events
           </h1>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-sm text-slate-muted">
             Event-marketing engagement by activation type. Counts are
             unique contacts per event in the selected period.
@@ -201,7 +222,7 @@ export default function FunnelEventsPage({
             membership counts on the funnel grid.
           </p>
         </div>
-        <PeriodSelector
+        <FunnelReportingFilters
           year={year}
           filter={filter}
           yearOptions={yearOptions}
@@ -209,28 +230,40 @@ export default function FunnelEventsPage({
           onFilterChange={onFilterChange}
           regions={regions}
           onRegionsChange={onRegionsChange}
+          comparison={comparison}
+          onComparisonChange={onComparisonChange}
         />
       </header>
 
-      {/* KPI tiles: total contacts by activation type across all
-          events in the current period and region. Always render so
-          the user sees "0 across all events" rather than a blank
-          card on empty periods. */}
+      {/* KPI tiles. A real zero (the taxonomy exists, nobody activated) shows
+          0. A MISSING taxonomy shows a dash: rendering 0 there would claim we
+          ran events that nobody engaged with, when in fact this year's events
+          structure was never set up. */}
       <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         {EVENT_ACTIVATION_ALL.map((v) => (
           <ChartCard
             key={v}
             title={KPI_TILE_LABELS[v]}
-            subtitle={`Across all events in ${periodLabel}`}
+            subtitle={
+              taxonomyMissing
+                ? `No events structure for ${year}`
+                : `Across all events in ${periodLabel}`
+            }
           >
             <div className="text-3xl font-semibold text-charcoal tabular-nums">
-              {totals[v].toLocaleString()}
+              {taxonomyMissing ? '—' : totals[v].toLocaleString()}
             </div>
           </ChartCard>
         ))}
       </section>
 
-      {rows.length === 0 ? (
+      {taxonomyMissing ? (
+        <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
+          {activations.status === 'no-parent'
+            ? `No events parent channel exists for ${year}, so event activations cannot be reported for this year. Add a "${year} - Events" channel, or tag an existing events parent with the year, on the Channels page.`
+            : `The events parent for ${year} has no event channels yet, so there is nothing to report. Add event sub-channels under "${activations.parentName}" on the Channels page.`}
+        </p>
+      ) : rows.length === 0 ? (
         <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
           No events with contacts in the selected period.
         </p>

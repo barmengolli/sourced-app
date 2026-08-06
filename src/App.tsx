@@ -36,6 +36,8 @@ import {
   OUTREACH_REGIONS,
   type OutreachRegionKey,
 } from './constants/outreachRegions';
+import { useReportingSelection } from './hooks/useReportingSelection';
+import { toPeriodFilter, fromPeriodFilter } from './lib/reportingPeriodBridge';
 
 export type PageKey =
   | 'funnel-data'
@@ -77,6 +79,10 @@ export type CompareView = 'single' | 'rolling3';
 interface FunnelSubPageProps {
   year: number;
   filter: PeriodFilter;
+  // Comparison mode from the shared reporting selection, so every funnel page
+  // compares the same way and a change on one carries to the others.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
   onYearChange: (y: number) => void;
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
@@ -127,9 +133,24 @@ export interface OutreachSubPageProps {
 export interface SixSenseSubPageProps {
   snapshots: SixSenseSnapshot[];
   loading: boolean;
+  // Shared reporting selection, so a period chosen here survives navigation to
+  // and from the other reporting pages.
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
   upsertSnapshot: (input: SixSenseSnapshotInput) => Promise<SixSenseSnapshot>;
   renameSegment: (from: string, to: string) => Promise<void>;
   onNavigate: (p: PageKey) => void;
+}
+
+// The shared reporting selection, passed to sections that own their own data
+// hooks (BDR, Campaigns, LinkedIn) rather than receiving a props bundle.
+export interface SharedReportingProps {
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
 
 function PageBody({
@@ -138,12 +159,14 @@ function PageBody({
   funnelProps,
   outreachProps,
   sixSenseProps,
+  reportingProps,
 }: {
   page: PageKey;
   onNavigate: (p: PageKey) => void;
   funnelProps: FunnelSubPageProps;
   outreachProps: OutreachSubPageProps;
   sixSenseProps: SixSenseSubPageProps;
+  reportingProps: SharedReportingProps;
 }) {
   switch (page) {
     case 'funnel-data':
@@ -171,10 +194,18 @@ function PageBody({
       return <SixSenseImportPage {...sixSenseProps} />;
     case 'bdr-quota-dashboard':
     case 'bdr-quota-quotas':
-      return <BdrSection page={page} onNavigate={onNavigate} />;
+      return (
+        <BdrSection page={page} onNavigate={onNavigate} {...reportingProps} />
+      );
     case 'campaigns-overview':
     case 'campaigns-tags':
-      return <CampaignsSection page={page} onNavigate={onNavigate} />;
+      return (
+        <CampaignsSection
+          page={page}
+          onNavigate={onNavigate}
+          {...reportingProps}
+        />
+      );
     case 'linkedin-dashboard':
       return <LinkedinAdsSection />;
     case 'funnel-import':
@@ -195,13 +226,50 @@ function PageBody({
 export default function App() {
   const [page, setPage] = useState<PageKey>(initialPage);
 
-  // Year/quarter selector state lifts to App.tsx so switching between Funnel
-  // sub-tabs preserves what the user is looking at. Default is the current
-  // calendar quarter.
+  // The ONE reporting selection shared by every in-scope reporting page, so an
+  // explicit period survives navigation between reporting tabs. It holds only
+  // a real user choice; each page still derives its own default from its own
+  // data until then. See useReportingSelection for why a shared DEFAULT would
+  // be wrong while a shared CHOICE is right.
+  const reporting = useReportingSelection();
+
+  // Legacy funnel selectors. These remain because the funnel calculator still
+  // speaks PeriodFilter ('year' | 'Q1'..'Q4'); adding a month grain to it is a
+  // separate calculation change with its own reconciliation.
+  //
+  // They are now DERIVED from the shared reporting selection whenever the user
+  // has made one, so the shared bar and the legacy calculator can never
+  // disagree about the visible period. Until then they keep their existing
+  // calendar-quarter default.
   const initialQ = currentQuarter();
-  const [year, setYear] = useState<number>(initialQ.year);
-  const [filter, setFilter] = useState<PeriodFilter>(
+  const [legacyYear, setLegacyYear] = useState<number>(initialQ.year);
+  const [legacyFilter, setLegacyFilter] = useState<PeriodFilter>(
     `Q${initialQ.quarter}` as PeriodFilter,
+  );
+  const sharedFilter = reporting.explicitPeriod
+    ? toPeriodFilter(reporting.explicitPeriod)
+    : null;
+  // A month selection has no legacy equivalent and is NEVER widened to its
+  // quarter; the funnel pages disable Month for exactly this reason, so this
+  // only guards a period chosen on a month-capable page.
+  const year = reporting.explicitPeriod?.year ?? legacyYear;
+  const filter = sharedFilter ?? legacyFilter;
+
+  // Writing through the legacy setters also updates the shared selection, so a
+  // quarter picked on a funnel page carries to LinkedIn and Outreach.
+  const setYear = useCallback(
+    (y: number) => {
+      setLegacyYear(y);
+      reporting.setPeriod(fromPeriodFilter(y, filter));
+    },
+    [filter, reporting],
+  );
+  const setFilter = useCallback(
+    (f: PeriodFilter) => {
+      setLegacyFilter(f);
+      reporting.setPeriod(fromPeriodFilter(year, f));
+    },
+    [year, reporting],
   );
   // Region filter: defaults to all-on. React state only, matches the
   // year/filter lifecycle (resets to all-on on full reload, persists
@@ -314,6 +382,8 @@ export default function App() {
   }, []);
 
   const funnelProps: FunnelSubPageProps = {
+    comparison: reporting.comparison,
+    onComparisonChange: reporting.setComparison,
     year,
     filter,
     onYearChange: setYear,
@@ -345,7 +415,18 @@ export default function App() {
     loading: outreachLoading,
   };
 
+  const reportingProps: SharedReportingProps = {
+    explicitPeriod: reporting.explicitPeriod,
+    comparison: reporting.comparison,
+    onPeriodChange: reporting.setPeriod,
+    onComparisonChange: reporting.setComparison,
+  };
+
   const sixSenseProps: SixSenseSubPageProps = {
+    explicitPeriod: reporting.explicitPeriod,
+    comparison: reporting.comparison,
+    onPeriodChange: reporting.setPeriod,
+    onComparisonChange: reporting.setComparison,
     snapshots: sixSenseSnapshots,
     loading: sixSenseLoading,
     upsertSnapshot: upsertSixSenseSnapshot,
@@ -362,6 +443,7 @@ export default function App() {
             page={page}
             onNavigate={navigate}
             funnelProps={funnelProps}
+            reportingProps={reportingProps}
             outreachProps={outreachProps}
             sixSenseProps={sixSenseProps}
           />

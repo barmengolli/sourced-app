@@ -26,9 +26,12 @@ import {
 } from '../lib/compute';
 import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
-import PeriodSelector from '../components/funnel/PeriodSelector';
+import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import ChartCard from '../components/charts/ChartCard';
 import type { RegionKey } from '../constants/regions';
+import type { ComparisonMode } from '../types/reporting';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
 
 interface FunnelSpendPageProps {
   year: number;
@@ -37,6 +40,9 @@ interface FunnelSpendPageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+  // Comparison mode from the shared reporting selection.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
 
 function fmtUsd(n: number): string {
@@ -60,6 +66,10 @@ function fmtPct1(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('funnel-spend')!;
+
 export default function FunnelSpendPage({
   year,
   filter,
@@ -67,6 +77,8 @@ export default function FunnelSpendPage({
   onFilterChange,
   regions,
   onRegionsChange,
+  comparison,
+  onComparisonChange,
 }: FunnelSpendPageProps) {
   const { leads } = useLeads();
   const channels = useChannels();
@@ -226,6 +238,10 @@ export default function FunnelSpendPage({
           <h1 className="text-2xl font-semibold text-charcoal">
             Marketing Funnel: Spend
           </h1>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-sm text-slate-muted">
             Cost per lead, cost per MQL, and first-touch ROI by channel.
             Date-range budgets are prorated to the selected period.
@@ -237,7 +253,7 @@ export default function FunnelSpendPage({
             grid and each contact is charged to a single channel.
           </p>
         </div>
-        <PeriodSelector
+        <FunnelReportingFilters
           year={year}
           filter={filter}
           yearOptions={yearOptions}
@@ -245,6 +261,8 @@ export default function FunnelSpendPage({
           onFilterChange={onFilterChange}
           regions={regions}
           onRegionsChange={onRegionsChange}
+          comparison={comparison}
+          onComparisonChange={onComparisonChange}
         />
       </header>
 

@@ -14,21 +14,34 @@ import BdrGate from '../components/bdr/BdrGate';
 import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
 import BdrDashboardPage from './BdrDashboardPage';
 import BdrQuotasPage from './BdrQuotasPage';
+import type { ComparisonMode, ReportingPeriod } from '../types/reporting';
 
 interface BdrSectionProps {
+  // Shared reporting selection, threaded to the dashboard.
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
   page: 'bdr-quota-dashboard' | 'bdr-quota-quotas';
   onNavigate: (p: PageKey) => void;
 }
 
-export default function BdrSection({ page, onNavigate }: BdrSectionProps) {
+export default function BdrSection(props: BdrSectionProps) {
   return (
     <BdrGate>
-      <BdrSectionInner page={page} onNavigate={onNavigate} />
+      <BdrSectionInner {...props} />
     </BdrGate>
   );
 }
 
-function BdrSectionInner({ page, onNavigate }: BdrSectionProps) {
+function BdrSectionInner({
+  page,
+  onNavigate,
+  explicitPeriod,
+  comparison,
+  onPeriodChange,
+  onComparisonChange,
+}: BdrSectionProps) {
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
   const channels = useChannels();
@@ -45,6 +58,10 @@ function BdrSectionInner({ page, onNavigate }: BdrSectionProps) {
     <>
       {page === 'bdr-quota-dashboard' ? (
         <BdrDashboardPage
+          explicitPeriod={explicitPeriod}
+          comparison={comparison}
+          onPeriodChange={onPeriodChange}
+          onComparisonChange={onComparisonChange}
           attributions={attributionsHook.attributions}
           quotas={quotas}
           loading={loading}

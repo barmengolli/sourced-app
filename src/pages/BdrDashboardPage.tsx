@@ -29,14 +29,15 @@ import { BDR_STAGES, BDR_STAGE_LABELS } from '../constants/bdr';
 import { CHART_COLORS } from '../constants/chartColors';
 import ChartCard from '../components/charts/ChartCard';
 import GaugeChart from '../components/charts/GaugeChart';
-
-const FILTERS: { value: PeriodFilter; label: string }[] = [
-  { value: 'year', label: 'Year' },
-  { value: 'Q1', label: 'Q1' },
-  { value: 'Q2', label: 'Q2' },
-  { value: 'Q3', label: 'Q3' },
-  { value: 'Q4', label: 'Q4' },
-];
+import ReportingFilterBar from '../components/reporting/ReportingFilterBar';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
+import {
+  toPeriodFilter,
+  LEGACY_FUNNEL_GRAINS,
+  MONTH_DISABLED_REASON,
+} from '../lib/reportingPeriodBridge';
+import type { ComparisonMode, ReportingPeriod } from '../types/reporting';
 
 interface BdrDashboardPageProps {
   attributions: Attribution[];
@@ -44,6 +45,11 @@ interface BdrDashboardPageProps {
   loading: boolean;
   onNavigate: (p: PageKey) => void;
   onEditDeal: (attributionId: string) => void;
+  // Shared reporting selection.
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
 
 function fmtDate(iso: string): string {
@@ -56,12 +62,20 @@ function fmtDate(iso: string): string {
   return `${months[Number(m[2]) - 1]} ${Number(m[3])}`;
 }
 
+// Basis and anchor come from the single reporting-page registry, so the visible
+// disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('bdr-quota-dashboard')!;
+
 export default function BdrDashboardPage({
   attributions,
   quotas,
   loading,
   onNavigate,
   onEditDeal,
+  explicitPeriod,
+  comparison,
+  onPeriodChange,
+  onComparisonChange,
 }: BdrDashboardPageProps) {
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -70,8 +84,34 @@ export default function BdrDashboardPage({
     return [...years].sort((a, b) => b - a);
   }, [quotas, attributions]);
 
-  const [year, setYear] = useState<number>(() => new Date().getFullYear());
-  const [filter, setFilter] = useState<PeriodFilter>('year');
+  // Period comes from the SHARED reporting selection, so a timeframe chosen on
+  // another reporting page carries here. The previous default read the browser
+  // clock at mount, which opened an empty dashboard whenever the current
+  // calendar year had no deals yet.
+  //
+  // Falls back to Year of the latest year that actually has data, never the
+  // clock. Year is the default grain because quotas are stored annually and
+  // Year is the only grain that can show attainment.
+  const fallbackYear = useMemo(() => {
+    let latest: number | null = null;
+    for (const q of quotas) if (latest === null || q.year > latest) latest = q.year;
+    for (const a of attributions) if (latest === null || a.year > latest) latest = a.year;
+    return latest;
+  }, [quotas, attributions]);
+
+  const period: ReportingPeriod | null =
+    explicitPeriod ?? (fallbackYear === null ? null : { grain: 'year', year: fallbackYear });
+  const year = period?.year ?? fallbackYear ?? 0;
+  const filter: PeriodFilter = (period ? toPeriodFilter(period) : null) ?? 'year';
+
+  // Attainment is shown ONLY for the Year grain. Quotas are stored annually,
+  // so a month or quarter would compare a partial actual against a full-year
+  // target, painting an on-pace rep red.
+  const showAttainment = period?.grain === 'year';
+
+  function handlePeriodChange(next: ReportingPeriod) {
+    onPeriodChange(next);
+  }
 
   const progress = useMemo(
     () =>
@@ -102,40 +142,21 @@ export default function BdrDashboardPage({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-slate-muted">
-            Year
-            <select
-              value={year}
-              onChange={(e) => setYear(parseInt(e.target.value, 10))}
-              className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-            >
-              {yearOptions.map((y) => (
-                <option key={y} value={y}>
-                  {y}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="flex items-center gap-1">
-            {FILTERS.map((f) => {
-              const active = f.value === filter;
-              return (
-                <button
-                  key={f.value}
-                  type="button"
-                  onClick={() => setFilter(f.value)}
-                  className={
-                    'text-xs px-2 py-1 rounded border transition-colors ' +
-                    (active
-                      ? 'bg-indigo text-white border-indigo'
-                      : 'bg-bg text-charcoal border-border hover:border-charcoal/30')
-                  }
-                >
-                  {f.label}
-                </button>
-              );
-            })}
-          </div>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
+          {period ? (
+          <ReportingFilterBar
+            period={period}
+            comparison={comparison}
+            years={yearOptions}
+            supportedGrains={LEGACY_FUNNEL_GRAINS}
+            disabledGrainReason={MONTH_DISABLED_REASON}
+            onPeriodChange={handlePeriodChange}
+            onComparisonChange={onComparisonChange}
+          />
+          ) : null}
           <button
             type="button"
             onClick={() => onNavigate('bdr-quota-quotas')}
@@ -169,12 +190,20 @@ export default function BdrDashboardPage({
                     : `All BDRs combined · ${filter} (by HPP date)`
                 }
               >
-                <StageGauges row={program} onEditDeal={onEditDeal} />
+                <StageGauges
+                  row={program}
+                  onEditDeal={onEditDeal}
+                  showAttainment={showAttainment}
+                />
               </ChartCard>
             )}
             {bdrRows.map((row) => (
               <ChartCard key={row.bdrName} title={row.bdrName}>
-                <StageGauges row={row} onEditDeal={onEditDeal} />
+                <StageGauges
+                  row={row}
+                  onEditDeal={onEditDeal}
+                  showAttainment={showAttainment}
+                />
               </ChartCard>
             ))}
           </section>
@@ -256,9 +285,18 @@ function CreatedTrendChart({
 function StageGauges({
   row,
   onEditDeal,
+  showAttainment,
 }: {
   row: BdrProgressRow;
   onEditDeal: (attributionId: string) => void;
+  // False for Month and Quarter. Quotas are stored ANNUALLY, so a sub-year
+  // period has quarterly actuals and a full-year quota: a rep with a 40 annual
+  // quota who hit 10 in Q2, exactly on pace, rendered 10/40 = 25% in danger
+  // red. Prorating the annual quota would assume flat seasonality that BDR
+  // ramp and holiday quarters violate, and CLAUDE.md records that period quota
+  // interpretation needs business approval. So the percentage, the gauge fill,
+  // and the performance color are SUPPRESSED and the raw count stays visible.
+  showAttainment: boolean;
 }) {
   return (
     <div className="space-y-3">
@@ -268,10 +306,20 @@ function StageGauges({
             key={s}
             label={BDR_STAGE_LABELS[s]}
             actual={row.stages[s].actual}
-            quota={row.stages[s].quota}
+            // A null quota is already the neutral path: no percentage, no
+            // colored arc, no "/ quota". Suppression is expressed by
+            // withholding the annual quota, never by inventing a smaller one.
+            quota={showAttainment ? row.stages[s].quota : null}
           />
         ))}
       </div>
+      {!showAttainment && (
+        <p className="text-xs text-slate-muted">
+          Quotas are set annually, so attainment is not shown for a month or
+          quarter. Counts above are actual deals in the selected period. Switch
+          the timeframe to Year to see attainment against the annual quota.
+        </p>
+      )}
       {BDR_STAGES.map((s) => (
         <DealList
           key={s}
