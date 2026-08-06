@@ -52,6 +52,13 @@ import type {
   CampaignTagLink,
 } from '../types/db';
 import { compareTouchesChronologically } from './compute';
+import {
+  dedupeSnapshots,
+  sequencePeriodActivity,
+  type OutreachReportingRow,
+  type ActivityCounter,
+} from './outreachReporting';
+import type { ReportingPeriod } from '../types/reporting';
 
 // One channel's contribution to the campaign funnel (the channel that sourced
 // the leads / was first-touch on the opps).
@@ -353,6 +360,19 @@ export function computeScorecard(
     linkedinSnapshots: LinkedinAdSnapshot[];
   },
   filterYear: number | null,
+  // The selected reporting period. When supplied, Outreach figures are DERIVED
+  // ACTIVITY for that period (end-of-period counter minus a real pre-period
+  // baseline) instead of lifetime-to-date counters.
+  //
+  // Outreach stores cumulative lifetime totals, so reading the latest row gives
+  // everything the sequence ever sent, not what it sent in the selected period.
+  // Those numbers sat in the same KPI row as year-filtered Leads and MQLs with
+  // no qualifier, so a reader comparing "2026 Leads" against "Sent" was
+  // comparing one year against all time.
+  //
+  // Optional so callers that genuinely want lifetime totals (and say so) keep
+  // working; the Campaigns Overview page always passes a period.
+  period?: ReportingPeriod,
 ): CampaignScorecard {
   const links = allLinks.filter((l) => l.tag_id === tagId);
   // Every tag carried by each channel. A channel can be tagged to SEVERAL
@@ -690,39 +710,106 @@ export function computeScorecard(
     }
   }
 
-  // --- Outreach (latest cumulative snapshot per tagged sequence) ---
+  // --- Outreach ---
+  // With a period: DERIVED ACTIVITY via the audited outreachReporting module,
+  // which handles pre-period baselines, resets, duplicate natural keys, and
+  // metric-specific coverage gaps. Without one: lifetime-to-date counters, the
+  // legacy behaviour, kept only for callers that ask for it explicitly.
   let outreachSent = 0;
   let outreachReplied = 0;
   const emailBySequence: SequenceEmailStats[] = [];
   if (sequenceRefs.size > 0) {
-    for (const seqId of sequenceRefs) {
-      const rows = data.outreachSnapshots
-        .filter(
-          (s) =>
-            s.sequence_id === seqId &&
-            (filterYear == null || s.year === filterYear),
-        )
-        .sort((a, b) =>
-          a.export_date < b.export_date ? -1 : a.export_date > b.export_date ? 1 : 0,
-        );
-      if (rows.length === 0) continue;
-      // Cumulative lifetime counters: the latest row holds the running total.
-      const last = rows[rows.length - 1];
-      outreachSent += last.total_sent;
-      outreachReplied += last.replied;
-      emailBySequence.push({
-        sequenceId: seqId,
-        name: last.sequence_name.replace(/^\[\d{4}\]\s*-\s*/, ''),
-        sent: last.total_sent,
-        delivered: last.delivered,
-        bounced: last.bounced,
-        opened: last.opened,
-        clicked: last.clicked,
-        replied: last.replied,
-        optedOut: last.opted_out,
-        calls: last.outbound_calls,
-        linkedinMessages: last.linkedin_tasks_completed,
-      });
+    if (period) {
+      const rows: OutreachReportingRow[] = data.outreachSnapshots
+        .filter((s2) => sequenceRefs.has(s2.sequence_id))
+        .map((s2) => ({
+          export_date: s2.export_date,
+          sequence_id: s2.sequence_id,
+          sequence_name: s2.sequence_name,
+          created_at: s2.created_at ?? null,
+          counters: {
+            total_sent: s2.total_sent,
+            delivered: s2.delivered,
+            bounced: s2.bounced,
+            opened: s2.opened,
+            clicked: s2.clicked,
+            replied: s2.replied,
+            opted_out: s2.opted_out,
+            outbound_calls: s2.outbound_calls,
+            linkedin_tasks_completed: s2.linkedin_tasks_completed,
+          },
+        }));
+      const deduped = dedupeSnapshots(rows);
+
+      // A metric whose activity cannot be established (no baseline, a reset, an
+      // ambiguous duplicate) contributes 0 to the visible count but is NOT the
+      // same as measured zero. The page shows a dash when nothing is
+      // measurable at all, which is why `measured` is tracked separately.
+      const activityOf = (
+        series: readonly OutreachReportingRow[],
+        metric: ActivityCounter,
+      ): { value: number; measured: boolean } => {
+        const a = sequencePeriodActivity(series, metric, period, deduped.feedStart ?? undefined);
+        return a.state === 'present'
+          ? { value: a.value, measured: true }
+          : { value: 0, measured: false };
+      };
+
+      let anyMeasured = false;
+      for (const [seqId, series] of deduped.bySequence) {
+        const sent = activityOf(series, 'total_sent');
+        const replied = activityOf(series, 'replied');
+        if (sent.measured || replied.measured) anyMeasured = true;
+        outreachSent += sent.value;
+        outreachReplied += replied.value;
+        const last = series[series.length - 1];
+        emailBySequence.push({
+          sequenceId: seqId,
+          name: (last?.sequence_name ?? '').replace(/^\[\d{4}\]\s*-\s*/, ''),
+          sent: sent.value,
+          delivered: activityOf(series, 'delivered').value,
+          bounced: activityOf(series, 'bounced').value,
+          opened: activityOf(series, 'opened').value,
+          clicked: activityOf(series, 'clicked').value,
+          replied: replied.value,
+          optedOut: activityOf(series, 'opted_out').value,
+          calls: activityOf(series, 'outbound_calls').value,
+          linkedinMessages: activityOf(series, 'linkedin_tasks_completed').value,
+        });
+      }
+      // Nothing measurable anywhere: report missing rather than a row of zeros
+      // that would read as "this campaign sent nothing".
+      if (!anyMeasured) emailBySequence.length = 0;
+    } else {
+      for (const seqId of sequenceRefs) {
+        const rows = data.outreachSnapshots
+          .filter(
+            (s2) =>
+              s2.sequence_id === seqId &&
+              (filterYear == null || s2.year === filterYear),
+          )
+          .sort((a, b) =>
+            a.export_date < b.export_date ? -1 : a.export_date > b.export_date ? 1 : 0,
+          );
+        if (rows.length === 0) continue;
+        // Cumulative lifetime counters: the latest row holds the running total.
+        const last = rows[rows.length - 1];
+        outreachSent += last.total_sent;
+        outreachReplied += last.replied;
+        emailBySequence.push({
+          sequenceId: seqId,
+          name: last.sequence_name.replace(/^\[\d{4}\]\s*-\s*/, ''),
+          sent: last.total_sent,
+          delivered: last.delivered,
+          bounced: last.bounced,
+          opened: last.opened,
+          clicked: last.clicked,
+          replied: last.replied,
+          optedOut: last.opted_out,
+          calls: last.outbound_calls,
+          linkedinMessages: last.linkedin_tasks_completed,
+        });
+      }
     }
     emailBySequence.sort((a, b) => b.sent - a.sent);
   }
