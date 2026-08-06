@@ -426,6 +426,92 @@ export function buildIdInLiteral(ids: readonly string[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Salesforce 15/18-character Id equivalence
+// ---------------------------------------------------------------------------
+//
+// Salesforce exposes the SAME record under two Id forms: a 15-character
+// case-SENSITIVE id and an 18-character case-INSENSITIVE id whose final
+// three characters are a checksum of the first 15. The API returns the
+// 18-character form; older exports and manual entry frequently carry the
+// 15-character form.
+//
+// Sourced's stored anchors are mixed, so raw string comparison silently
+// treats one record as two. That is exactly what produced the first
+// evaluator run: 2,483 anchors stored in 15-character form could never
+// match rows returned in 18-character form, and the run reported 2,437
+// people "routed to review" when their records had in fact been fetched.
+//
+// The rule implemented here:
+//   - an 18-character id indexes under BOTH its full value and its exact
+//     case-sensitive 15-character prefix;
+//   - a 15-character id matches ONLY that exact prefix;
+//   - case is preserved, never lowercased: 15-character ids are
+//     case-sensitive and folding them would merge distinct records;
+//   - no checksum is computed or invented, so a 15-character id is never
+//     "upgraded" into an 18-character one;
+//   - if two DIFFERENT source records claim the same lookup key, the
+//     build fails closed rather than picking a winner.
+
+export function idLookupKeys(id: string): string[] {
+  if (!isWellFormedSalesforceId(id)) return [];
+  // Exact case-sensitive prefix. Both forms of one record share it.
+  return id.length === 18 ? [id, id.slice(0, 15)] : [id];
+}
+
+export class IdCollisionError extends Error {
+  readonly key: string;
+  constructor(key: string) {
+    super('Two different Salesforce records claim the same 15-character lookup key.');
+    this.name = 'IdCollisionError';
+    this.key = key;
+  }
+}
+
+// Builds a lookup index tolerating either Id form on the ANCHOR side.
+// Throws IdCollisionError if two distinct records would share a key.
+export function buildIdIndex<T>(
+  rows: readonly T[],
+  idOf: (row: T) => string,
+): Map<string, T> {
+  const index = new Map<string, T>();
+  const ownerOf = new Map<string, string>();
+  for (const row of rows) {
+    const id = idOf(row);
+    if (!isWellFormedSalesforceId(id)) continue;
+    for (const key of idLookupKeys(id)) {
+      const existing = ownerOf.get(key);
+      if (existing !== undefined && existing !== id) {
+        // Never silently choose one: a shared 15-character prefix across
+        // two distinct 18-character ids is a real ambiguity.
+        throw new IdCollisionError(key);
+      }
+      ownerOf.set(key, id);
+      index.set(key, row);
+    }
+  }
+  return index;
+}
+
+export function lookupById<T>(index: ReadonlyMap<string, T>, anchorId: string): T | undefined {
+  if (!isWellFormedSalesforceId(anchorId)) return undefined;
+  // Try the id as given, then its 15-character prefix when 18 chars.
+  const direct = index.get(anchorId);
+  if (direct !== undefined) return direct;
+  return anchorId.length === 18 ? index.get(anchorId.slice(0, 15)) : undefined;
+}
+
+// True when two Salesforce ids denote the SAME record across forms.
+// Used for ConvertedContactId comparison, where either side may be 15 or
+// 18 characters.
+export function sameSalesforceId(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return false;
+  if (!isWellFormedSalesforceId(a) || !isWellFormedSalesforceId(b)) return false;
+  if (a === b) return true;
+  // Compare on the exact case-sensitive 15-character prefix.
+  return a.slice(0, 15) === b.slice(0, 15);
+}
+
+// ---------------------------------------------------------------------------
 // Dual-identity resolution (Contact precedence)
 // ---------------------------------------------------------------------------
 
@@ -464,20 +550,33 @@ export function resolveDualIdentity(
   fetchedLeads: ReadonlyMap<string, FetchedLead>,
   fetchedContactIds: ReadonlySet<string>,
 ): DualResolution {
+  // Every lookup below tolerates either Id form. Salesforce returns
+  // 18-character ids; Sourced anchors are a mix of 15 and 18, so raw
+  // string comparison would report a fetched record as missing.
+  const hasContact = (cid: string): boolean => {
+    if (fetchedContactIds.has(cid)) return true;
+    for (const fetched of fetchedContactIds) {
+      if (sameSalesforceId(fetched, cid)) return true;
+    }
+    return false;
+  };
+  const getLead = (lid: string): FetchedLead | undefined =>
+    lookupById(fetchedLeads, lid)
+      ?? [...fetchedLeads.values()].find((l) => sameSalesforceId(l.id, lid));
   const shape = classifyAnchor(anchor);
 
   if (shape === 'invalid') return { kind: 'review', reason: 'no_valid_identity' };
 
   if (shape === 'contact_only') {
     const cid = anchor.sfdcContactId as string;
-    return fetchedContactIds.has(cid)
+    return hasContact(cid)
       ? { kind: 'use_contact', contactId: cid }
       : { kind: 'review', reason: 'contact_record_missing' };
   }
 
   if (shape === 'lead_only') {
     const lid = anchor.sfdcLeadId as string;
-    return fetchedLeads.has(lid)
+    return getLead(lid) !== undefined
       ? { kind: 'use_lead', leadId: lid }
       : { kind: 'review', reason: 'lead_record_missing' };
   }
@@ -485,13 +584,15 @@ export function resolveDualIdentity(
   // Dual identity.
   const lid = anchor.sfdcLeadId as string;
   const cid = anchor.sfdcContactId as string;
-  const lead = fetchedLeads.get(lid);
+  const lead = getLead(lid);
   if (lead === undefined) return { kind: 'review', reason: 'lead_record_missing' };
-  if (!fetchedContactIds.has(cid)) return { kind: 'review', reason: 'contact_record_missing' };
+  if (!hasContact(cid)) return { kind: 'review', reason: 'contact_record_missing' };
   if (lead.convertedContactId === null) {
     return { kind: 'review', reason: 'conversion_link_absent' };
   }
-  if (lead.convertedContactId !== cid) {
+  // 15 vs 18 on EITHER side denotes the same record; a genuinely
+  // different id remains a conflict.
+  if (!sameSalesforceId(lead.convertedContactId, cid)) {
     // Salesforce says this Lead converted to a DIFFERENT Contact than
     // Sourced records. Never reconciled automatically.
     return { kind: 'review', reason: 'conversion_link_mismatch' };

@@ -23,6 +23,11 @@ import {
   tupleCursorPredicate,
   resolveDualIdentity,
   summarizeResolutions,
+  idLookupKeys,
+  buildIdIndex,
+  lookupById,
+  sameSalesforceId,
+  IdCollisionError,
 } from './lifecycleIngestionScope';
 import type { ScopeInput, SourcedIdentityAnchor, FetchedLead } from './lifecycleIngestionScope';
 import { planLifecycleObservations } from './lifecycleObservationPlanner';
@@ -864,7 +869,8 @@ describe('authoritative evaluator', () => {
 
   it('applies Contact precedence with exact link validation', () => {
     expect(src).toContain('ConvertedContactId');
-    expect(src).toContain('link !== contact');
+    // Raw-string comparison replaced by form-tolerant equivalence.
+    expect(src).toContain('!sameSalesforceId(link, contact)');
     expect(src).toContain('conversion_links_conflicting');
   });
 
@@ -1077,7 +1083,7 @@ describe('package node run-index aggregation (behavioral)', () => {
         if (name === 'PRIVATE: exact Sourced identity anchors') return { json: anchors };
         throw new Error(`unexpected first() on ${name}`);
       },
-      all: (branch?: number, runIndex?: number) => {
+      all: (_branch?: number, runIndex?: number) => {
         if (name.startsWith('Collect:')) {
           if (runIndex === undefined) {
             if (opts.forbidBareAll) {
@@ -1348,6 +1354,224 @@ describe('package node run-index aggregation (behavioral)', () => {
       // The loop and the collector must agree about position.
       expect(code, n).toContain('req.batch_index !== runIndex');
     }
+  });
+});
+
+// --- Salesforce 15/18-character Id equivalence -----------------------------
+
+describe('Salesforce 15/18 Id equivalence', () => {
+  // 18-character ids and their exact case-sensitive 15-character prefixes.
+  const L18 = 'SYNTHLEAD00001AAAA';
+  const L15 = L18.slice(0, 15);
+  const C18 = 'SYNTHCONT00001BBBB';
+  const C15 = C18.slice(0, 15);
+  const D18 = 'SYNTHCONT00002CCCC';
+  const D15 = D18.slice(0, 15);
+
+  const leadRow = (id: string, converted: string | null = null): FetchedLead =>
+    ({ id, convertedContactId: converted });
+
+  it('indexes an 18-character id under both forms', () => {
+    expect(idLookupKeys(L18)).toEqual([L18, L15]);
+    // A 15-character id indexes only under itself: no checksum is invented.
+    expect(idLookupKeys(L15)).toEqual([L15]);
+    expect(idLookupKeys('bad')).toEqual([]);
+  });
+
+  it('resolves a 15-character anchor against an 18-character row', () => {
+    const idx = buildIdIndex([leadRow(L18)], (r) => r.id);
+    expect(lookupById(idx, L15)).toEqual(leadRow(L18));
+    // And the 18-character anchor resolves the same row.
+    expect(lookupById(idx, L18)).toEqual(leadRow(L18));
+  });
+
+  it('resolves a 15-character Contact anchor against an 18-character row', () => {
+    const idx = buildIdIndex([{ id: C18 }], (r) => r.id);
+    expect(lookupById(idx, C15)).toEqual({ id: C18 });
+  });
+
+  it('preserves case: 15-character ids are case-SENSITIVE', () => {
+    const idx = buildIdIndex([leadRow(L18)], (r) => r.id);
+    expect(lookupById(idx, L15.toLowerCase())).toBeUndefined();
+    // Lowercasing would merge genuinely distinct records.
+    expect(sameSalesforceId(L15, L15.toLowerCase())).toBe(false);
+  });
+
+  it('fails closed when two records claim one 15-character key', () => {
+    // Same 15-character prefix, different 18-character ids.
+    const a = 'SYNTHDUPE000001XXX';
+    const b = 'SYNTHDUPE000001YYY';
+    expect(a.slice(0, 15)).toBe(b.slice(0, 15));
+    expect(() => buildIdIndex([{ id: a }, { id: b }], (r) => r.id))
+      .toThrow(IdCollisionError);
+  });
+
+  it('matches ConvertedContactId across either form', () => {
+    expect(sameSalesforceId(D15, D18)).toBe(true);   // 15 link vs 18 anchor
+    expect(sameSalesforceId(D18, D15)).toBe(true);   // 18 link vs 15 anchor
+    expect(sameSalesforceId(D18, D18)).toBe(true);
+    // A genuinely different id stays different.
+    expect(sameSalesforceId(D18, C18)).toBe(false);
+    expect(sameSalesforceId(null, D18)).toBe(false);
+    expect(sameSalesforceId('bad', D18)).toBe(false);
+  });
+
+  it('resolves dual identity across mixed forms', () => {
+    const leads = buildIdIndex([leadRow(L18, D18)], (r) => r.id);
+    // Lead anchored 15, Contact anchored 15, link returned 18.
+    expect(resolveDualIdentity(
+      { sfdcLeadId: L15, sfdcContactId: D15 }, leads, new Set([D18]),
+    )).toEqual({ kind: 'use_contact', contactId: D15 });
+  });
+
+  it('keeps a genuinely conflicting conversion link as a conflict', () => {
+    const leads = buildIdIndex([leadRow(L18, C18)], (r) => r.id);
+    expect(resolveDualIdentity(
+      { sfdcLeadId: L15, sfdcContactId: D15 }, leads, new Set([D18]),
+    )).toEqual({ kind: 'review', reason: 'conversion_link_mismatch' });
+  });
+
+  it('keeps an absent conversion link as absent', () => {
+    const leads = buildIdIndex([leadRow(L18, null)], (r) => r.id);
+    expect(resolveDualIdentity(
+      { sfdcLeadId: L15, sfdcContactId: D15 }, leads, new Set([D18]),
+    )).toEqual({ kind: 'review', reason: 'conversion_link_absent' });
+  });
+
+  it('keeps a genuinely missing Contact missing', () => {
+    const leads = buildIdIndex([leadRow(L18, D18)], (r) => r.id);
+    expect(resolveDualIdentity(
+      { sfdcLeadId: L15, sfdcContactId: D15 }, leads, new Set(),
+    )).toEqual({ kind: 'review', reason: 'contact_record_missing' });
+  });
+});
+
+// --- the live 709 / 2,437 regression, at aggregate shape -------------------
+
+describe('live representation-mismatch regression', () => {
+  // Reproduces the production ID-form split. NOTE the units: the 15/18
+  // split is over UNIQUE SALESFORCE IDS (131 Lead, 3,061 Contact), not
+  // over the 3,146 anchors, because the 46 dual anchors contribute one
+  // id to each list.
+  const LEAD15 = 114, LEAD18 = 17;      // 131 unique Lead ids
+  const CON15 = 2369, CON18 = 692;      // 3,061 unique Contact ids
+
+  const pad = (prefix: string, n: number) =>
+    `${prefix}${String(n).padStart(15 - prefix.length, '0')}`;
+
+  // Salesforce returned EVERY id in 18-character form.
+  const leadIds18 = Array.from({ length: LEAD15 + LEAD18 }, (_, i) => `${pad('SL', i)}XYZ`);
+  const contactIds18 = Array.from({ length: CON15 + CON18 }, (_, i) => `${pad('SC', i)}XYZ`);
+  // Sourced stored them in MIXED form.
+  const leadAnchorIds = leadIds18.map((id, i) => (i < LEAD15 ? id.slice(0, 15) : id));
+  const contactAnchorIds = contactIds18.map((id, i) => (i < CON15 ? id.slice(0, 15) : id));
+
+  it('is a faithful reproduction of the live ID-form split', () => {
+    expect(leadIds18).toHaveLength(131);
+    expect(contactIds18).toHaveLength(3061);
+    expect(leadAnchorIds.filter((id) => id.length === 15)).toHaveLength(LEAD15);
+    expect(contactAnchorIds.filter((id) => id.length === 15)).toHaveLength(CON15);
+  });
+
+  it('OLD raw-string matching reproduces the live 709 figure', () => {
+    // Exactly what the first evaluator did: key only on the returned id.
+    const leadRaw = new Map(leadIds18.map((id) => [id, { id }]));
+    const contactRaw = new Map(contactIds18.map((id) => [id, { id }]));
+    const matchedLead = leadAnchorIds.filter((id) => leadRaw.has(id)).length;
+    const matchedContact = contactAnchorIds.filter((id) => contactRaw.has(id)).length;
+    // Only the ids already stored in 18-character form matched.
+    expect(matchedLead).toBe(LEAD18);
+    expect(matchedContact).toBe(CON18);
+    expect(matchedLead + matchedContact).toBe(709);
+    // And the false-missing counts match the live report exactly.
+    expect(leadAnchorIds.length - matchedLead).toBe(114);
+    expect(contactAnchorIds.length - matchedContact).toBe(2369);
+  });
+
+  it('CORRECTED resolver resolves every id in either form', () => {
+    const leadIdx = buildIdIndex(leadIds18.map((id) => ({ id })), (r) => r.id);
+    const contactIdx = buildIdIndex(contactIds18.map((id) => ({ id })), (r) => r.id);
+    const matchedLead = leadAnchorIds.filter((id) => lookupById(leadIdx, id) !== undefined).length;
+    const matchedContact = contactAnchorIds.filter(
+      (id) => lookupById(contactIdx, id) !== undefined).length;
+    // Zero false misses: 2,483 fifteen-character ids now resolve against
+    // the records that were actually returned.
+    expect(matchedLead).toBe(131);
+    expect(matchedContact).toBe(3061);
+    expect(leadAnchorIds.length - matchedLead).toBe(0);
+    expect(contactAnchorIds.length - matchedContact).toBe(0);
+  });
+});
+
+// --- evaluator readiness cannot mask a representation mismatch -------------
+
+describe('evaluator readiness gate', () => {
+  const src = (() => {
+    try {
+      return readFileSync('/Users/barmengolli/Downloads/4g2b2a-local-evaluator.mjs', 'utf8');
+    } catch { return ''; }
+  })();
+
+  it('uses the shared helper rather than a second implementation', () => {
+    expect(src).toContain("await load('src/lib/lifecycleIngestionScope.ts')");
+    expect(src).toContain('buildIdIndex');
+    expect(src).toContain('lookupById');
+    expect(src).toContain('sameSalesforceId');
+    // The raw-string maps that caused the defect are gone.
+    expect(src).not.toContain('new Map(leadRows.map((r) => [String(r.Id), r]))');
+    expect(src).not.toContain('new Map(contactRows.map((r) => [String(r.Id), r]))');
+    expect(src).not.toMatch(/if \(link !== contact\)/);
+  });
+
+  it('fails readiness when most anchors land in review', () => {
+    // 709 + 2,437 = 3,146 satisfied the old accounting identity while
+    // 2,437 people were falsely reported missing, and readiness stayed
+    // true. That must be impossible now.
+    expect(src).toContain('more than 2% of anchors routed to review');
+    expect(src).toMatch(/reviewRatio > 0\.02/);
+  });
+
+  it('requires conversion diagnostics to account for every dual anchor', () => {
+    // All-zero diagnostics alongside dual anchors means the comparison
+    // never ran, which is precisely what the Id-form defect caused.
+    expect(src).toContain('conversion-link diagnostics total');
+    // Bind the CONDITION, not just the message: an inert guard whose
+    // text still reads correctly is exactly how the readiness gate
+    // stayed true through a 2,437-person failure.
+    expect(src).toMatch(/if \(linkTotal !== summary\.anchors_dual_identity\) \{/);
+    expect(src).toMatch(/const linkTotal = summary\.conversion_links_matched\s*\n?\s*\+ summary\.conversion_links_conflicting \+ summary\.conversion_links_missing;/);
+  });
+
+  it('fails closed on a 15-character lookup collision', () => {
+    expect(src).toContain('IdCollisionError');
+    expect(src).toContain('Refusing to choose one');
+  });
+
+  it('GUARD applies the same Id equivalence for conversion links', () => {
+    // GUARD embeds its own comparison, so it would have reported the
+    // same false conflicts on mixed 15/18 forms.
+    const DOCX = readFileSync(
+      resolve(process.cwd(), 'docs/lead-lifecycle-ingestion-dry-run.md'), 'utf8');
+    const g = JSON.parse(DOCX.split('```json\n')[1].split('\n```')[0]) as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    const guard = String((g.nodes.find((n) => String(n.name).startsWith('GUARD'))!
+      .parameters as Record<string, unknown>).jsCode);
+    expect(guard).toContain('const sameSfId =');
+    expect(guard).toContain('.slice(0, 15) === String(b).slice(0, 15)');
+    expect(guard).toContain('sameSfId(link, c)');
+    // The raw-string comparison is gone.
+    expect(guard).not.toMatch(/else if \(link === c\)/);
+    // Case is never folded.
+    expect(guard).not.toMatch(/toLowerCase\(\)/);
+  });
+
+  it('emits no Salesforce identifier in its aggregate output', () => {
+    expect(src).toContain('REFUSING to print');
+    // Counts come from row totals, never from index size (which would
+    // double-count the two keys per record).
+    expect(src).toContain('lead_records_found: leadRows.length');
+    expect(src).toContain('contact_records_found: contactRows.length');
   });
 });
 
