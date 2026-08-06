@@ -2058,23 +2058,80 @@ export interface EventActivationCounts {
   multiActivation: number;      // contacts with >= 2 active activations
 }
 
+// The outcome of resolving the events taxonomy for a year, separate from the
+// counts themselves.
+//
+// 'ok'                the parent and at least one event channel exist
+// 'no-parent'         no events parent for this year: the taxonomy was never
+//                     set up, which is MISSING structure, not zero activations
+// 'no-event-channels' the parent exists but has no event children yet
+//
+// This distinction is the whole point. Collapsing it into an empty array made
+// the page render five hard zeros for every year except the one hardcoded in
+// EVENTS_PARENT_CHANNEL_NAME, which reads as "we ran events and nobody
+// engaged" rather than "this year's events taxonomy does not exist".
+export type EventsTaxonomyStatus = 'ok' | 'no-parent' | 'no-event-channels';
+
+export interface EventActivationsResult {
+  status: EventsTaxonomyStatus;
+  // The resolved parent's name, for display when it differs from the default.
+  parentName: string | null;
+  rows: EventActivationCounts[];
+}
+
 export interface ComputeEventActivationsInput {
   leads: Lead[];
   channels: Channel[];
-  parentChannelName: string;    // e.g. "2026 - Events"
+  // Preferred parent name (e.g. "2026 - Events"). Used only as a fallback when
+  // no year-matched parent is found; see resolveEventsParent.
+  parentChannelName: string;
   year: number;
   filter: PeriodFilter;
   regions: Set<RegionKey>;
 }
 
+// Resolve the events parent for a SELECTED year, rather than a fixed name.
+//
+// Order, most specific first:
+//   1. A top-level channel explicitly tagged with this year whose name ends in
+//      "Events" (the year-aware-channels column is authoritative when set).
+//   2. A top-level channel literally named "<year> - Events", the established
+//      naming convention.
+//   3. The caller's configured name, but ONLY when that channel is evergreen
+//      (year is null) or already matches the selected year. A parent belonging
+//      to a different year is never borrowed: counting 2026's events under a
+//      2025 heading would attribute activity to the wrong year.
+export function resolveEventsParent(
+  channels: Channel[],
+  year: number,
+  configuredName: string,
+): Channel | null {
+  const topLevel = channels.filter((c) => !c.parent_channel_id);
+
+  const tagged = topLevel.find(
+    (c) => c.year === year && /events\s*$/i.test(stripChannelYear(c.name).trim()),
+  );
+  if (tagged) return tagged;
+
+  const byConvention = topLevel.find((c) => c.name === `${year} - Events`);
+  if (byConvention) return byConvention;
+
+  const configured = topLevel.find((c) => c.name === configuredName);
+  if (configured && (configured.year == null || configured.year === year)) {
+    return configured;
+  }
+  return null;
+}
+
 export function computeEventActivations(
   input: ComputeEventActivationsInput,
-): EventActivationCounts[] {
+): EventActivationsResult {
   const { leads, channels, parentChannelName, year, filter, regions } = input;
 
-  // Resolve the parent channel by name. If absent, return empty.
-  const parent = channels.find((c) => c.name === parentChannelName);
-  if (!parent) return [];
+  // Resolve the parent for the SELECTED year. A missing parent is reported as
+  // missing structure, never as zero activations.
+  const parent = resolveEventsParent(channels, year, parentChannelName);
+  if (!parent) return { status: 'no-parent', parentName: null, rows: [] };
 
   // Walk the parent's subtree via parent_channel_id. The Events parent
   // typically has direct children (one per event); future shapes
@@ -2095,7 +2152,9 @@ export function computeEventActivations(
     }
   };
   visit(parent.id);
-  if (eventChannelIds.size === 0) return [];
+  if (eventChannelIds.size === 0) {
+    return { status: 'no-event-channels', parentName: parent.name, rows: [] };
+  }
 
   const channelById = new Map(channels.map((c) => [c.id, c] as const));
 
@@ -2162,9 +2221,16 @@ export function computeEventActivations(
     }
   }
 
-  return [...tally.values()]
-    .filter((t) => t.totalContacts > 0)
-    .sort((a, b) => b.totalContacts - a.totalContacts);
+  // status stays 'ok' even with no rows: the taxonomy exists and was searched,
+  // so an empty result here genuinely means no contacts in the selected
+  // period. That is a real zero and must stay distinct from missing structure.
+  return {
+    status: 'ok',
+    parentName: parent.name,
+    rows: [...tally.values()]
+      .filter((t) => t.totalContacts > 0)
+      .sort((a, b) => b.totalContacts - a.totalContacts),
+  };
 }
 
 // ---------- Channel spend (Spend sub-tab) ----------

@@ -129,7 +129,7 @@ export default function FunnelEventsPage({
     [channels, year],
   );
 
-  const rows: EventActivationCounts[] = useMemo(
+  const activations = useMemo(
     () =>
       computeEventActivations({
         leads,
@@ -141,6 +141,11 @@ export default function FunnelEventsPage({
       }),
     [leads, visibleChannels, year, filter, regions],
   );
+  const rows: EventActivationCounts[] = activations.rows;
+  // Whether the events taxonomy for the SELECTED year exists at all. When it
+  // does not, every count below is unknown rather than zero, and the tiles
+  // must say so.
+  const taxonomyMissing = activations.status !== 'ok';
 
   // KPI tile totals: sum each activation type across every event in
   // the current view. Column totals in the table equal these by
@@ -212,25 +217,35 @@ export default function FunnelEventsPage({
         />
       </header>
 
-      {/* KPI tiles: total contacts by activation type across all
-          events in the current period and region. Always render so
-          the user sees "0 across all events" rather than a blank
-          card on empty periods. */}
+      {/* KPI tiles. A real zero (the taxonomy exists, nobody activated) shows
+          0. A MISSING taxonomy shows a dash: rendering 0 there would claim we
+          ran events that nobody engaged with, when in fact this year's events
+          structure was never set up. */}
       <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         {EVENT_ACTIVATION_ALL.map((v) => (
           <ChartCard
             key={v}
             title={KPI_TILE_LABELS[v]}
-            subtitle={`Across all events in ${periodLabel}`}
+            subtitle={
+              taxonomyMissing
+                ? `No events structure for ${year}`
+                : `Across all events in ${periodLabel}`
+            }
           >
             <div className="text-3xl font-semibold text-charcoal tabular-nums">
-              {totals[v].toLocaleString()}
+              {taxonomyMissing ? '—' : totals[v].toLocaleString()}
             </div>
           </ChartCard>
         ))}
       </section>
 
-      {rows.length === 0 ? (
+      {taxonomyMissing ? (
+        <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
+          {activations.status === 'no-parent'
+            ? `No events parent channel exists for ${year}, so event activations cannot be reported for this year. Add a "${year} - Events" channel, or tag an existing events parent with the year, on the Channels page.`
+            : `The events parent for ${year} has no event channels yet, so there is nothing to report. Add event sub-channels under "${activations.parentName}" on the Channels page.`}
+        </p>
+      ) : rows.length === 0 ? (
         <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
           No events with contacts in the selected period.
         </p>
