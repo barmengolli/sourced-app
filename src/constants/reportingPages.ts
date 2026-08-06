@@ -31,37 +31,67 @@ export interface ReportingPageContract {
   // in the UI rather than fabricated: quarterly-only stored values must never
   // be spread into invented monthly bars.
   supportedGrains: ReadonlyArray<'month' | 'quarter' | 'year'>;
+  // Why a grain is unavailable, shown on the disabled control so it explains
+  // itself instead of looking broken. Required whenever a grain is omitted.
+  disabledGrainReason?: string;
+  // Whether this page offers a comparison control. A data-entry surface does
+  // not: it edits stored values rather than reporting a change over time.
+  supportsComparison?: boolean;
 }
 
 // Pages that MUST use the shared ReportingFilterBar and the shared selection.
 export const REPORTING_PAGES: ReadonlyArray<ReportingPageContract> = [
   {
+    // Data Entry is a reporting-CONTROL surface, not a reporting-output one.
+    // It shares the Quarter, Year, and Region controls so a user moving from a
+    // dashboard to Data Entry keeps their place, but it offers no Month and no
+    // comparison: its editable storage IS quarterly, and a month control would
+    // imply editable monthly cells that do not exist.
+    key: 'funnel-data',
+    label: 'Data Entry',
+    basis: 'cohort',
+    anchor: 'Quarterly stored values for the selected year',
+    supportedGrains: ['quarter', 'year'],
+    disabledGrainReason:
+      'Month is not available here because funnel values are stored by '
+      + 'quarter. Editing a month would imply a cell that does not exist.',
+    supportsComparison: false,
+  },
+  {
     key: 'funnel-dashboard',
     label: 'Leads & MQLs',
     basis: 'cohort',
     anchor: 'Cohort based on marketing sourced date',
-    supportedGrains: ['month', 'quarter', 'year'],
+    supportedGrains: ['quarter', 'year'],
+    disabledGrainReason:
+      'Month is not available for this source yet. These figures are computed by quarter, and splitting a quarter into months would invent data that was never recorded.',
   },
   {
     key: 'funnel-velocity',
     label: 'Opportunities',
     basis: 'cohort',
     anchor: 'Cohort based on HPP stage entry date',
-    supportedGrains: ['month', 'quarter', 'year'],
+    supportedGrains: ['quarter', 'year'],
+    disabledGrainReason:
+      'Month is not available for this source yet. These figures are computed by quarter, and splitting a quarter into months would invent data that was never recorded.',
   },
   {
     key: 'funnel-events',
     label: 'Events',
     basis: 'cohort',
     anchor: 'Lead cohort based on marketing sourced date',
-    supportedGrains: ['month', 'quarter', 'year'],
+    supportedGrains: ['quarter', 'year'],
+    disabledGrainReason:
+      'Month is not available for this source yet. These figures are computed by quarter, and splitting a quarter into months would invent data that was never recorded.',
   },
   {
     key: 'funnel-spend',
     label: 'Spend',
     basis: 'allocation',
     anchor: 'Date-range cost prorated into the selected period',
-    supportedGrains: ['month', 'quarter', 'year'],
+    supportedGrains: ['quarter', 'year'],
+    disabledGrainReason:
+      'Month is not available for this source yet. These figures are computed by quarter, and splitting a quarter into months would invent data that was never recorded.',
   },
   {
     key: 'sixsense-dashboard',
@@ -110,7 +140,6 @@ export interface NonReportingPageException {
 // that silently filtered itself to "this month" would hide rows the user is
 // trying to edit.
 export const APPROVED_NON_REPORTING_PAGES: ReadonlyArray<NonReportingPageException> = [
-  { key: 'funnel-data', reason: 'Data entry. Defaults to its quarterly storage grain; a reporting filter would hide editable cells.' },
   { key: 'funnel-import', reason: 'Import workflow. Operates on an uploaded file, not a reporting period.' },
   { key: 'sixsense-import', reason: 'Import workflow. Operates on an uploaded file, not a reporting period.' },
   { key: 'outreach-data', reason: 'Source data table. Shows imported snapshot rows as stored.' },

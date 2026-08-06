@@ -79,6 +79,10 @@ export type CompareView = 'single' | 'rolling3';
 interface FunnelSubPageProps {
   year: number;
   filter: PeriodFilter;
+  // Comparison mode from the shared reporting selection, so every funnel page
+  // compares the same way and a change on one carries to the others.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
   onYearChange: (y: number) => void;
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
@@ -353,6 +357,8 @@ export default function App() {
   }, []);
 
   const funnelProps: FunnelSubPageProps = {
+    comparison: reporting.comparison,
+    onComparisonChange: reporting.setComparison,
     year,
     filter,
     onYearChange: setYear,

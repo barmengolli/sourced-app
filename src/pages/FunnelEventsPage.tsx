@@ -33,7 +33,7 @@ import {
 } from '../lib/compute';
 import { filterChannelsByYear } from '../lib/channelFilter';
 import { quarterOfIsoDate } from '../lib/dates';
-import PeriodSelector from '../components/funnel/PeriodSelector';
+import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import ChartCard from '../components/charts/ChartCard';
 import { CHART_COLORS } from '../constants/chartColors';
 import {
@@ -43,6 +43,9 @@ import {
   type EventActivationValue,
 } from '../constants/eventActivations';
 import type { RegionKey } from '../constants/regions';
+import type { ComparisonMode } from '../types/reporting';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
 
 // Pluralized labels for the KPI tiles. The compute layer keys on the
 // singular SFDC names, but at the top of the page we're showing a sum
@@ -64,7 +67,14 @@ interface FunnelEventsPageProps {
   onFilterChange: (f: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
+  // Comparison mode from the shared reporting selection.
+  comparison: ComparisonMode;
+  onComparisonChange: (m: ComparisonMode) => void;
 }
+
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('funnel-events')!;
 
 export default function FunnelEventsPage({
   year,
@@ -73,6 +83,8 @@ export default function FunnelEventsPage({
   onFilterChange,
   regions,
   onRegionsChange,
+  comparison,
+  onComparisonChange,
 }: FunnelEventsPageProps) {
   const { leads } = useLeads();
   const channels = useChannels();
@@ -195,6 +207,10 @@ export default function FunnelEventsPage({
           <h1 className="text-2xl font-semibold text-charcoal">
             Marketing Funnel: Events
           </h1>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-sm text-slate-muted">
             Event-marketing engagement by activation type. Counts are
             unique contacts per event in the selected period.
@@ -206,7 +222,7 @@ export default function FunnelEventsPage({
             membership counts on the funnel grid.
           </p>
         </div>
-        <PeriodSelector
+        <FunnelReportingFilters
           year={year}
           filter={filter}
           yearOptions={yearOptions}
@@ -214,6 +230,8 @@ export default function FunnelEventsPage({
           onFilterChange={onFilterChange}
           regions={regions}
           onRegionsChange={onRegionsChange}
+          comparison={comparison}
+          onComparisonChange={onComparisonChange}
         />
       </header>
 

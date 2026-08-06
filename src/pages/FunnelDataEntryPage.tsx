@@ -18,12 +18,14 @@ import FunnelTable, {
   attributionCellKey,
 } from '../components/funnel/FunnelTable';
 import ConversionsPanel from '../components/funnel/ConversionsPanel';
-import PeriodSelector from '../components/funnel/PeriodSelector';
+import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import TouchDrilldownPanel from '../components/funnel/TouchDrilldownPanel';
 import CreateHPPModal from '../components/attribution/CreateHPPModal';
 import OpportunitiesListModal from '../components/attribution/OpportunitiesListModal';
 import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
 import { readJson, writeJson } from '../lib/storage';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
 
 const EDITS_LOCKED_STORAGE_KEY = 'sourced.funnel.editsLocked';
 
@@ -53,6 +55,10 @@ interface ListModalQuery {
   // sub-channels — mirroring what the grid cell rendered.
   channelIds?: string[];
 }
+
+// Basis and anchor come from the single reporting-page registry, so the
+// visible disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('funnel-data')!;
 
 export default function FunnelDataEntryPage({
   year,
@@ -235,6 +241,10 @@ export default function FunnelDataEntryPage({
           <h1 className="text-2xl font-semibold text-charcoal">
             Marketing Funnel: Data entry
           </h1>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-sm text-slate-muted">
             Edit projections inline. Click attribution cells with deals to
             view, edit, promote, or delete them. Lead and MQL actuals are
@@ -299,7 +309,7 @@ export default function FunnelDataEntryPage({
           >
             + Create HPP
           </button>
-          <PeriodSelector
+          <FunnelReportingFilters
             year={year}
             filter={filter}
             yearOptions={yearOptions}
@@ -307,6 +317,7 @@ export default function FunnelDataEntryPage({
             onFilterChange={onFilterChange}
             regions={regions}
             onRegionsChange={onRegionsChange}
+            showComparison={false}
           />
         </div>
       </header>

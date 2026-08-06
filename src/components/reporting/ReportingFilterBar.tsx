@@ -64,6 +64,10 @@ interface ReportingFilterBarProps {
   // wider period than the reader asked for. Defaults to all three.
   supportedGrains?: ReadonlyArray<ReportingGrain>;
   disabledGrainReason?: string;
+  // Hide the comparison control entirely. A data-entry surface edits stored
+  // values rather than reporting a change over time, so offering "Compare to"
+  // there would promise a delta the page never computes.
+  showComparison?: boolean;
   onPeriodChange: (period: ReportingPeriod) => void;
   onComparisonChange: (mode: ComparisonMode) => void;
   // Business filters (region, campaign, channel, sequence, search) render after
@@ -93,6 +97,7 @@ export default function ReportingFilterBar({
   years,
   supportedGrains,
   disabledGrainReason,
+  showComparison = true,
   onPeriodChange,
   onComparisonChange,
   children,
@@ -184,11 +189,13 @@ export default function ReportingFilterBar({
       />
 
       {/* 4. Comparison */}
-      <ComparisonControl
-        grain={period.grain}
-        value={comparison}
-        onChange={onComparisonChange}
-      />
+      {showComparison ? (
+        <ComparisonControl
+          grain={period.grain}
+          value={comparison}
+          onChange={onComparisonChange}
+        />
+      ) : null}
 
       {/* 5. Business filters (region, campaign, channel, sequence, search) */}
       {children}

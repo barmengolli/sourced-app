@@ -65,6 +65,24 @@ function snap(
     prospects_added: 0,
     total_tasks: 0,
     created_at: '2026-01-01T00:00:00Z',
+    // Remaining required fields are neutral; only the counters above drive the
+    // derived-activity math. Filled explicitly rather than cast, so a schema
+    // change fails here instead of being silently swallowed.
+    enabled: false,
+    step_count: 0,
+    duration_days: 0,
+    failed: 0,
+    positive_replies: 0,
+    neutral_replies: 0,
+    negative_replies: 0,
+    delivery_rate: 0,
+    open_rate: 0,
+    click_rate: 0,
+    reply_rate: 0,
+    bounce_rate: 0,
+    opt_out_rate: 0,
+    prospects_active: 0,
+    overdue_tasks: 0,
   };
 }
 

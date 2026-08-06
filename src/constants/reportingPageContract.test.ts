@@ -31,6 +31,7 @@ const VISIBLE_PAGES: PageKey[] = [
 // Where each in-scope reporting page's component lives, so the test can assert
 // the page really renders the shared bar rather than merely being listed.
 const PAGE_SOURCES: Readonly<Record<string, string>> = {
+  'funnel-data': 'src/pages/FunnelDataEntryPage.tsx',
   'funnel-dashboard': 'src/pages/FunnelDashboardPage.tsx',
   'funnel-velocity': 'src/pages/FunnelVelocityPage.tsx',
   'funnel-events': 'src/pages/FunnelEventsPage.tsx',
@@ -89,11 +90,12 @@ describe('reporting page contract completeness', () => {
     }
   });
 
-  it('covers exactly the nine in-scope reporting pages', () => {
+  it('covers exactly the ten in-scope reporting pages', () => {
     expect(REPORTING_PAGES.map((p) => p.key).sort()).toEqual([
       'bdr-quota-dashboard',
       'campaigns-overview',
       'funnel-dashboard',
+      'funnel-data',
       'funnel-events',
       'funnel-spend',
       'funnel-velocity',
@@ -101,6 +103,33 @@ describe('reporting page contract completeness', () => {
       'outreach-dashboard',
       'sixsense-dashboard',
     ]);
+  });
+
+  it('declares a reason for every omitted grain', () => {
+    // A grain may be omitted only WITH an explanation. Omitting one silently
+    // would leave a disabled control that looks broken.
+    for (const p of REPORTING_PAGES) {
+      const omitted = (['month', 'quarter', 'year'] as const).filter(
+        (g) => !p.supportedGrains.includes(g),
+      );
+      if (omitted.length > 0) {
+        expect(
+          p.disabledGrainReason,
+          `${p.key} omits ${omitted.join(', ')} and must say why`,
+        ).toBeTruthy();
+        expect(p.disabledGrainReason).not.toContain('—');
+      }
+    }
+  });
+
+  it('keeps Data Entry on its quarterly storage grain with no comparison', () => {
+    // Data Entry edits stored QUARTERLY values. A month control would imply an
+    // editable monthly cell that does not exist, and a comparison control
+    // would promise a delta the page never computes.
+    const de = reportingContractFor('funnel-data');
+    expect(de).toBeDefined();
+    expect(de?.supportedGrains).toEqual(['quarter', 'year']);
+    expect(de?.supportsComparison).toBe(false);
   });
 
   it('declares a basis, anchor, and at least one supported grain per page', () => {
@@ -125,8 +154,15 @@ describe('reporting pages adopt the shared controls', () => {
     // the component source, so the registry cannot drift from reality.
     for (const p of REPORTING_PAGES) {
       const src = readSource(p.key);
-      expect(src, `${p.key} must render the shared ReportingFilterBar`)
-        .toContain('<ReportingFilterBar');
+      // Either directly, or through a shared wrapper that renders it. Both are
+      // one implementation; what is forbidden is a page-local period control.
+      const usesShared =
+        src.includes('<ReportingFilterBar')
+        || src.includes('<FunnelReportingFilters');
+      expect(usesShared, `${p.key} must render a shared reporting filter bar`)
+        .toBe(true);
+      expect(src, `${p.key} must not keep the legacy PeriodSelector`)
+        .not.toContain('<PeriodSelector');
     }
   });
 
