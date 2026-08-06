@@ -26,6 +26,15 @@ import {
 import { formatCompactCurrency } from '../lib/formatters';
 import ChartCard from '../components/charts/ChartCard';
 import ChannelFunnelBars from '../components/campaigns/ChannelFunnelBars';
+import ReportingFilterBar from '../components/reporting/ReportingFilterBar';
+import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
+import { reportingContractFor } from '../constants/reportingPages';
+import { comparisonPeriod, comparisonLabel } from '../lib/reportingPeriods';
+import type { ComparisonMode, ReportingPeriod } from '../types/reporting';
+
+// Basis and anchor come from the single reporting-page registry, so the visible
+// disclosure and the declared contract cannot disagree.
+const REPORTING_BASIS = reportingContractFor('campaigns-overview')!;
 
 export default function CampaignsOverviewPage({
   tagsHook,
@@ -38,6 +47,10 @@ export default function CampaignsOverviewPage({
   linkedinSnapshots,
   loading,
   onNavigate,
+  explicitPeriod,
+  comparison,
+  onPeriodChange,
+  onComparisonChange,
 }: {
   tagsHook: UseCampaignTagsResult;
   channels: Channel[];
@@ -49,9 +62,12 @@ export default function CampaignsOverviewPage({
   linkedinSnapshots: LinkedinAdSnapshot[];
   loading: boolean;
   onNavigate: (p: PageKey) => void;
+  explicitPeriod: ReportingPeriod | null;
+  comparison: ComparisonMode;
+  onPeriodChange: (p: ReportingPeriod) => void;
+  onComparisonChange: (m: ComparisonMode) => void;
 }) {
   const { tags, links } = tagsHook;
-  const [year, setYear] = useState<number | null>(new Date().getFullYear());
 
   // Year options from the data present across silos.
   const yearOptions = useMemo(() => {
@@ -65,28 +81,34 @@ export default function CampaignsOverviewPage({
     return [...ys].filter((y) => y > 2000).sort((a, b) => b - a);
   }, [attributions, outreachSnapshots, sixSenseSnapshots, leads]);
 
-  const cards = useMemo(
+  // The shared explicit selection, falling back to the latest year that has
+  // data rather than the browser clock. The clock default used to open an
+  // all-zero page on 1 January of a year with no data yet.
+  // Memoized: the fallback allocates a fresh object each render, which would
+  // otherwise invalidate the cards memo below on EVERY render and recompute
+  // every campaign scorecard for every tag.
+  const period = useMemo<ReportingPeriod | null>(
     () =>
-      tags.map((tag) => ({
-        tag,
-        score: computeScorecard(
-          tag.id,
-          links,
-          {
-            channels,
-            leads,
-            attributions,
-            attributionTouches,
-            outreachSnapshots,
-            sixSenseSnapshots,
-            linkedinSnapshots,
-          },
-          year,
-        ),
-      })),
-    [
-      tags,
-      links,
+      explicitPeriod
+      ?? (yearOptions.length > 0
+        ? { grain: 'year', year: yearOptions[0] }
+        : null),
+    [explicitPeriod, yearOptions],
+  );
+  const cmpPeriod = useMemo(
+    () =>
+      period && comparison !== 'off'
+        ? comparisonPeriod(period, comparison)
+        : null,
+    [period, comparison],
+  );
+  const cmpLabel = period ? comparisonLabel(period, comparison) : '';
+  // Legacy year filter, retained only so computeScorecard keeps a year when no
+  // period exists at all (empty database).
+  const year = period?.year ?? null;
+
+  const cards = useMemo(() => {
+    const sources = {
       channels,
       leads,
       attributions,
@@ -94,45 +116,71 @@ export default function CampaignsOverviewPage({
       outreachSnapshots,
       sixSenseSnapshots,
       linkedinSnapshots,
-      year,
-    ],
-  );
+    };
+    return tags.map((tag) => ({
+      tag,
+      score: computeScorecard(tag.id, links, sources, year, period ?? undefined),
+      // The comparison card is computed from the SAME tag id and the SAME
+      // link set, so current and comparison always resolve identical campaign
+      // membership and business filters. Only the period differs.
+      comparisonScore: cmpPeriod
+        ? computeScorecard(tag.id, links, sources, cmpPeriod.year, cmpPeriod)
+        : null,
+    }));
+  }, [
+    tags,
+    links,
+    channels,
+    leads,
+    attributions,
+    attributionTouches,
+    outreachSnapshots,
+    sixSenseSnapshots,
+    linkedinSnapshots,
+    year,
+    period,
+    cmpPeriod,
+  ]);
 
   return (
     <div className="p-8 space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold text-charcoal">
-            Campaigns — Overview
+            Campaigns: overview
           </h1>
           <p className="mt-1 text-sm text-slate-muted">
             Full-funnel view per campaign, from each campaign's tagged assets:
             6Sense engagement, leads and MQLs, opportunities, and Outreach.
           </p>
+          <ReportingBasisDisclosure
+            basis={REPORTING_BASIS.basis}
+            explanation={REPORTING_BASIS.anchor}
+          />
           <p className="mt-1 text-xs text-slate-muted">
-            Basis: leads and MQLs count unique contacts by primary source,
-            not campaign memberships, so they will not match the funnel
-            grid's membership counts. Campaign-level overlap arrives with
-            the influence report.
+            Each metric follows its own source rule: leads and MQLs are a
+            cohort on marketing sourced date, Outreach is activity derived
+            from cumulative snapshots, LinkedIn Ads sums the weeks ending in
+            the period, and Reach and Engagement is the latest snapshot on or
+            before the period end. Leads and MQLs count unique contacts by
+            primary source, not campaign memberships, so they will not match
+            the funnel grid.
+          </p>
+          <p className="mt-1 text-xs text-slate-muted">
+            Campaigns can share assets, so a shared asset counts in full for
+            every campaign claiming it. Campaign totals overlap by design and
+            must not be added into a company total.
           </p>
         </div>
-        <label className="flex items-center gap-2 text-xs text-slate-muted">
-          Year
-          <select
-            value={year ?? 'all'}
-            onChange={(e) =>
-              setYear(e.target.value === 'all' ? null : Number(e.target.value))
-            }
-            className="text-sm px-2 py-1 border border-border rounded bg-bg text-charcoal"
-          >
-            <option value="all">All time</option>
-            {yearOptions.map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </select>
-        </label>
+        {period ? (
+          <ReportingFilterBar
+            period={period}
+            comparison={comparison}
+            years={yearOptions}
+            onPeriodChange={onPeriodChange}
+            onComparisonChange={onComparisonChange}
+          />
+        ) : null}
       </header>
 
       {loading && tags.length === 0 ? (
@@ -151,8 +199,14 @@ export default function CampaignsOverviewPage({
         </div>
       ) : (
         <div className="space-y-4">
-          {cards.map(({ tag, score }) => (
-            <CampaignCard key={tag.id} tag={tag} score={score} />
+          {cards.map(({ tag, score, comparisonScore }) => (
+            <CampaignCard
+              key={tag.id}
+              tag={tag}
+              score={score}
+              comparisonScore={comparisonScore}
+              cmpLabel={cmpLabel}
+            />
           ))}
         </div>
       )}
@@ -161,9 +215,15 @@ export default function CampaignsOverviewPage({
 }
 
 function CampaignCard({
+  comparisonScore,
+  cmpLabel,
   tag,
   score,
 }: {
+  // Same tag id and same link set as `score`; only the period differs, so
+  // current and comparison always share campaign membership.
+  comparisonScore: CampaignScorecard | null;
+  cmpLabel: string;
   tag: CampaignTag;
   score: CampaignScorecard;
 }) {
@@ -220,16 +280,44 @@ function CampaignCard({
                   : `${score.engagementPct.toFixed(0)}%`
               }
             />
-            <Stat label="Leads" value={score.leads.toLocaleString()} />
-            <Stat label="MQLs" value={score.mqls.toLocaleString()} />
+            <Stat
+              label="Leads"
+              value={score.leads.toLocaleString()}
+              delta={countDelta(score.leads, comparisonScore?.leads, cmpLabel)}
+            />
+            <Stat
+              label="MQLs"
+              value={score.mqls.toLocaleString()}
+              delta={countDelta(score.mqls, comparisonScore?.mqls, cmpLabel)}
+            />
             <Stat
               label="Opps"
               value={(score.hpp + score.opp + score.pursuit).toLocaleString()}
               sub={`${score.hpp} HPP · ${score.opp} Opp · ${score.pursuit} Pursuit`}
             />
-            <Stat label="Won" value={score.won.toLocaleString()} />
-            <Stat label="Sent" value={score.outreachSent.toLocaleString()} />
-            <Stat label="Replied" value={score.outreachReplied.toLocaleString()} />
+            <Stat
+              label="Won"
+              value={score.won.toLocaleString()}
+              delta={countDelta(score.won, comparisonScore?.won, cmpLabel)}
+            />
+            <Stat
+              label="Sent"
+              value={score.outreachSent.toLocaleString()}
+              delta={countDelta(
+                score.outreachSent,
+                comparisonScore?.outreachSent,
+                cmpLabel,
+              )}
+            />
+            <Stat
+              label="Replied"
+              value={score.outreachReplied.toLocaleString()}
+              delta={countDelta(
+                score.outreachReplied,
+                comparisonScore?.outreachReplied,
+                cmpLabel,
+              )}
+            />
           </div>
 
           {expanded && (
@@ -799,20 +887,49 @@ function DealsPipelineCard({
   );
 }
 
+// Format a count delta per the standard's zero-and-missing table:
+//   no comparison card              -> nothing rendered
+//   comparison of zero, current > 0 -> "New", never an infinite percentage
+//   both zero                       -> "No change"
+// Missing and zero stay different facts throughout.
+function countDelta(
+  current: number,
+  comparison: number | undefined,
+  cmpLabel: string,
+): string | undefined {
+  if (comparison === undefined) return undefined;
+  const suffix = cmpLabel ? ` ${cmpLabel}` : '';
+  if (comparison === 0) {
+    if (current === 0) return `No change${suffix}`;
+    return `New${suffix}`;
+  }
+  const abs = current - comparison;
+  const rel = (abs / Math.abs(comparison)) * 100;
+  const sign = abs > 0 ? '+' : '';
+  return `${sign}${abs.toLocaleString()} (${sign}${rel.toFixed(0)}%)${suffix}`;
+}
+
 function Stat({
   label,
   value,
   sub,
+  delta,
 }: {
   label: string;
   value: string;
   sub?: string;
+  // Rendered under the value when a valid comparison exists. Absent means no
+  // comparison was possible, which is shown as text rather than a zero delta.
+  delta?: string;
 }) {
   return (
     <div className="border border-border rounded bg-muted/40 px-3 py-2">
       <p className="text-[10px] uppercase tracking-wider text-slate-muted">
         {label}
       </p>
+      {delta ? (
+        <p className="text-[10px] text-slate-muted tabular-nums">{delta}</p>
+      ) : null}
       <p className="mt-0.5 text-lg font-semibold text-charcoal tabular-nums">
         {value}
       </p>

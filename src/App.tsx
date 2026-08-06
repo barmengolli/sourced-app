@@ -199,7 +199,13 @@ function PageBody({
       );
     case 'campaigns-overview':
     case 'campaigns-tags':
-      return <CampaignsSection page={page} onNavigate={onNavigate} />;
+      return (
+        <CampaignsSection
+          page={page}
+          onNavigate={onNavigate}
+          {...reportingProps}
+        />
+      );
     case 'linkedin-dashboard':
       return <LinkedinAdsSection />;
     case 'funnel-import':

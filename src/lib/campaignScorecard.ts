@@ -59,6 +59,8 @@ import {
   type ActivityCounter,
 } from './outreachReporting';
 import type { ReportingPeriod } from '../types/reporting';
+import { periodBounds } from './reportingPeriods';
+import { selectSnapshotForPeriod } from './snapshotSelection';
 
 // One channel's contribution to the campaign funnel (the channel that sourced
 // the leads / was first-touch on the opps).
@@ -374,6 +376,18 @@ export function computeScorecard(
   // working; the Campaigns Overview page always passes a period.
   period?: ReportingPeriod,
 ): CampaignScorecard {
+  // ONE set of period boundaries for every source on the card, so the funnel
+  // cohort, the LinkedIn weeks, and the 6sense snapshot cannot disagree about
+  // what "this period" means. Falls back to the legacy year filter when no
+  // period is supplied.
+  const bounds = period ? periodBounds(period) : null;
+  const inPeriod = (iso: string | null | undefined): boolean => {
+    if (!iso) return false;
+    if (bounds) return iso >= bounds.start && iso <= bounds.end;
+    if (filterYear == null) return true;
+    return Number(iso.slice(0, 4)) === filterYear;
+  };
+
   const links = allLinks.filter((l) => l.tag_id === tagId);
   // Every tag carried by each channel. A channel can be tagged to SEVERAL
   // campaigns, so "claimed by someone else" is a property of its whole tag set,
@@ -421,14 +435,15 @@ export function computeScorecard(
   );
 
   // --- Leads / MQLs (by source channel) ---
-  const yearOf = (iso?: string | null) =>
-    iso ? Number(iso.slice(0, 4)) : null;
   const campaignLeads = data.leads.filter(
     (l) =>
       l.source_channel_id != null &&
       channelSet.has(l.source_channel_id) &&
-      (filterYear == null ||
-        yearOf(l.marketing_sourced_date) === filterYear),
+      // Cohort on marketing sourced date, unchanged in basis; only the window
+      // narrows from a whole year to the selected period.
+      (bounds || filterYear != null
+        ? inPeriod(l.marketing_sourced_date)
+        : true),
   );
   const leads = campaignLeads.length;
   const mqls = campaignLeads.filter(isMql).length;
@@ -479,8 +494,14 @@ export function computeScorecard(
   const campaignDealRows: Attribution[] = [];
   const touchesByDealKey = new Map<string, AttributionTouch[]>();
   for (const [k, rows] of rowsByDeal) {
-    // Year filter at the DEAL level: in scope if any row falls in the year.
-    if (filterYear != null && !rows.some((r) => r.year === filterYear)) continue;
+    // Period filter at the DEAL level: in scope if any stage row falls in the
+    // period. Deal-level (not row-level) so a deal's stage is a property of
+    // the deal rather than of the filter.
+    if (bounds) {
+      if (!rows.some((r) => inPeriod(r.stage_entered_at))) continue;
+    } else if (filterYear != null && !rows.some((r) => r.year === filterYear)) {
+      continue;
+    }
     const touches = touchesForDeal(rows);
     const inScope =
       rows.some((r) => r.channel_id != null && channelSet.has(r.channel_id)) ||
@@ -685,14 +706,19 @@ export function computeScorecard(
       accountsSum = 0,
       n = 0;
     for (const seg of segmentRefs) {
-      const rows = data.sixSenseSnapshots
-        .filter(
-          (s) =>
-            s.segment === seg &&
-            (filterYear == null || s.year === filterYear),
-        )
-        .sort((a, b) => (a.snapshot_date < b.snapshot_date ? 1 : -1));
-      const latest = rows[0];
+      const segRows = data.sixSenseSnapshots.filter((s) => s.segment === seg);
+      // Point-in-time: the latest eligible snapshot at or before period end.
+      // Never a sum across months, and never a future reading borrowed
+      // backwards. Falls back to the legacy year filter without a period.
+      let latest: SixSenseSnapshot | undefined;
+      if (period) {
+        const sel = selectSnapshotForPeriod(segRows, period);
+        latest = sel.state === 'present' ? sel.snapshot : undefined;
+      } else {
+        latest = segRows
+          .filter((s) => filterYear == null || s.year === filterYear)
+          .sort((a, b) => (a.snapshot_date < b.snapshot_date ? 1 : -1))[0];
+      }
       if (latest) {
         reachSum += latest.reach;
         engagementSum += latest.engagement;
@@ -823,10 +849,15 @@ export function computeScorecard(
   const adsByAdset: LinkedinAdsetStats[] = [];
   if (linkedinAdsetRefs.size > 0) {
     for (const adsetId of linkedinAdsetRefs) {
+      // Additive weekly flow: sum every week whose week-ending Sunday falls
+      // in the period. Rates are recomputed from these totals in the UI, never
+      // averaged across weeks.
       const rows = data.linkedinSnapshots.filter(
         (s) =>
           s.adset_id === adsetId &&
-          (filterYear == null || s.year === filterYear),
+          (bounds
+            ? inPeriod(s.snapshot_date)
+            : filterYear == null || s.year === filterYear),
       );
       if (rows.length === 0) continue;
       let spend = 0,
