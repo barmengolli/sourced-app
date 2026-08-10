@@ -1,8 +1,9 @@
 // TouchDrilldownPanel: Bite 4E side panel listing the touches underlying a
 // clicked Lead or MQL actual. Memberships, not just leads: a lead with two
-// touches in the inspected scope appears once per touch. Undated
-// same-channel touches surface in their own group (they are excluded from
-// period counts by rule and must never disappear silently).
+// touches in the inspected scope appears once per touch. For MQL, the touch
+// date anchors the acquisition cohort; the qualification date is context.
+// Undated same-channel touches surface in their own group (they are excluded
+// from period counts by rule and must never disappear silently).
 
 import { useMemo } from 'react';
 import type { Channel, Lead, LeadCampaignTouchRow } from '../../types/db';
@@ -80,7 +81,7 @@ export default function TouchDrilldownPanel({
     <table className="w-full text-xs">
       <thead>
         <tr className="text-left text-slate-muted border-b border-border">
-          {stage === 'mql' && <th className="py-1 pr-2 font-medium">MQL date</th>}
+          {stage === 'mql' && <th className="py-1 pr-2 font-medium">MQL observed</th>}
           <th className="py-1 pr-2 font-medium">Touch date</th>
           <th className="py-1 pr-2 font-medium">Channel</th>
           <th className="py-1 pr-2 font-medium">Account</th>
@@ -122,7 +123,7 @@ export default function TouchDrilldownPanel({
               {periodLabel} · {drilldown.counted.length} counted{' '}
               {stage === 'lead'
                 ? 'touches (one row per membership; a contact in several campaigns appears once per touch)'
-                : 'entries (one row per qualification event per touched channel)'}
+                : 'memberships (the touch date anchors the cohort; MQL observed is supporting context)'}
             </p>
           </div>
           <button

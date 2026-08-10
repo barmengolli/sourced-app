@@ -50,7 +50,8 @@ export const REPORTING_PAGES: ReadonlyArray<ReportingPageContract> = [
     key: 'funnel-data',
     label: 'Data Entry',
     basis: 'cohort',
-    anchor: 'Quarterly stored values for the selected year',
+    anchor:
+      'Campaign memberships grouped by touch quarter; MQLs are the reached-MQL subset of the same Lead cohort',
     supportedGrains: ['quarter', 'year'],
     disabledGrainReason:
       'Month is not available here because funnel values are stored by '

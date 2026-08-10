@@ -22,10 +22,11 @@ export default function UserManualPage() {
 
       <Section title="Two views of the data">
         <p>
-          <Strong>Data Entry uses cohort math.</Strong> Each column counts
-          leads or deals that entered the funnel in the selected period AND
-          whose next stage transition also happened in the same period.
-          Conversion rates can never exceed 100%.
+          <Strong>Data Entry uses cohort math.</Strong> Lead and deal cohorts
+          stay anchored to the period they entered the funnel and are followed
+          forward. If a campaign generates 20 Leads and 10 later reach MQL,
+          the cohort shows Leads 20 and MQLs 10. Reaching MQL never subtracts
+          from the Lead count.
         </p>
         <p>
           <Strong>Opportunities uses snapshot math.</Strong> Any deal with
@@ -34,8 +35,15 @@ export default function UserManualPage() {
           working-pipeline view.
         </p>
         <p>
-          When the two disagree, the cohort hid a cross-period deal.
-          The snapshot is where you'll see it.
+          When the two disagree, they are answering different questions: the
+          cohort follows original entrants forward, while the snapshot shows
+          activity in the selected period.
+        </p>
+        <p>
+          <Strong>Sales (New Logo) is deal-only.</Strong> Its Lead and MQL
+          cells are intentionally empty. Sales new-logo deals are tracked from
+          HPP forward, while BDR Outbound keeps its own Lead and MQL cohorts so
+          Sales-generated and BDR-generated deals remain separate.
         </p>
       </Section>
 

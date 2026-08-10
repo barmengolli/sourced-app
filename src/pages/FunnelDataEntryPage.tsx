@@ -247,8 +247,9 @@ export default function FunnelDataEntryPage({
           />
           <p className="mt-1 text-sm text-slate-muted">
             Edit projections inline. Click attribution cells with deals to
-            view, edit, promote, or delete them. Lead and MQL actuals are
-            computed from leads.
+            view, edit, promote, or delete them. Lead actuals count campaign
+            memberships in the selected cohort; MQL actuals are the members
+            of that same cohort who have reached MQL.
           </p>
         </div>
         <div className="flex items-center gap-2">

@@ -139,6 +139,15 @@ export function mqlEventDates(lead: Lead): string[] {
   return [...dates].sort();
 }
 
+// Data Entry is an acquisition-cohort surface. Once a person has been
+// observed at MQL, that person remains an MQL member of every campaign-touch
+// cohort they belong to. The transition date is intentionally irrelevant
+// here; activity surfaces continue to use mqlEventDates/firstMqlDate.
+export function hasReachedMql(lead: Lead): boolean {
+  if (lead.current_stage === 'mql') return true;
+  return (lead.stage_history ?? []).some((entry) => entry.stage === 'mql');
+}
+
 export function computeGrid(input: ComputeInput): ComputedGrid {
   const {
     leads,
@@ -173,20 +182,15 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   const attribKey = (cid: string, y: number, p: number, s: string): string =>
     `${cid}\x1f${y}\x1f${p}\x1f${s}`;
 
-  // 2. Lead pass: bucket each lead's lead-stage and (optional) mql-stage
-  //    into its source channel's own counts. Region filter is applied at
-  //    the top of each iteration so a filtered-out lead doesn't contribute
-  //    to grid totals OR to the unassigned count.
+  // 2. Acquisition-cohort lead pass. Every campaign membership is anchored
+  //    to its own touch_date. Lead actual is the number of memberships in the
+  //    selected cohort; MQL actual is the subset of those same memberships
+  //    whose person has ever been observed at MQL. Becoming MQL never removes
+  //    a Lead: 20 memberships with 10 MQLs render Leads=20, MQLs=10.
   //
-  //    Strict-cohort rule (MQL column): a lead only counts toward an
-  //    (channel, period) MQL cell when BOTH its marketing_sourced_date
-  //    AND any 'mql' stage_history entry fall in the same period. This
-  //    keeps the Data Entry grid coherent for conversion-rate math:
-  //    every cell counts members of the period's own cohort whose
-  //    transition at this stage was also in the period. Cross-period
-  //    transitions (a 2025 lead that converted to MQL in 2026) are
-  //    intentionally invisible from the grid; the Opportunity Influence
-  //    tabs on the Opportunities sub-tab surface them.
+  //    The MQL transition date does not move the person into a later cohort.
+  //    A Q1 membership first observed at MQL in Q3 remains a Q1-cohort MQL.
+  //    Month/week activity surfaces still bucket MQL events by entered_at.
   //
   //    The manual fallback below dedupes against sourceCoverage (built from raw
   //    records before filtering), not against what these loops land, so a
@@ -197,10 +201,7 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   //    channel per lead. A multi-campaign contact counts in each touched
   //    channel; channel counts intentionally overlap and the totals row
   //    exceeds distinct contacts by design (uniqueContacts carries the
-  //    distinct-people line). The previous strict-cohort MQL rule is
-  //    RETIRED by locked business decision 1.2: an MQL event counts in
-  //    every channel the contact belongs to, bucketed solely by the
-  //    event's entered_at.
+  //    distinct-people line).
   const leadById = new Map(leads.map((l) => [l.id, l] as const));
   let unassignedLeadCount = 0;
   const uniqueLeadIds = new Set<string>();
@@ -223,36 +224,14 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     const row = rowMap.get(t.channel_id);
     if (row) {
       row.cells.lead.actual = (row.cells.lead.actual ?? 0) + 1;
-      uniqueLeadIds.add(t.lead_id);
-    }
-  }
-
-  // MQL stage: events x memberships. Membership is any touch with a
-  // channel, dated or not (an undated touch still proves the membership).
-  const channelsByLead = new Map<string, Set<string>>();
-  for (const t of touches) {
-    if (!t.channel_id) continue;
-    let set = channelsByLead.get(t.lead_id);
-    if (!set) {
-      set = new Set<string>();
-      channelsByLead.set(t.lead_id, set);
-    }
-    set.add(t.channel_id);
-  }
-  for (const l of leads) {
-    const memberships = channelsByLead.get(l.id);
-    if (!memberships || memberships.size === 0) continue;
-    if (!matchesRegionFilter(l.region, regions)) continue;
-    for (const iso of mqlEventDates(l)) {
-      const mqlBucket = quarterOfIsoDate(iso);
-      if (!mqlBucket || !matchesPeriod(mqlBucket, year, filter)) continue;
-      for (const cid of memberships) {
-        const row = rowMap.get(cid);
-        if (row) {
-          row.cells.mql.actual = (row.cells.mql.actual ?? 0) + 1;
-          uniqueMqlIds.add(l.id);
-        }
+      // A touched cohort with no qualifying members is a proven zero, not
+      // missing data. Initializing here keeps 0 distinct from null.
+      row.cells.mql.actual = row.cells.mql.actual ?? 0;
+      if (hasReachedMql(touchLead)) {
+        row.cells.mql.actual += 1;
+        uniqueMqlIds.add(t.lead_id);
       }
+      uniqueLeadIds.add(t.lead_id);
     }
   }
 
@@ -342,24 +321,15 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   // empty source period is indistinguishable from an unimported one. Presence of
   // any eligible source record is the coverage signal for this cleanup.
   const sourceCoverage = new Set<string>();
-  // Bite 4E: lead/mql coverage comes from TOUCHES (pre-region, per stored
-  // quarter), preserving the M3 semantics: a channel-period with ANY
-  // touch-based signal uses touches; the manual fallback applies only
-  // where there is none.
+  // Lead/MQL coverage comes from the same dated cohort touches (pre-region,
+  // per stored quarter). A cohort touch proves both the Lead denominator and
+  // the MQL numerator were evaluated, even when the MQL result is zero.
   for (const t of touches) {
     if (!t.channel_id) continue;
     const tb = quarterOfIsoDate(t.touch_date);
-    if (tb) sourceCoverage.add(attribKey(t.channel_id, tb.year, tb.quarter, 'lead'));
-  }
-  for (const l of leads) {
-    const memberships = channelsByLead.get(l.id);
-    if (!memberships) continue;
-    for (const iso of mqlEventDates(l)) {
-      const mb = quarterOfIsoDate(iso);
-      if (!mb) continue;
-      for (const cid of memberships) {
-        sourceCoverage.add(attribKey(cid, mb.year, mb.quarter, 'mql'));
-      }
+    if (tb) {
+      sourceCoverage.add(attribKey(t.channel_id, tb.year, tb.quarter, 'lead'));
+      sourceCoverage.add(attribKey(t.channel_id, tb.year, tb.quarter, 'mql'));
     }
   }
   for (const a of attributions) {

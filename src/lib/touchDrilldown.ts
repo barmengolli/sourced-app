@@ -10,7 +10,7 @@ import type { Lead, LeadCampaignTouchRow, PeriodIndex } from '../types/db';
 import type { RegionKey } from '../constants/regions';
 import { matchesRegionFilter } from './regionFilter';
 import { quarterOfIsoDate } from './dates';
-import { mqlEventDates, type PeriodFilter } from './compute';
+import { hasReachedMql, mqlEventDates, type PeriodFilter } from './compute';
 
 export interface TouchDrilldownEntry {
   touchId: string;
@@ -21,7 +21,8 @@ export interface TouchDrilldownEntry {
   // Lead stage: the touch date (null only in the undated group). MQL
   // stage: the touch date of the membership row backing the count.
   touchDate: string | null;
-  // MQL stage only: the qualification event date the entry counts under.
+  // MQL stage only: earliest known qualification date, when available. This
+  // is supporting context; the membership's touchDate anchors the cohort.
   mqlEventDate?: string;
   parentCampaign: string | null;
   subCampaign: string | null;
@@ -33,8 +34,7 @@ export interface TouchDrilldownEntry {
 export interface TouchDrilldown {
   // Entries that count in the inspected cell, in stable date order.
   counted: TouchDrilldownEntry[];
-  // Same-channel touches that cannot bucket into any period (lead stage
-  // only; memberships still count for MQL).
+  // Same-channel touches that cannot bucket into any period.
   undated: TouchDrilldownEntry[];
 }
 
@@ -94,34 +94,26 @@ export function computeTouchDrilldown(input: TouchDrilldownInput): TouchDrilldow
     return { counted, undated };
   }
 
-  // MQL stage: one entry per (qualification event in period) x (membership
-  // touch in scope). Undated membership touches still back MQL counts, so
-  // they appear in counted with a null touchDate, not in the undated group.
+  // MQL stage: one row per membership touch in the selected acquisition
+  // cohort, restricted to people who have ever been observed at MQL. The MQL
+  // event date is supporting context only and never moves the membership to
+  // a later period. Undated touches cannot be assigned to a cohort.
   const counted: TouchDrilldownEntry[] = [];
-  const touchesByLead = new Map<string, LeadCampaignTouchRow[]>();
+  const undated: TouchDrilldownEntry[] = [];
   for (const t of scoped) {
-    const arr = touchesByLead.get(t.lead_id) ?? [];
-    arr.push(t);
-    touchesByLead.set(t.lead_id, arr);
-  }
-  for (const [leadId, leadTouches] of touchesByLead) {
-    const lead = leadById.get(leadId)!;
-    // One membership per distinct channel, mirroring the count.
-    const byChannel = new Map<string, LeadCampaignTouchRow>();
-    for (const t of leadTouches) {
-      if (!byChannel.has(t.channel_id!)) byChannel.set(t.channel_id!, t);
-    }
-    for (const iso of mqlEventDates(lead)) {
-      if (!inPeriod(iso, year, filter)) continue;
-      for (const t of byChannel.values()) {
-        counted.push({ ...entry(t, lead), mqlEventDate: iso });
-      }
-    }
+    const lead = leadById.get(t.lead_id)!;
+    if (!hasReachedMql(lead)) continue;
+    const candidate = {
+      ...entry(t, lead),
+      mqlEventDate: mqlEventDates(lead)[0],
+    };
+    if (t.touch_date === null) undated.push(candidate);
+    else if (inPeriod(t.touch_date, year, filter)) counted.push(candidate);
   }
   counted.sort(
     (a, b) =>
-      (a.mqlEventDate ?? '').localeCompare(b.mqlEventDate ?? '') ||
-      (a.touchDate ?? '').localeCompare(b.touchDate ?? ''),
+      (a.touchDate ?? '').localeCompare(b.touchDate ?? '') ||
+      (a.mqlEventDate ?? '').localeCompare(b.mqlEventDate ?? ''),
   );
-  return { counted, undated: [] };
+  return { counted, undated };
 }
