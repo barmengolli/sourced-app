@@ -228,7 +228,7 @@ The Supabase schema lives in `sourced-app/SCHEMA.sql`. Migrations applied to pro
 
 **Field locks.** Every editable field on a lead can be individually locked. Locked fields are preserved on re-import. The `field_locks` JSONB stores `{fieldName: true}` for each locked field. The importer's `buildSyncPatch` checks this before writing.
 
-**Stage history.** A lead's `stage_history` is a JSONB array of `{stage, entered_at, edited_by, edit_locked}` entries. The funnel grid counts MQLs by the date of the lead's MQL entry (NOT by `marketing_sourced_date`). Importer auto-appends new entries when a re-import shows the lead at a new stage (this behavior was added 2026-05-12 to fix a known under-counting bug, migration `2026-05-12_backfill_missing_mql_stage_history.sql`).
+**Stage history.** A lead's `stage_history` is a JSONB array of `{stage, entered_at, edited_by, edit_locked}` entries. Data Entry uses it to establish whether a campaign-cohort member has ever reached MQL, but the membership's touch date anchors the cohort. Activity views still use MQL event dates. Importer auto-appends new entries when a re-import shows the lead at a new stage (this behavior was added 2026-05-12 to fix a known under-counting bug, migration `2026-05-12_backfill_missing_mql_stage_history.sql`).
 
 **The attribution chain.** A deal moves through stages by creating NEW attribution rows that share the same `deal_id`. The original HPP row stays in the database after promotion to Opp; that's how the velocity report computes time-in-stage.
 
@@ -236,8 +236,9 @@ The Supabase schema lives in `sourced-app/SCHEMA.sql`. Migrations applied to pro
 
 ### 7.3 Date semantics, critical to understand
 
-- **Lead counts** are bucketed by `leads.marketing_sourced_date` (the SFDC Member First Associated Date).
-- **MQL counts** are bucketed by the lead's earliest `stage_history` entry where `stage = 'mql'`, specifically that entry's `entered_at`.
+- **Data Entry Lead counts** are bucketed by each campaign membership's `lead_campaign_touches.touch_date` (the SFDC Member First Associated Date).
+- **Data Entry MQL counts** use that same membership cohort and count the subset whose person is currently MQL or has an MQL entry in `stage_history`. The MQL date does not move the person to a later cohort.
+- **Activity views** bucket MQL events by `stage_history.entered_at`; these answer when qualification happened rather than which acquisition cohort converted.
 - **HPP/Opp/Pursuit/Won/Lost counts** are bucketed by the attribution row's `period_index` AND `year`. The `stage_entered_at` date on each row is used for velocity calculations but not for funnel bucketing.
 
 The Compare tab (week-over-week) uses ISO weeks (Monday to Sunday) based on the same `marketing_sourced_date` for Leads and the same `stage_entered_at` for HPP+ stages.

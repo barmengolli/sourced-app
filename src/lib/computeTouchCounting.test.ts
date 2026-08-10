@@ -103,9 +103,9 @@ describe('zero-drift regression: single-membership data matches the pre-4E outpu
       rows: [
         { channelId: 'c-root1', lead: { actual: 12, projection: null }, mql: { actual: null }, hpp: { actual: null } },
         { channelId: 'c-sub1', lead: { actual: null, projection: null }, mql: { actual: null }, hpp: { actual: null } },
-        { channelId: 'c-root2', lead: { actual: 1, projection: null }, mql: { actual: null }, hpp: { actual: null } },
+        { channelId: 'c-root2', lead: { actual: 1, projection: null }, mql: { actual: 0 }, hpp: { actual: null } },
       ],
-      totals: { lead: { actual: 13, projection: null }, mql: { actual: null }, hpp: { actual: null } },
+      totals: { lead: { actual: 13, projection: null }, mql: { actual: 0 }, hpp: { actual: null } },
       unassignedLeadCount: 0,
     });
   });
@@ -186,7 +186,37 @@ describe('multi-attribution counting (the deliberate change)', () => {
     expect(year.uniqueContacts.lead).toBeLessThanOrEqual(year.totals.lead.actual!);
   });
 
-  it('an MQL event counts in every touched channel, bucketed by the event date', () => {
+  it('keeps MQLs inside the original lead cohort without subtracting them from Leads', () => {
+    const cohort = Array.from({ length: 20 }, (_, i) =>
+      lead({
+        id: `P${i + 1}`,
+        region: 'NA',
+        stage_history:
+          i < 10 ? [stageHistory('mql', '2026-09-15')] : [],
+      }),
+    );
+    const touches = cohort.map((person) =>
+      touchRow({
+        lead_id: person.id,
+        channel_id: 'cA',
+        touch_date: '2026-01-10',
+      }),
+    );
+
+    const q1 = computeGrid({ ...base(cohort, touches), year: 2026, filter: 'Q1' });
+    const row = q1.rows.find((candidate) => candidate.channelId === 'cA');
+    expect(row?.cells.lead.actual).toBe(20);
+    expect(row?.cells.mql.actual).toBe(10);
+    expect(conversionPercent(row?.cells.mql.actual ?? null, row?.cells.lead.actual ?? null)).toBe(50);
+
+    // The MQL happened in Q3, but Data Entry is an acquisition-cohort report:
+    // the conversion follows the Q1 membership rather than becoming Q3 volume.
+    const q3 = computeGrid({ ...base(cohort, touches), year: 2026, filter: 'Q3' });
+    expect(q3.totals.lead.actual).toBeNull();
+    expect(q3.totals.mql.actual).toBeNull();
+  });
+
+  it('anchors each campaign membership to its own touch period', () => {
     const person = lead({
       id: 'P1',
       region: 'NA',
@@ -196,18 +226,49 @@ describe('multi-attribution counting (the deliberate change)', () => {
       touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-01-10' }),
       touchRow({ lead_id: 'P1', channel_id: 'cB', touch_date: '2026-08-05' }),
     ];
-    const q3 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' });
-    expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
-    expect(q3.rows.find((r) => r.channelId === 'cB')?.cells.mql.actual).toBe(1);
-    expect(q3.totals.mql.actual).toBe(2);
-    expect(q3.uniqueContacts.mql).toBe(1);
-    // The old strict-cohort gate is retired: the Q1 touch does not stop the
-    // Q3 MQL from counting, and Q1 shows no MQL.
     const q1 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' });
-    expect(q1.totals.mql.actual).toBeNull();
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
+    expect(q1.rows.find((r) => r.channelId === 'cB')?.cells.mql.actual).toBeNull();
+    const q3 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' });
+    expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
+    expect(q3.rows.find((r) => r.channelId === 'cB')?.cells.mql.actual).toBe(1);
   });
 
-  it('demotion then re-qualification yields two MQL events in their own periods; closed periods never change', () => {
+  it('counts a person observed at MQL even when historical transition timing is unavailable', () => {
+    const person = lead({ id: 'P1', region: 'NA', current_stage: 'mql', stage_history: [] });
+    const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-01-10' })];
+    const q1 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' });
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
+  });
+
+  it('shows a proven zero when a lead cohort has no MQL members', () => {
+    const person = lead({ id: 'P1', region: 'NA', current_stage: 'lead', stage_history: [] });
+    const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-01-10' })];
+    const q1 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' });
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(0);
+  });
+
+  it('does not overlay a manual MQL fallback on a proven zero cohort', () => {
+    const person = lead({ id: 'P1', region: 'NA', current_stage: 'lead', stage_history: [] });
+    const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-01-10' })];
+    const q1 = computeGrid({
+      ...base([person], touches),
+      manualActuals: [{
+        id: 'manual-mql',
+        channel_id: 'cA',
+        year: 2026,
+        period_index: 1,
+        stage_key: 'mql',
+        actual: 9,
+        edited_at: '2026-04-01T00:00:00Z',
+      }],
+      year: 2026,
+      filter: 'Q1',
+    });
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(0);
+  });
+
+  it('demotion and re-qualification never double-count the same cohort member', () => {
     const person = lead({
       id: 'P1',
       region: 'NA',
@@ -220,13 +281,12 @@ describe('multi-attribution counting (the deliberate change)', () => {
     });
     const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-07-01' })];
     expect(mqlEventDates(person)).toEqual(['2026-08-10', '2027-02-01']);
-    // Q3 2026 stands after the Q4 demotion.
+    // Q3 is the membership cohort and counts this person once.
     const q3 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' });
     expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
-    // The re-qualification is a NEW event in its own period.
+    // A later re-qualification is activity, not a second cohort member.
     const q1_27 = computeGrid({ ...base([person], touches), year: 2027, filter: 'Q1' });
-    expect(q1_27.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
-    // Nothing double-counts inside one period.
+    expect(q1_27.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
     const y2026 = computeGrid({ ...base([person], touches), year: 2026, filter: 'year' });
     expect(y2026.totals.mql.actual).toBe(1);
   });
@@ -267,7 +327,7 @@ describe('multi-attribution counting (the deliberate change)', () => {
     expect(filtered.uniqueContacts.lead).toBe(1);
   });
 
-  it('a NULL touch_date is excluded from period counts but still proves MQL membership', () => {
+  it('a NULL touch_date cannot be assigned to a Lead or MQL cohort', () => {
     const person = lead({
       id: 'P1',
       region: 'NA',
@@ -276,8 +336,7 @@ describe('multi-attribution counting (the deliberate change)', () => {
     const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: null })];
     const q1 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' });
     expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.lead.actual).toBeNull();
-    // Membership still exists, so the MQL event counts in the channel.
-    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
   });
 
   it('conversion cells may exceed 100% and are never clamped', () => {
@@ -312,7 +371,7 @@ describe('touch drilldown', () => {
     id: 'P1',
     region: 'NA',
     account: 'Synthetic Account',
-    stage_history: [stageHistory('mql', '2026-02-01')],
+    stage_history: [stageHistory('mql', '2026-09-01')],
   });
 
   it('lead stage lists one row per counted touch and groups undated separately', () => {
@@ -337,7 +396,7 @@ describe('touch drilldown', () => {
     expect(dd.undated.map((e) => e.touchId)).toEqual(['t3']);
   });
 
-  it('mql stage lists one row per qualification event per touched channel', () => {
+  it('mql stage lists qualifying memberships in their acquisition cohort', () => {
     const touches = [
       touchRow({ id: 't1', lead_id: 'P1', channel_id: 'cA', touch_date: '2026-01-10' }),
     ];
@@ -350,7 +409,8 @@ describe('touch drilldown', () => {
       filter: 'Q1',
     });
     expect(dd.counted).toHaveLength(1);
-    expect(dd.counted[0].mqlEventDate).toBe('2026-02-01');
+    // The later MQL date is context; the Q1 touch keeps this row in Q1.
+    expect(dd.counted[0].mqlEventDate).toBe('2026-09-01');
     expect(dd.counted[0].touchId).toBe('t1');
   });
 });

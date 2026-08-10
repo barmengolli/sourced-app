@@ -104,27 +104,27 @@ leads(C,Y,Q)  = count of lead_campaign_touches t
                 where t.channel_id = C AND t.touch_date in (Y,Q)
                 [region filter applies via t.lead's region]
 
-mql(C,Y,Q)    = count of MQL EVENTS x memberships:
-                for each mql entry e in each lead's stage_history
-                (one entry per qualification cycle; a re-qualification
-                after a demotion is a new entry),
-                count (e, C) where the lead has a touch in channel C
-                AND e.entered_at in (Y,Q)
+mql(C,Y,Q)    = count of lead_campaign_touches t
+                where t.channel_id = C AND t.touch_date in (Y,Q)
+                AND t.lead has ever been observed at MQL
+                [one MQL at most per membership; transition date does not
+                move the membership out of its acquisition cohort]
 
 unique(Y,Q)   = count of DISTINCT lead_id across the same scope
                 (secondary display line; 4A uniquePeople)
 ```
 
 A lead with touches in channels A (Q1) and B (Q3): Lead count Q1 for A, Q3
-for B. If they MQL in Q3: MQL count in Q3 for BOTH A and B. If they are
-demoted in Q4 and re-qualify in Q1 2027: the Q3 2026 MQL counts stand, AND
-both channels count a new MQL in Q1 2027. Re-engagement within an existing
-campaign does not create a new lead count (the touch already exists); a new
-campaign join does. Conversion cells divide same-channel MQL counts by
-same-channel lead memberships and can exceed 100% for channels with heavy
-re-qualification; the UI should tolerate and label that. Projections are
-unchanged (already per channel). funnel_actuals fallback for pre-Sourced
-years is unchanged.
+for B. If they reach MQL in Q3, the person becomes an MQL member of both
+acquisition cohorts: Q1 for A and Q3 for B. A later demotion or
+re-qualification never creates a second MQL in either cohort; that is
+activity, not another person. Re-engagement within an existing campaign does
+not create a new lead count (the touch already exists); a new campaign join
+does. Conversion cells divide same-cohort MQL memberships by Lead
+memberships, so Lead-to-MQL cannot exceed 100%. Activity views continue to
+bucket qualification and requalification events by their own event dates.
+Projections are unchanged (already per channel). funnel_actuals fallback for
+pre-Sourced years is unchanged.
 
 ## 5. Sync architecture (target state)
 
