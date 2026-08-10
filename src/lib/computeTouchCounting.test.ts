@@ -15,6 +15,7 @@ import {
 import { computeTouchDrilldown } from './touchDrilldown';
 import { REGIONS, type RegionKey } from '../constants/regions';
 import {
+  attribution,
   channel,
   lead,
   seedTouchesFor,
@@ -166,6 +167,46 @@ describe('multi-attribution counting (the deliberate change)', () => {
       attributions: [],
     };
   }
+
+  it('keeps Sales (New Logo) deal-only and separate from BDR acquisition cohorts', () => {
+    const sales = channel({ id: 'sales', name: 'Sales (New Logo)', display_order: 1 });
+    const bdr = channel({ id: 'bdr', name: 'BDR Outbound', display_order: 2 });
+    const bdrLead = lead({
+      id: 'BDR-1',
+      region: 'NA',
+      stage_history: [stageHistory('mql', '2026-02-10')],
+    });
+    const salesDeal = 'SALES-DEAL-1';
+
+    const grid = computeGrid({
+      leads: [bdrLead],
+      touches: [
+        touchRow({ lead_id: bdrLead.id, channel_id: bdr.id, touch_date: '2026-01-15' }),
+      ],
+      channels: [sales, bdr],
+      projections: [],
+      manualActuals: [],
+      attributions: [
+        attribution({ id: 'sales-hpp', deal_id: salesDeal, channel_id: sales.id, stage_key: 'hpp' }),
+        attribution({ id: 'sales-opp', deal_id: salesDeal, channel_id: sales.id, stage_key: 'opp' }),
+        attribution({ id: 'sales-pursuit', deal_id: salesDeal, channel_id: sales.id, stage_key: 'pursuit' }),
+      ],
+      year: 2026,
+      filter: 'Q1',
+    });
+
+    const salesRow = grid.rows.find((row) => row.channelId === sales.id);
+    expect(salesRow?.cells.lead.actual).toBeNull();
+    expect(salesRow?.cells.mql.actual).toBeNull();
+    expect(salesRow?.cells.hpp.actual).toBe(1);
+    expect(salesRow?.cells.opp.actual).toBe(1);
+    expect(salesRow?.cells.pursuit.actual).toBe(1);
+
+    const bdrRow = grid.rows.find((row) => row.channelId === bdr.id);
+    expect(bdrRow?.cells.lead.actual).toBe(1);
+    expect(bdrRow?.cells.mql.actual).toBe(1);
+    expect(bdrRow?.cells.hpp.actual).toBeNull();
+  });
 
   it('a multi-campaign person counts in both channels in the correct periods', () => {
     const person = lead({ id: 'P1', region: 'NA' });

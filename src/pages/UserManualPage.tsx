@@ -39,6 +39,12 @@ export default function UserManualPage() {
           cohort follows original entrants forward, while the snapshot shows
           activity in the selected period.
         </p>
+        <p>
+          <Strong>Sales (New Logo) is deal-only.</Strong> Its Lead and MQL
+          cells are intentionally empty. Sales new-logo deals are tracked from
+          HPP forward, while BDR Outbound keeps its own Lead and MQL cohorts so
+          Sales-generated and BDR-generated deals remain separate.
+        </p>
       </Section>
 
       <Section title="Where to find what">

@@ -30,6 +30,12 @@ separate populations.
 - Opportunity side: one logical deal that reaches HPP, OPP, and Pursuit shows
   HPP 1, OPP 1, Pursuit 1. Total unique opportunities is 1, never 3.
   Uniqueness comes from the stable `deal_id`.
+- Sales (New Logo) is intentionally deal-only. Its Lead and MQL cells remain
+  empty because Marketing Operations does not source or manage those stages
+  for Sales. New-logo Sales deals enter the report at HPP, Opp, or Pursuit.
+  BDR Outbound remains a separate channel and carries its own Lead/MQL cohorts,
+  so Sales-generated and BDR-generated deals never need to be inferred from a
+  lifecycle label.
 
 Never sum lifecycle-stage counts to produce a total-person or
 total-opportunity count. The modules expose `uniqueLeads` and `uniqueDeals`
