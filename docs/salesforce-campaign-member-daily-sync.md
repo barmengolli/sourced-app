@@ -136,6 +136,24 @@ Do this only after the dry-run reconciliation is accepted.
 8. After one successful scheduled replacement run, deactivate the old
    `[Sourced] - SFDC Leads Automated Sync` workflow. Do not leave both active.
 
+## First controlled production apply
+
+The first controlled invocation completed on 2026-08-11:
+
+- 2,630 source memberships;
+- 2,614 eligible memberships processed;
+- 16 missing-email memberships excluded;
+- 2,614 child-campaign touches inserted;
+- zero duplicate CampaignMember IDs;
+- zero touches assigned directly to a parent campaign;
+- 2,568 canonical Sourced people after exact identity/email reconciliation;
+- 539 currently-MQL memberships plus 135 historical-only MQL memberships,
+  producing 674 acquisition-cohort MQL memberships.
+
+Forty-two canonical people carry both a Salesforce Lead ID and Contact ID,
+confirming that converted identities are bridged instead of automatically
+creating separate Sourced people.
+
 ## Database behavior
 
 `sourced_apply_sfdc_campaign_members` applies one reconciled batch in one

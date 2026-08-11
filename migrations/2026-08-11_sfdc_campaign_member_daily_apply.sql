@@ -14,7 +14,10 @@
 -- ownership, SECURITY DEFINER, search_path=pg_catalog, no EXECUTE for PUBLIC,
 -- anon, or authenticated, and EXECUTE for service_role only. Applying it
 -- installed the function and permissions; no CampaignMember batch was invoked
--- and no business data was imported.
+-- during the migration itself. A separate controlled first invocation later on
+-- 2026-08-11 processed 2,614 eligible memberships, inserted 2,614 touches,
+-- excluded 16 missing-email rows, and reconciled without duplicate membership
+-- IDs or parent-level touch assignments.
 
 BEGIN;
 

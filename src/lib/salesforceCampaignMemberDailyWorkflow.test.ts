@@ -204,7 +204,8 @@ describe('sourced_apply_sfdc_campaign_members migration', () => {
 
   it('records the verified applied status and creates no business rows when merely applied', () => {
     expect(sql).toContain('Applied manually to production on 2026-08-11');
-    expect(sql).toContain('no business data was imported');
+    expect(sql).toContain('processed 2,614 eligible memberships');
+    expect(sql).toContain('excluded 16 missing-email rows');
     expect(sql).not.toContain('PENDING / NOT YET APPLIED');
     expect(sql).not.toMatch(/INSERT INTO public\.(leads|lead_campaign_touches)\s*SELECT/i);
   });

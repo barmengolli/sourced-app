@@ -1687,7 +1687,9 @@ ALTER TABLE sf_lifecycle_observations
 -- inspection verified postgres ownership, SECURITY DEFINER,
 -- search_path=pg_catalog, no EXECUTE for PUBLIC/anon/authenticated, and
 -- EXECUTE for service_role only. No CampaignMember batch was invoked and no
--- business data was imported.
+-- business data was imported by the migration itself. A separate controlled
+-- first invocation on 2026-08-11 processed 2,614 eligible memberships and
+-- inserted 2,614 child-campaign touches; 16 missing-email rows were excluded.
 --
 -- public.sourced_apply_sfdc_campaign_members(p_rows JSONB) RETURNS JSONB
 --
