@@ -38,10 +38,12 @@ Confirmed fields:
 - `CreatedById` (BDR identity)
 
 The API name for the Salesforce label `Market` is deliberately not guessed.
-The workflow reads Opportunity `FieldDefinition`, requires exactly one field
-whose label is `Market`, validates its API-name shape, and inserts the
-discovered name into the Opportunity SOQL query. Zero or multiple matches fail
-the run.
+The workflow reads Opportunity `FieldDefinition` and validates API-name shape.
+When exactly one field has that label, it is selected automatically. When zero
+or multiple fields match, the resolver stops with a sanitized candidate list
+containing only API name and data type. Set `MARKET_FIELD_API_NAME` in the
+CONFIG node to one exact candidate and rerun; an absent, malformed, or
+non-candidate override is refused.
 
 ## Manual-overwrite contract for the later production sync
 
@@ -94,6 +96,9 @@ execution. Do not share or export that node’s output. Share only
    - `READ ONLY: Describe Opportunity fields`
    - `PRIVATE: Read candidate Opportunities - DO NOT SHARE`
 4. Execute the workflow manually.
+   - If Market discovery stops, share the sanitized candidate list from the
+     error. Do not share Opportunity rows. Set the selected exact API name in
+     `MARKET_FIELD_API_NAME`, then execute again.
 5. The only successful terminal must be
    `GUARD: aggregate-only scope audit`.
 6. Share that aggregate output only.

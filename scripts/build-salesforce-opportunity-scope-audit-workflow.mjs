@@ -14,6 +14,10 @@ export const INCLUDED_RECORD_TYPES = [
   'Leads',
   'Licensing',
 ];
+// Leave blank for discovery. When Salesforce has more than one Opportunity
+// field labelled "Market", set this to the exact API name selected from the
+// sanitized candidate list returned by the resolver.
+export const MARKET_FIELD_API_NAME = '';
 export const BDR_IDENTITIES = [
   {
     key: 'dave_cummins',
@@ -30,6 +34,7 @@ export const CONFIG_CODE = `// Disabled, read-only Opportunity scope audit.
 // display name. This workflow has no write node and no schedule.
 const REPORTING_YEARS = ${JSON.stringify(REPORTING_YEARS)};
 const INCLUDED_RECORD_TYPES = ${JSON.stringify(INCLUDED_RECORD_TYPES)};
+const MARKET_FIELD_API_NAME = ${JSON.stringify(MARKET_FIELD_API_NAME)};
 const BDR_IDENTITIES = ${JSON.stringify(BDR_IDENTITIES, null, 2)};
 
 if (!Array.isArray(REPORTING_YEARS) || REPORTING_YEARS.length !== 2 ||
@@ -50,6 +55,9 @@ for (const identity of BDR_IDENTITIES) {
     throw new Error('CONFIG FAILED: every BDR identity needs a key and at least one exact name.');
   }
 }
+if (MARKET_FIELD_API_NAME && !/^[A-Za-z][A-Za-z0-9_]*$/.test(MARKET_FIELD_API_NAME)) {
+  throw new Error('CONFIG FAILED: MARKET_FIELD_API_NAME has an unsafe shape.');
+}
 
 const quote = (value) => "'" + String(value).replaceAll("'", "\\\\'") + "'";
 const names = [...new Set(BDR_IDENTITIES.flatMap((identity) => identity.acceptedNames))];
@@ -65,6 +73,7 @@ return [{ json: {
   timezone: 'America/Denver',
   reporting_years: REPORTING_YEARS,
   included_record_types: INCLUDED_RECORD_TYPES,
+  market_field_api_name_override: MARKET_FIELD_API_NAME,
   bdr_identities: BDR_IDENTITIES,
   user_query: userQuery
 } }];`;
@@ -96,11 +105,31 @@ export const RESOLVE_FIELDS_CODE = `const cfg = $('VALIDATE: exact BDR users').f
 const rows = $input.all().map((item) => item.json).filter((row) => row && row.QualifiedApiName);
 const clean = (value) => String(value == null ? '' : value).replace(/[\\u200b\\u200c\\u200d\\ufeff]/g, '').trim();
 const byApiName = new Map(rows.map((row) => [clean(row.QualifiedApiName), row]));
-const marketMatches = rows.filter((row) => clean(row.Label).toLowerCase() === 'market');
-if (marketMatches.length !== 1) {
-  throw new Error('FIELD DISCOVERY FAILED: Opportunity label Market resolved to ' + marketMatches.length + ' fields; never guessing an API name.');
+const marketCandidates = rows
+  .filter((row) => clean(row.Label).toLowerCase() === 'market')
+  .map((row) => ({
+    apiName: clean(row.QualifiedApiName),
+    dataType: clean(row.DataType) || 'unknown'
+  }))
+  .sort((a, b) => a.apiName.localeCompare(b.apiName));
+const configuredMarketField = clean(cfg.market_field_api_name_override);
+let marketField;
+if (configuredMarketField) {
+  const selected = marketCandidates.filter((candidate) => candidate.apiName === configuredMarketField);
+  if (selected.length !== 1) {
+    throw new Error('FIELD DISCOVERY FAILED: configured MARKET_FIELD_API_NAME ' + configuredMarketField +
+      ' is not exactly one Opportunity field labelled Market. Candidates: ' +
+      (marketCandidates.map((candidate) => candidate.apiName + ' [' + candidate.dataType + ']').join(', ') || '(none)'));
+  }
+  marketField = configuredMarketField;
+} else if (marketCandidates.length === 1) {
+  marketField = marketCandidates[0].apiName;
+} else {
+  throw new Error('FIELD DISCOVERY REVIEW REQUIRED: Opportunity label Market resolved to ' + marketCandidates.length +
+    ' fields. Candidates: ' +
+    (marketCandidates.map((candidate) => candidate.apiName + ' [' + candidate.dataType + ']').join(', ') || '(none)') +
+    '. Set MARKET_FIELD_API_NAME in CONFIG to the intended exact API name; never guess.');
 }
-const marketField = clean(marketMatches[0].QualifiedApiName);
 if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(marketField)) {
   throw new Error('FIELD DISCOVERY FAILED: Market API name has an unsafe shape.');
 }
@@ -136,6 +165,7 @@ const query = [
 return [{ json: {
   ...cfg,
   market_field_api_name: marketField,
+  market_field_candidates: marketCandidates,
   opportunity_query: query,
   query_start_utc: start,
   query_end_utc_exclusive: end

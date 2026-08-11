@@ -67,10 +67,14 @@ const resolvedConfig = {
   query_end_utc_exclusive: '2027-01-01T00:00:00Z',
 };
 
-function executeFieldResolution(rows = fieldRows()): JsonItem[] {
+function executeFieldResolution(rows = fieldRows(), marketFieldOverride = ''): JsonItem[] {
+  const config = {
+    ...resolvedConfig,
+    market_field_api_name_override: marketFieldOverride,
+  };
   const lookup = (name: string) => {
     if (name !== 'VALIDATE: exact BDR users') throw new Error(`unexpected node ${name}`);
-    return { first: () => ({ json: resolvedConfig }) };
+    return { first: () => ({ json: config }) };
   };
   const fn = new Function('$input', '$', RESOLVE_FIELDS_CODE) as (
     input: { all: () => JsonItem[] },
@@ -161,13 +165,31 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
     expect(query).toContain("RecordType.DeveloperName IN ('High_Potential_Prospect','Leads','Licensing')");
   });
 
-  it('fails when Market is missing or resolves to more than one field', () => {
+  it('returns an actionable candidate list when Market is missing or ambiguous', () => {
     expect(() => executeFieldResolution(fieldRows().filter((row) => row.Label !== 'Market')))
-      .toThrow('Market resolved to 0 fields');
+      .toThrow('Market resolved to 0 fields. Candidates: (none)');
     expect(() => executeFieldResolution([
       ...fieldRows(),
       { QualifiedApiName: 'Alternate_Market__c', Label: 'Market', DataType: 'Text' },
-    ])).toThrow('Market resolved to 2 fields');
+    ])).toThrow('Candidates: Alternate_Market__c [Text], Market__c [Picklist]');
+  });
+
+  it('uses only an exact configured Market candidate and refuses an unknown override', () => {
+    const ambiguous = [
+      ...fieldRows(),
+      { QualifiedApiName: 'Alternate_Market__c', Label: 'Market', DataType: 'Text' },
+      { QualifiedApiName: 'Third_Market__c', Label: 'Market', DataType: 'Picklist' },
+    ];
+    const [result] = executeFieldResolution(ambiguous, 'Alternate_Market__c');
+    expect(result.json.market_field_api_name).toBe('Alternate_Market__c');
+    expect(result.json.market_field_candidates).toEqual([
+      { apiName: 'Alternate_Market__c', dataType: 'Text' },
+      { apiName: 'Market__c', dataType: 'Picklist' },
+      { apiName: 'Third_Market__c', dataType: 'Picklist' },
+    ]);
+    expect(String(result.json.opportunity_query)).toContain('Alternate_Market__c FROM Opportunity');
+    expect(() => executeFieldResolution(ambiguous, 'Guessed_Market__c'))
+      .toThrow('configured MARKET_FIELD_API_NAME Guessed_Market__c is not exactly one');
   });
 
   it('reconciles New Logo scope, current pipeline, closed history, BDR creators, and field coverage', () => {

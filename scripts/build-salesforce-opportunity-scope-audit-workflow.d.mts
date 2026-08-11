@@ -1,5 +1,6 @@
 export const REPORTING_YEARS: number[];
 export const INCLUDED_RECORD_TYPES: string[];
+export const MARKET_FIELD_API_NAME: string;
 export const BDR_IDENTITIES: Array<{ key: string; acceptedNames: string[] }>;
 export const CONFIG_CODE: string;
 export const VALIDATE_BDR_CODE: string;
