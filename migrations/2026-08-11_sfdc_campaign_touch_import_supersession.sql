@@ -11,7 +11,10 @@
 -- Content Syndication Q3, for example, displayed 150 Leads / 82 MQLs instead
 -- of the authoritative 77 Leads / 43 MQLs.
 --
--- STATUS: PENDING / NOT YET APPLIED TO PRODUCTION.
+-- STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-11.
+-- Direct aggregate-only verification after application returned zero remaining
+-- shadows, 2,614 authoritative n8n touches, one intentionally unmatched legacy
+-- import, and prevention_trigger_exists=true.
 -- RUN ORDER: after 2026-08-11_sfdc_campaign_member_daily_apply.sql.
 --
 -- Safety boundary:

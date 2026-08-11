@@ -1713,7 +1713,9 @@ ALTER TABLE sf_lifecycle_observations
 -- =============================================================
 -- Added by
 -- migrations/2026-08-11_sfdc_campaign_touch_import_supersession.sql.
--- STATUS: PENDING / NOT YET APPLIED TO PRODUCTION.
+-- STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-11.
+-- Verified after application: zero remaining shadows, 2,614 authoritative n8n
+-- touches, one intentionally unmatched legacy import, and trigger present.
 --
 -- An authoritative CampaignMember-keyed n8n touch supersedes an older ID-less
 -- import touch only when both resolve to the same canonical person and exact

@@ -19,11 +19,22 @@ const cleanupEnd = migration.indexOf('-- Aggregate-only postconditions', cleanup
 const cleanup = migration.slice(cleanupStart, cleanupEnd);
 
 describe('legacy campaign-touch import supersession', () => {
-  it('stays pending until the production repair is explicitly applied', () => {
-    expect(migration).toContain('STATUS: PENDING / NOT YET APPLIED TO PRODUCTION');
-    expect(ledger).toContain('2026-08-11_sfdc_campaign_touch_import_supersession.sql` | PENDING');
+  it('records the verified production application without stale pending text', () => {
+    const normalizedDocs = docs.replace(/\s+/g, ' ');
+    expect(migration).toContain('STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-11');
+    expect(migration).not.toContain('PENDING / NOT YET APPLIED');
+    expect(ledger).toContain('2026-08-11_sfdc_campaign_touch_import_supersession.sql` | APPLIED');
     expect(schema).toContain('Salesforce CampaignMember legacy-import supersession');
-    expect(schema).toContain('STATUS: PENDING / NOT YET APPLIED TO PRODUCTION');
+    expect(schema).toContain('STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-11');
+    expect(docs).toContain('applied manually to production on 2026-08-11');
+    for (const evidence of [
+      '0 remaining',
+      '2,614 authoritative n8n touches',
+      '1 intentionally unmatched legacy import',
+      'prevention trigger present = true',
+    ]) {
+      expect(normalizedDocs).toContain(evidence);
+    }
   });
 
   it('deletes only ID-less legacy imports shadowed by authoritative n8n rows', () => {
