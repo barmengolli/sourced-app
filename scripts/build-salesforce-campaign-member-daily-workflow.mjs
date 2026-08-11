@@ -302,8 +302,8 @@ const node = (id, name, type, typeVersion, position, parameters) => ({
 export function buildWorkflow() {
   const nodes = [
     node('manual-trigger', 'Manual Trigger', 'n8n-nodes-base.manualTrigger', 1, [0, 80], {}),
-    node('schedule-trigger', 'Daily 3 AM America/Denver', 'n8n-nodes-base.scheduleTrigger', 1.3, [0, -80], {
-      rule: { interval: [{ triggerAtHour: 3 }] },
+    node('schedule-trigger', 'Daily 11:50 PM America/Denver', 'n8n-nodes-base.scheduleTrigger', 1.3, [0, -80], {
+      rule: { interval: [{ triggerAtHour: 23, triggerAtMinute: 50 }] },
     }),
     node('config', 'CONFIG: scope and closed apply gate', 'n8n-nodes-base.code', 2, [240, 0], {
       mode: 'runOnceForAllItems',
@@ -364,7 +364,7 @@ export function buildWorkflow() {
     pinData: {},
     connections: {
       'Manual Trigger': { main: [[{ node: 'CONFIG: scope and closed apply gate', type: 'main', index: 0 }]] },
-      'Daily 3 AM America/Denver': { main: [[{ node: 'CONFIG: scope and closed apply gate', type: 'main', index: 0 }]] },
+      'Daily 11:50 PM America/Denver': { main: [[{ node: 'CONFIG: scope and closed apply gate', type: 'main', index: 0 }]] },
       'CONFIG: scope and closed apply gate': { main: [[{ node: 'Query approved parent campaigns', type: 'main', index: 0 }]] },
       'Query approved parent campaigns': { main: [[{ node: 'Build complete CampaignMember query', type: 'main', index: 0 }]] },
       'Build complete CampaignMember query': { main: [[{ node: 'Query all approved CampaignMembers', type: 'main', index: 0 }]] },

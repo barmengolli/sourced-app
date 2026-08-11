@@ -19,7 +19,10 @@ function executeNormalize(sourceRows: Record<string, unknown>[]): JsonItem[] {
     required_confirmation: CONFIRMATION_PHRASE,
     timezone: 'America/Denver',
     supabase_project_url: 'https://PASTE_SUPABASE_PROJECT_REF_HERE.supabase.co',
-    parent_by_id: { '701000000000002AAA': '2026 - Content Syndication' },
+    parent_by_id: {
+      '701000000000002AAA': '2026 - Content Syndication',
+      '701000000000004AAA': '2026 - Website',
+    },
   };
   const dollar = (name: string) => {
     if (name !== 'Build complete CampaignMember query') throw new Error(`unexpected node ${name}`);
@@ -81,18 +84,29 @@ describe('Salesforce CampaignMember daily workflow', () => {
     });
   });
 
-  it('counts repeated memberships separately while keeping distinct people separate', () => {
+  it('keeps one person in multiple child campaigns, including across parent families', () => {
     const [item] = executeNormalize([
       sourceRow(),
       sourceRow({
         Id: '00v000000000002AAA',
         CampaignId: '701000000000003AAA',
-        'Campaign.Name': '2026 - Content Syndication - Life & Annuity',
+        'Campaign.Name': '2026 - Website - Book a Call',
+        'Campaign.ParentId': '701000000000004AAA',
       }),
     ]);
     expect(item.json.lead_memberships).toBe(2);
     expect(item.json.mql_memberships).toBe(2);
     expect(item.json.distinct_people).toBe(1);
+    expect(item.json._private_rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        parent_campaign: '2026 - Content Syndication',
+        sub_campaign: '2026 - Content Syndication - P&C',
+      }),
+      expect.objectContaining({
+        parent_campaign: '2026 - Website',
+        sub_campaign: '2026 - Website - Book a Call',
+      }),
+    ]));
   });
 
   it('surfaces rows without email instead of inventing an identity', () => {
@@ -117,6 +131,11 @@ describe('Salesforce CampaignMember daily workflow', () => {
     expect(workflow.active).toBe(false);
     expect(workflow.pinData).toEqual({});
     expect(workflow.settings.timezone).toBe('America/Denver');
+    const schedule = workflow.nodes.find((node) => node.type === 'n8n-nodes-base.scheduleTrigger');
+    expect(schedule?.name).toBe('Daily 11:50 PM America/Denver');
+    expect(schedule?.parameters).toMatchObject({
+      rule: { interval: [{ triggerAtHour: 23, triggerAtMinute: 50 }] },
+    });
     expect(workflow.nodes.every((node) => !('credentials' in node))).toBe(true);
     const serialized = JSON.stringify(workflow);
     expect(serialized).not.toMatch(/service[_-]?role|eyJ[A-Za-z0-9_-]+\./i);
@@ -192,6 +211,9 @@ describe('sourced_apply_sfdc_campaign_members migration', () => {
     expect(sql).toContain('INSERT INTO public.leads');
     expect(sql).toContain('INSERT INTO public.lead_campaign_touches');
     expect(sql).toContain('ON CONFLICT (campaign_member_id)');
+    expect(sql).toContain('channel_id, touch_date');
+    expect(sql).toContain('v_campaign_id, v_channel_id, v_touch_date');
+    expect(sql).toContain('AND c.parent_channel_id = v_parent_channel_id');
     expect(sql).toContain("source = 'backfill'");
   });
 

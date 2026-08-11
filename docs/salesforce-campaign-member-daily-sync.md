@@ -8,7 +8,7 @@ This is the simple production path for Lead and MQL cohort reporting:
    campaigns.
 2. Reconcile the complete source response before any write.
 3. Upsert the person and the campaign membership together in Sourced.
-4. Run daily at 3:00 AM in `America/Denver`.
+4. Run daily at 11:50 PM in `America/Denver`.
 
 It does not use Salesforce lifecycle history and it does not calculate
 velocity. The reporting rule is acquisition cohort math:
@@ -20,6 +20,10 @@ velocity. The reporting rule is acquisition cohort math:
 - a person first seen as MQL on the nightly run still produces Lead = 1 and
   MQL = 1;
 - one person in several campaigns counts once in each campaign, by design.
+
+The membership is always attributed to the Salesforce child campaign. The
+parent campaign is stored only as hierarchy and scope metadata; it is not the
+membership's reporting channel.
 
 Sales (New Logo) is not in the approved parent campaign list. It remains
 deal-only from HPP forward.
