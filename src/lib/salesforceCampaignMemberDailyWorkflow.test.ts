@@ -1,0 +1,212 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+import {
+  APPROVED_PARENT_CAMPAIGNS,
+  CONFIRMATION_PHRASE,
+  MEMBER_QUERY_CODE,
+  NORMALIZE_CODE,
+  buildWorkflow,
+} from '../../scripts/build-salesforce-campaign-member-daily-workflow.mjs';
+
+type JsonItem = { json: Record<string, unknown> };
+
+function executeNormalize(sourceRows: Record<string, unknown>[]): JsonItem[] {
+  const cfg = {
+    mode: 'dry_run',
+    confirmation: '',
+    required_confirmation: CONFIRMATION_PHRASE,
+    timezone: 'America/Denver',
+    supabase_project_url: 'https://PASTE_SUPABASE_PROJECT_REF_HERE.supabase.co',
+    parent_by_id: { '701000000000002AAA': '2026 - Content Syndication' },
+  };
+  const dollar = (name: string) => {
+    if (name !== 'Build complete CampaignMember query') throw new Error(`unexpected node ${name}`);
+    return { first: () => ({ json: cfg }) };
+  };
+  const fn = new Function('$input', '$', NORMALIZE_CODE) as (
+    input: { all: () => JsonItem[] },
+    lookup: typeof dollar,
+  ) => JsonItem[];
+  return fn(
+    { all: () => sourceRows.map((json) => ({ json })) },
+    dollar,
+  );
+}
+
+function sourceRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    Id: '00v000000000001AAA',
+    CreatedDate: '2026-08-11T01:02:03.000Z',
+    SystemModstamp: '2026-08-11T02:03:04.000Z',
+    CampaignId: '701000000000001AAA',
+    'Campaign.Name': '2026 - Content Syndication - P&C',
+    'Campaign.ParentId': '701000000000002AAA',
+    ContactId: '003000000000001AAA',
+    LeadId: null,
+    'Contact.Email': 'FAST.MQL@EXAMPLE.TEST',
+    'Contact.FirstName': 'Synthetic',
+    'Contact.LastName': 'Fixture',
+    'Contact.Title': 'Tester',
+    'Contact.Account.Name': 'Example Test',
+    'Contact.LeadSource': 'Content Syndication',
+    'Contact.MailingCountry': 'United States',
+    'Contact.Hubspot_lead_lifecycle__c': 'Marketing Qualified Lead',
+    ...overrides,
+  };
+}
+
+describe('Salesforce CampaignMember daily workflow', () => {
+  it('keeps the approved scope explicit and excludes deal-only Sales', () => {
+    expect(APPROVED_PARENT_CAMPAIGNS).toEqual([
+      '2026 - Content Syndication',
+      '2026 - Email',
+      '2026 - Events',
+      '2026 - Marketing SDR',
+      '2026 - Website',
+    ]);
+    expect(APPROVED_PARENT_CAMPAIGNS.some((name) => /sales generated|new logo/i.test(name))).toBe(false);
+  });
+
+  it('counts a person first observed as MQL as both one Lead and one MQL membership', () => {
+    const [item] = executeNormalize([sourceRow()]);
+    expect(item.json.lead_memberships).toBe(1);
+    expect(item.json.mql_memberships).toBe(1);
+    expect(item.json.eligible_memberships).toBe(1);
+    expect((item.json._private_rows as Record<string, unknown>[])[0]).toMatchObject({
+      current_stage: 'mql',
+      campaign_member_id: '00v000000000001AAA',
+      touch_date: '2026-08-11',
+    });
+  });
+
+  it('counts repeated memberships separately while keeping distinct people separate', () => {
+    const [item] = executeNormalize([
+      sourceRow(),
+      sourceRow({
+        Id: '00v000000000002AAA',
+        CampaignId: '701000000000003AAA',
+        'Campaign.Name': '2026 - Content Syndication - Life & Annuity',
+      }),
+    ]);
+    expect(item.json.lead_memberships).toBe(2);
+    expect(item.json.mql_memberships).toBe(2);
+    expect(item.json.distinct_people).toBe(1);
+  });
+
+  it('surfaces rows without email instead of inventing an identity', () => {
+    const [item] = executeNormalize([sourceRow(), sourceRow({
+      Id: '00v000000000002AAA',
+      'Contact.Email': '',
+    })]);
+    expect(item.json.source_memberships).toBe(2);
+    expect(item.json.eligible_memberships).toBe(1);
+    expect(item.json.skipped_memberships).toBe(1);
+    expect(item.json.skipped_by_reason).toMatchObject({ missing_email: 1 });
+  });
+
+  it('fails closed on duplicate CampaignMember identities', () => {
+    expect(() => executeNormalize([sourceRow(), sourceRow()])).toThrow(
+      'duplicate CampaignMember Id',
+    );
+  });
+
+  it('is disabled, credential-free, unpinned, and scheduled in Denver', () => {
+    const workflow = buildWorkflow();
+    expect(workflow.active).toBe(false);
+    expect(workflow.pinData).toEqual({});
+    expect(workflow.settings.timezone).toBe('America/Denver');
+    expect(workflow.nodes.every((node) => !('credentials' in node))).toBe(true);
+    const serialized = JSON.stringify(workflow);
+    expect(serialized).not.toMatch(/service[_-]?role|eyJ[A-Za-z0-9_-]+\./i);
+  });
+
+  it('does a full approved-scope read with the confirmed lifecycle field', () => {
+    const workflow = buildWorkflow();
+    const queryBuilder = workflow.nodes.find((node) => node.name === 'Build complete CampaignMember query');
+    const code = String(queryBuilder?.parameters.jsCode ?? '');
+    expect(code).toContain('Contact.Hubspot_lead_lifecycle__c');
+    expect(code).toContain('Lead.Hubspot_lead_lifecycle__c');
+    expect(code).not.toContain('Hubspot_Lifecycle_Stage__c');
+    expect(code).not.toContain('LIMIT 5000');
+    expect(code).not.toContain('minus({days: 2})');
+    expect(code).toContain('Campaign.ParentId IN');
+  });
+
+  it('builds executable SOQL from every approved parent without a hard limit', () => {
+    const cfg = {
+      approved_parent_campaigns: APPROVED_PARENT_CAMPAIGNS,
+    };
+    const parentRows = APPROVED_PARENT_CAMPAIGNS.map((Name, index) => ({
+      json: { Id: `7010000000000${String(index + 1).padStart(2, '0')}AAA`, Name },
+    }));
+    const lookup = () => ({ first: () => ({ json: cfg }) });
+    const fn = new Function('$input', '$', MEMBER_QUERY_CODE) as (
+      input: { all: () => JsonItem[] },
+      dollar: typeof lookup,
+    ) => JsonItem[];
+    const [result] = fn({ all: () => parentRows }, lookup);
+    const query = String(result.json.member_query);
+    expect(query).toContain('FROM CampaignMember WHERE Campaign.ParentId IN');
+    expect(query).toContain('Contact.Hubspot_lead_lifecycle__c');
+    expect(query).not.toContain('LIMIT');
+    expect(Object.keys(result.json.parent_by_id as object)).toHaveLength(5);
+  });
+
+  it('keeps the write node behind an exact two-part apply gate', () => {
+    const workflow = buildWorkflow();
+    const config = workflow.nodes.find((node) => node.name === 'CONFIG: scope and closed apply gate');
+    const code = String(config?.parameters.jsCode ?? '');
+    expect(code).toContain("const MODE = 'dry_run'");
+    expect(code).toContain("const CONFIRM = ''");
+    expect(code).toContain(CONFIRMATION_PHRASE);
+    expect(workflow.connections['IF: exact apply authorization'].main[0][0].node).toBe(
+      'APPLY: campaign members to Sourced',
+    );
+    expect(workflow.connections['IF: exact apply authorization'].main[1][0].node).toBe(
+      'DRY RUN: aggregate reconciliation',
+    );
+  });
+
+  it('has a generated artifact identical to the builder output', () => {
+    const generated = JSON.parse(
+      readFileSync(resolve('src/generated/salesforceCampaignMemberDaily.workflow.json'), 'utf8'),
+    );
+    expect(generated).toEqual(buildWorkflow());
+  });
+});
+
+describe('sourced_apply_sfdc_campaign_members migration', () => {
+  const sql = readFileSync(
+    resolve('migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql'),
+    'utf8',
+  );
+
+  it('is pending and creates no business rows when merely applied', () => {
+    expect(sql).toContain('PENDING / NOT YET APPLIED');
+    expect(sql).not.toMatch(/INSERT INTO public\.(leads|lead_campaign_touches)\s*SELECT/i);
+  });
+
+  it('atomically writes both people and membership touches', () => {
+    expect(sql).toContain('INSERT INTO public.leads');
+    expect(sql).toContain('INSERT INTO public.lead_campaign_touches');
+    expect(sql).toContain('ON CONFLICT (campaign_member_id)');
+    expect(sql).toContain("source = 'backfill'");
+  });
+
+  it('preserves MQL evidence for a fast conversion', () => {
+    expect(sql).toContain("WHEN v_current_stage = 'mql'");
+    expect(sql).toContain("'stage', 'mql'");
+    expect(sql).toContain("h->>'stage' = 'mql'");
+  });
+
+  it('uses a restricted server identity', () => {
+    expect(sql).toContain('SECURITY DEFINER');
+    expect(sql).toContain('SET search_path = pg_catalog');
+    expect(sql).toContain('REVOKE ALL ON FUNCTION public.sourced_apply_sfdc_campaign_members(JSONB) FROM PUBLIC');
+    expect(sql).toContain('FROM anon');
+    expect(sql).toContain('FROM authenticated');
+    expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.sourced_apply_sfdc_campaign_members(JSONB) TO service_role');
+  });
+});

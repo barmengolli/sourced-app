@@ -758,8 +758,8 @@ Do not turn a focused task into one of these projects without approval:
   `lead`), queries no field history, writes through an unversioned RPC
   that continues on error, and logs person-level data to a Sheet with
   no failure alerting. It cannot maintain `lead_campaign_touches`, so
-  until the rebuild ships, new memberships reach reporting only
-  through the manual report import. The read-only discovery plan and
+  until the replacement is activated, new memberships reach reporting
+  only through the manual report import. The read-only discovery plan and
   its DISABLED manual workflow template are in
   `docs/lead-sync-discovery.md`; the pure summary module is
   `src/lib/leadSyncDiscovery.ts`. No rebuild, schedule, or write path
@@ -770,7 +770,16 @@ Do not turn a focused task into one of these projects without approval:
   repeated movement, and enabling tracking later backfills nothing. Bite
   4G2 must therefore build an append-only observation ledger going
   forward; current lifecycle values are snapshot evidence only and must
-  never be reported as transitions.
+  never be reported as transitions. The simpler acquisition-cohort
+  replacement is now generated at
+  `src/generated/salesforceCampaignMemberDaily.workflow.json` and documented
+  in `docs/salesforce-campaign-member-daily-sync.md`. It performs a complete
+  daily approved-campaign read, counts every membership as Lead, preserves
+  MQL evidence for the same membership, and writes leads plus
+  `lead_campaign_touches` through the PENDING restricted function in
+  `2026-08-11_sfdc_campaign_member_daily_apply.sql`. It remains disabled and
+  dry-run-only until its aggregate reconciliation is accepted and that
+  migration is applied.
 - Real authentication and restrictive role-based RLS are not implemented.
 - `Channel.year` is used by the application and listed as applied in the
   migration ledger, but `SCHEMA.sql` lacks the column and the named

@@ -1678,3 +1678,26 @@ ALTER TABLE sf_lifecycle_observations
 -- for the full body, the LC001..LC005 SQLSTATE vocabulary, and the
 -- sanitized failure contract (SQLSTATE plus an allowlisted category,
 -- never SQLERRM).
+
+-- =============================================================
+-- Salesforce CampaignMember daily apply boundary
+-- =============================================================
+-- Added by migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql.
+-- STATUS: PENDING and NOT YET APPLIED to production.
+--
+-- public.sourced_apply_sfdc_campaign_members(p_rows JSONB) RETURNS JSONB
+--
+-- Applies one fully reconciled CampaignMember batch atomically against
+-- channels, leads, and lead_campaign_touches. CampaignMember ID is the
+-- membership idempotency key. Exact Salesforce identity takes precedence
+-- over normalized email, 15/18-character IDs match by the exact
+-- case-sensitive 15-character prefix, and conflicting people fail closed.
+-- Existing Marketing edit locks are preserved. The earliest campaign touch
+-- remains the primary source unless locked. A person first observed as MQL
+-- receives MQL history evidence while retaining the Lead cohort membership,
+-- so fast conversion counts as Lead and MQL rather than MQL only.
+--
+-- SECURITY DEFINER with search_path=pg_catalog. PUBLIC, anon, and
+-- authenticated cannot execute it; service_role is the only grantee. The
+-- function creates no rows until invoked by the separately disabled n8n
+-- workflow. See the migration for the executable body.

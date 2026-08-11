@@ -4,13 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build:salesforce-daily-workflow": "node scripts/build-salesforce-campaign-member-daily-workflow.mjs",
+    "check:salesforce-daily-workflow": "node scripts/build-salesforce-campaign-member-daily-workflow.mjs --check",
     "dev": "vite",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false --noEmit",
     "build:app": "vite build",
     "build": "npm run typecheck && npm run build:app",
-    "verify": "npm run test && npm run build",
+    "verify": "npm run check:salesforce-daily-workflow && npm run test && npm run build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
