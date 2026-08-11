@@ -88,7 +88,7 @@ source total = eligible + skipped must always reconcile.
   `src/generated/salesforceCampaignMemberDaily.workflow.json`
 - Generator:
   `scripts/build-salesforce-campaign-member-daily-workflow.mjs`
-- Pending database function:
+- Applied database function:
   `migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql`
 
 The generated workflow is disabled, has no credentials, has no pinned data,
@@ -118,8 +118,10 @@ private in-memory field used solely by the closed apply branch.
 
 Do this only after the dry-run reconciliation is accepted.
 
-1. Apply the pending migration in the Supabase SQL Editor.
-2. Verify the function is `SECURITY DEFINER`, has
+1. The migration was applied manually to production on 2026-08-11; do not
+   rerun it as part of workflow activation.
+2. The production catalog verification confirmed the function is
+   `SECURITY DEFINER`, has
    `search_path=pg_catalog`, is not executable by PUBLIC, anon, or
    authenticated, and is executable by service_role.
 3. Add the existing Supabase Header Auth credential to

@@ -202,8 +202,10 @@ describe('sourced_apply_sfdc_campaign_members migration', () => {
     'utf8',
   );
 
-  it('is pending and creates no business rows when merely applied', () => {
-    expect(sql).toContain('PENDING / NOT YET APPLIED');
+  it('records the verified applied status and creates no business rows when merely applied', () => {
+    expect(sql).toContain('Applied manually to production on 2026-08-11');
+    expect(sql).toContain('no business data was imported');
+    expect(sql).not.toContain('PENDING / NOT YET APPLIED');
     expect(sql).not.toMatch(/INSERT INTO public\.(leads|lead_campaign_touches)\s*SELECT/i);
   });
 

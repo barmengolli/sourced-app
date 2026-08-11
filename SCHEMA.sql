@@ -1683,7 +1683,11 @@ ALTER TABLE sf_lifecycle_observations
 -- Salesforce CampaignMember daily apply boundary
 -- =============================================================
 -- Added by migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql.
--- STATUS: PENDING and NOT YET APPLIED to production.
+-- STATUS: Applied manually to production on 2026-08-11. Direct catalog
+-- inspection verified postgres ownership, SECURITY DEFINER,
+-- search_path=pg_catalog, no EXECUTE for PUBLIC/anon/authenticated, and
+-- EXECUTE for service_role only. No CampaignMember batch was invoked and no
+-- business data was imported.
 --
 -- public.sourced_apply_sfdc_campaign_members(p_rows JSONB) RETURNS JSONB
 --

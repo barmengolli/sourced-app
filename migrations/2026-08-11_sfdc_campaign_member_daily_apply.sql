@@ -9,8 +9,12 @@
 -- so the SAME membership counts in both Lead and MQL. A person first seen as
 -- MQL therefore never disappears from Lead counts.
 --
--- PENDING / NOT YET APPLIED. This migration creates no business rows by
--- itself. Applying it only installs the function and permissions.
+-- STATUS: Applied manually to production on 2026-08-11. Supabase returned
+-- Success. No rows returned. Direct catalog inspection verified postgres
+-- ownership, SECURITY DEFINER, search_path=pg_catalog, no EXECUTE for PUBLIC,
+-- anon, or authenticated, and EXECUTE for service_role only. Applying it
+-- installed the function and permissions; no CampaignMember batch was invoked
+-- and no business data was imported.
 
 BEGIN;
 
