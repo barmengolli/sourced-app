@@ -169,6 +169,26 @@ transaction. An error rolls back the batch. An exact rerun is idempotent:
   locked;
 - MQL evidence is appended once and never erased by a later Lead snapshot;
 - a real membership supersedes a backfill seed in the same channel family.
+- an authoritative n8n membership supersedes a legacy ID-less `import` touch
+  for the same canonical person and exact child channel. This prevention is
+  installed by the pending
+  `2026-08-11_sfdc_campaign_touch_import_supersession.sql` migration.
+
+## Legacy-import overlap found after first apply
+
+The first controlled apply correctly inserted 2,614 CampaignMember-keyed
+`n8n_sync` touches, but 2,608 older ID-less `import` rows represented the same
+person and child channel and remained beside them. The grid correctly counted
+both stored rows, inflating all five affected campaign families. Content
+Syndication Q3 therefore rendered 150 Leads / 82 MQLs instead of the
+authoritative n8n population of 77 Leads / 43 MQLs.
+
+The pending supersession migration removes only those proven legacy shadows
+and installs a trigger enforcing the same rule for future writes through the
+postgres-owned `SECURITY DEFINER` execution path used by the apply function.
+Direct browser/anon/authenticated writes cannot activate deletion. One unmatched
+legacy import remains untouched by design. No lead, channel, manual touch,
+backfill touch, or authoritative n8n touch is deleted.
 
 The sync does not delete historical campaign memberships or people when a
 later source snapshot omits them. Historical cohort reporting must remain

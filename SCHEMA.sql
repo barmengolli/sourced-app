@@ -1707,3 +1707,50 @@ ALTER TABLE sf_lifecycle_observations
 -- authenticated cannot execute it; service_role is the only grantee. The
 -- function creates no rows until invoked by the separately disabled n8n
 -- workflow. See the migration for the executable body.
+
+-- =============================================================
+-- Salesforce CampaignMember legacy-import supersession
+-- =============================================================
+-- Added by
+-- migrations/2026-08-11_sfdc_campaign_touch_import_supersession.sql.
+-- STATUS: PENDING / NOT YET APPLIED TO PRODUCTION.
+--
+-- An authoritative CampaignMember-keyed n8n touch supersedes an older ID-less
+-- import touch only when both resolve to the same canonical person and exact
+-- child channel. The production repair migration also removes existing proven
+-- shadows; SCHEMA records only the permanent trigger structure.
+
+CREATE OR REPLACE FUNCTION public.sourced_supersede_legacy_import_touch()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF current_user <> 'postgres' THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.source = 'n8n_sync'
+     AND NEW.campaign_member_id IS NOT NULL
+     AND NEW.channel_id IS NOT NULL THEN
+    DELETE FROM public.lead_campaign_touches AS legacy
+    WHERE legacy.id <> NEW.id
+      AND legacy.source = 'import'
+      AND legacy.campaign_member_id IS NULL
+      AND legacy.lead_id = NEW.lead_id
+      AND legacy.channel_id = NEW.channel_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sourced_supersede_legacy_import_touch() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.sourced_supersede_legacy_import_touch() FROM anon;
+REVOKE ALL ON FUNCTION public.sourced_supersede_legacy_import_touch() FROM authenticated;
+
+DROP TRIGGER IF EXISTS trg_sourced_supersede_legacy_import_touch
+  ON public.lead_campaign_touches;
+CREATE TRIGGER trg_sourced_supersede_legacy_import_touch
+AFTER INSERT OR UPDATE OF lead_id, channel_id, source, campaign_member_id
+ON public.lead_campaign_touches
+FOR EACH ROW
+EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
