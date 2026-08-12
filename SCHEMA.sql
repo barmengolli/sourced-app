@@ -810,6 +810,11 @@ CREATE TABLE IF NOT EXISTS sf_opportunity_reviews (
   market_override TEXT,
   commercial_region_override TEXT,
   gtm_cube_override TEXT,
+  -- Reviewer-confirmed active-path dates. HPP is prefilled from the
+  -- Salesforce Opportunity CreatedDate; downstream dates are never invented.
+  hpp_entered_at_override DATE,
+  opp_entered_at_override DATE,
+  pursuit_entered_at_override DATE,
   reviewer_note TEXT,
   reviewed_at TIMESTAMPTZ,
   -- Free-text placeholder compatible with future SSO identities.
@@ -889,6 +894,25 @@ CREATE INDEX IF NOT EXISTS idx_sf_review_events_opp_time
   ON sf_opportunity_review_events (sf_opportunity_uuid, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_sf_review_events_type
   ON sf_opportunity_review_events (event_type);
+
+-- Persistent, append-only retry ledger for authenticated queue mutations.
+CREATE TABLE IF NOT EXISTS sf_opportunity_review_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id TEXT NOT NULL CHECK (length(btrim(actor_id)) > 0),
+  action TEXT NOT NULL CHECK (action IN ('approve', 'ignore', 'block', 'reopen', 'reconsider')),
+  review_id UUID NOT NULL REFERENCES sf_opportunity_reviews(id) ON DELETE RESTRICT,
+  idempotency_key TEXT NOT NULL CHECK (length(btrim(idempotency_key)) > 0),
+  request_hash TEXT NOT NULL,
+  response_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (actor_id, action, review_id, idempotency_key)
+);
+ALTER TABLE sf_opportunity_review_requests ENABLE ROW LEVEL SECURITY;
+DROP TRIGGER IF EXISTS append_only_sf_opportunity_review_requests
+  ON sf_opportunity_review_requests;
+CREATE TRIGGER append_only_sf_opportunity_review_requests
+  BEFORE UPDATE OR DELETE ON sf_opportunity_review_requests
+  FOR EACH ROW EXECUTE FUNCTION sf_opportunity_append_only();
 
 DROP TRIGGER IF EXISTS append_only_sf_opportunity_review_events ON sf_opportunity_review_events;
 CREATE TRIGGER append_only_sf_opportunity_review_events
@@ -1815,3 +1839,15 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- PUBLIC/anon/authenticated, and executable only by service_role. See the
 -- migration for the full function bodies. The reviewer-owned override
 -- columns above are never written by ingestion.
+
+-- =============================================================
+-- Authenticated Opportunity review queue runtime
+-- migrations/2026-08-12_opportunity_review_queue_runtime.sql
+-- STATUS: Applied manually to production on 2026-08-12. Supabase reported
+-- success; the migration itself performed no review decision or attribution.
+-- =============================================================
+-- Defines service-role-only list, decision, and reporting-reconciliation
+-- RPCs. A review decision, its append-only audit events, the exact Salesforce
+-- deal link, and generated reporting rows commit atomically. Only generated
+-- source_system='salesforce' attribution rows are reconciled; manual rows are
+-- never changed. See the migration for the executable function bodies.

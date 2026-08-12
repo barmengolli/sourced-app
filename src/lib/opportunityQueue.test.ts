@@ -577,9 +577,11 @@ describe('browser safety (static)', () => {
     }
   });
 
-  it('the queue has no production route while the authenticated API is pending', () => {
+  it('embeds the queue in Data Entry without creating a separate navigation route', () => {
     expect(read('src/App.tsx')).not.toContain('OpportunityQueueManager');
     expect(read('src/constants/sidebar.ts')).not.toMatch(/queue/i);
+    expect(read('src/pages/FunnelDataEntryPage.tsx')).toContain('OpportunityQueuePanel');
+    expect(read('src/pages/FunnelDataEntryPage.tsx')).toContain('Review Salesforce opportunities');
   });
 
   it('synthetic fixtures contain no real Salesforce or customer identifiers', () => {

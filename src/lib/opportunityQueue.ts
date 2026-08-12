@@ -88,6 +88,18 @@ export interface OpportunityQueueItem {
   review: ReviewProjection | null;
   linkStatus: QueueLinkStatus;
   diagnostics: QueueDiagnostics;
+  editable: {
+    sourceMarket: string | null;
+    sourceCommercialRegion: string | null;
+    sourceGtmCube: string | null;
+    marketOverride: string | null;
+    commercialRegionOverride: string | null;
+    gtmCubeOverride: string | null;
+    bdrName: string | null;
+    hppEnteredAt: string | null;
+    oppEnteredAt: string | null;
+    pursuitEnteredAt: string | null;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +264,13 @@ export interface ApprovalDecision {
   channelId: string;
   // Optional lead association; approval never requires a lead.
   leadId?: string | null;
+  bdrName?: string | null;
+  marketOverride?: string | null;
+  commercialRegionOverride?: string | null;
+  gtmCubeOverride?: string | null;
+  hppEnteredAt?: string | null;
+  oppEnteredAt?: string | null;
+  pursuitEnteredAt?: string | null;
 }
 
 function requireReview(item: OpportunityQueueItem): ReviewMutationResult | ReviewProjection {

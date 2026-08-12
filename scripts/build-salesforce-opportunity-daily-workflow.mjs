@@ -107,9 +107,16 @@ if (cfg.mode !== 'apply' || cfg.confirm !== cfg.required_confirmation
 if (!planned._private_apply_payload) throw new Error('APPLY GATE CLOSED: payload missing.');
 return [{ json: planned._private_apply_payload }];`;
 
-const verifyCode = `const result = $input.first().json;
+const verifyStagingCode = `const result = $input.first().json;
 if (result.ok !== true || result.contract_version !== 3) {
   throw new Error('APPLY FAILED: database did not confirm the v3 contract.');
+}
+return [{ json: result }];`;
+
+const verifyCode = `const refresh = $input.first().json;
+const result = $('VERIFY: staging apply').first().json;
+if (refresh.status !== 'refreshed') {
+  throw new Error('REPORTING REFRESH FAILED: database did not confirm reconciliation.');
 }
 return [{ json: {
   status: 'APPLY_COMPLETE',
@@ -119,7 +126,9 @@ return [{ json: {
   snapshots_stale_skipped: result.snapshots_stale_skipped,
   reviews_created: result.reviews_created,
   reviews_reconciled: result.reviews_reconciled,
-  contract_version: result.contract_version
+  contract_version: result.contract_version,
+  approved_opportunities_refreshed: refresh.approved_opportunities,
+  generated_reporting_rows: refresh.generated_rows
 } }];`;
 
 const node = (id, name, type, typeVersion, position, parameters, extra = {}) => ({
@@ -176,7 +185,18 @@ const nodes = [
     headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
     sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify($json) }}', options: {},
   }),
-  node('verify', 'VERIFY: apply result', 'n8n-nodes-base.code', 2, [2580, -120], {
+  node('verify-staging', 'VERIFY: staging apply', 'n8n-nodes-base.code', 2, [2580, -120], {
+    mode: 'runOnceForAllItems', jsCode: verifyStagingCode,
+  }),
+  node('refresh-reporting', 'REFRESH: approved Opportunity reporting', 'n8n-nodes-base.httpRequest', 4.4, [2840, -120], {
+    method: 'POST',
+    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_refresh_all_approved_opportunity_reporting' }}",
+    authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
+    sendHeaders: true,
+    headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
+    sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify({}) }}', options: {},
+  }),
+  node('verify', 'VERIFY: apply result', 'n8n-nodes-base.code', 2, [3100, -120], {
     mode: 'runOnceForAllItems', jsCode: verifyCode,
   }),
 ];
@@ -198,7 +218,9 @@ const workflow = {
       [{ node: 'DRY RUN: aggregate summary', type: 'main', index: 0 }],
     ] },
     'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v3', type: 'main', index: 0 }]] },
-    'APPLY: opportunity staging v3': { main: [[{ node: 'VERIFY: apply result', type: 'main', index: 0 }]] },
+    'APPLY: opportunity staging v3': { main: [[{ node: 'VERIFY: staging apply', type: 'main', index: 0 }]] },
+    'VERIFY: staging apply': { main: [[{ node: 'REFRESH: approved Opportunity reporting', type: 'main', index: 0 }]] },
+    'REFRESH: approved Opportunity reporting': { main: [[{ node: 'VERIFY: apply result', type: 'main', index: 0 }]] },
   },
   pinData: {},
   active: false,

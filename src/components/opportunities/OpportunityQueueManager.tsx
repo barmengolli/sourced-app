@@ -1,10 +1,9 @@
-// OpportunityQueueManager: Bite 5C2B1 review-queue UI foundation.
+// OpportunityQueueManager: Opportunity review-queue UI.
 //
 // This component consumes the OpportunityQueueRepository interface ONLY. It
-// never imports the Supabase client and has no production route: the six
-// sf_opportunity_* tables have RLS with zero browser policies, so live
-// wiring requires the future authenticated review API. Until that exists,
-// the component runs against the synthetic in-memory adapter in tests.
+// never imports the Supabase client. Live access is supplied through the
+// authenticated same-origin API adapter; tests can use the synthetic
+// in-memory adapter without weakening the production boundary.
 //
 // Marketing must manually approve an opportunity before it enters Sourced
 // reporting: approval always requires an explicit channel selection, lead
@@ -24,6 +23,7 @@ import type {
   QueueActionResult,
 } from '../../lib/opportunityQueueRepository';
 import type { ReviewState } from '../../lib/opportunityImportStorage';
+import { REGIONS } from '../../constants/regions';
 
 export interface QueueChannelOption {
   id: string;
@@ -37,6 +37,7 @@ export interface OpportunityQueueManagerProps {
   actorId?: string | null;
   // Injected clock so tests stay deterministic.
   getNow?: () => string;
+  live?: boolean;
 }
 
 type LoadStatus = 'loading' | 'error' | 'ready';
@@ -101,6 +102,7 @@ export default function OpportunityQueueManager({
   channels,
   actorId = null,
   getNow = () => new Date().toISOString(),
+  live = false,
 }: OpportunityQueueManagerProps) {
   const [view, setView] = useState<'active' | 'notSelected'>('active');
   const [status, setStatus] = useState<LoadStatus>('loading');
@@ -111,8 +113,16 @@ export default function OpportunityQueueManager({
   const [channelId, setChannelId] = useState('');
   const [leadId, setLeadId] = useState('');
   const [note, setNote] = useState('');
+  const [bdrName, setBdrName] = useState('');
+  const [marketOverride, setMarketOverride] = useState('');
+  const [commercialRegionOverride, setCommercialRegionOverride] = useState('');
+  const [gtmCubeOverride, setGtmCubeOverride] = useState('');
+  const [hppEnteredAt, setHppEnteredAt] = useState('');
+  const [oppEnteredAt, setOppEnteredAt] = useState('');
+  const [pursuitEnteredAt, setPursuitEnteredAt] = useState('');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionErrors, setActionErrors] = useState<string[]>([]);
+  const [actionPending, setActionPending] = useState(false);
 
   const [generation, setGeneration] = useState(0);
 
@@ -172,22 +182,49 @@ export default function OpportunityQueueManager({
 
   const runAction = useCallback(
     async (label: string, action: () => Promise<QueueActionResult>) => {
+      if (actionPending) return;
       setActionMessage(null);
       setActionErrors([]);
-      const result = await action();
-      if (result.ok) {
-        setActionMessage(`${label} recorded locally with its audit event (in-memory preview; no production write).`);
-        setSelectedId(null);
-        setChannelId('');
-        setLeadId('');
-        setNote('');
-        setGeneration((g) => g + 1);
-      } else {
-        setActionErrors(result.reasons);
+      setActionPending(true);
+      try {
+        const result = await action();
+        if (result.ok) {
+          setActionMessage(
+            live
+              ? `${label} saved. The review, audit history, link, and reporting rows reconciled together.`
+              : `${label} recorded locally with its audit event (in-memory preview; no production write).`,
+          );
+          setSelectedId(null);
+          setChannelId('');
+          setLeadId('');
+          setNote('');
+          setGeneration((g) => g + 1);
+        } else {
+          setActionErrors(result.reasons);
+        }
+      } finally {
+        setActionPending(false);
       }
     },
-    [],
+    [actionPending, live],
   );
+
+  const selectItem = (item: OpportunityQueueItem) => {
+    setSelectedId(item.reviewId);
+    setChannelId(item.review?.channelId ?? '');
+    setLeadId(item.review?.leadId ?? '');
+    setBdrName(item.editable.bdrName ?? item.evidence.suggestedBdrName ?? '');
+    setMarketOverride(item.editable.marketOverride ?? item.editable.sourceMarket ?? '');
+    setCommercialRegionOverride(
+      item.editable.commercialRegionOverride ?? item.editable.sourceCommercialRegion ?? '',
+    );
+    setGtmCubeOverride(item.editable.gtmCubeOverride ?? item.editable.sourceGtmCube ?? '');
+    setHppEnteredAt(item.editable.hppEnteredAt ?? item.createdAt?.slice(0, 10) ?? '');
+    setOppEnteredAt(item.editable.oppEnteredAt ?? '');
+    setPursuitEnteredAt(item.editable.pursuitEnteredAt ?? '');
+    setActionErrors([]);
+    setActionMessage(null);
+  };
 
   const set = (patch: Partial<QueueFilters>) => setFilters((f) => ({ ...f, ...patch }));
 
@@ -199,10 +236,12 @@ export default function OpportunityQueueManager({
           Staged Salesforce opportunities awaiting a manual marketing decision. Approval always
           requires a channel selection; evidence never decides.
         </p>
-        <p className="mt-1 text-xs text-warning">
-          Preview foundation: this queue is not connected to production data. Live wiring requires
-          the authenticated review API.
-        </p>
+        {!live && (
+          <p className="mt-1 text-xs text-warning">
+            Preview foundation: this queue is not connected to production data. Live wiring requires
+            the authenticated review API.
+          </p>
+        )}
       </header>
 
       <div className="flex items-center gap-2" role="group" aria-label="Queue view">
@@ -406,11 +445,7 @@ export default function OpportunityQueueManager({
               {visible.map((item) => (
                 <tr
                   key={item.reviewId ?? item.diagnostics.sfOpportunityId}
-                  onClick={() => {
-                    setSelectedId(item.reviewId);
-                    setActionErrors([]);
-                    setActionMessage(null);
-                  }}
+                  onClick={() => selectItem(item)}
                   className="border-b border-border last:border-b-0 cursor-pointer hover:bg-muted/40"
                 >
                   <td className="px-3 py-2 text-charcoal font-medium">{item.opportunityName}</td>
@@ -473,6 +508,9 @@ export default function OpportunityQueueManager({
             <p>Suggested BDR: {selected.evidence.suggestedBdrName ?? 'none'}</p>
             <p>Primary campaign source: {selected.evidence.primaryCampaignSource ?? 'none'}</p>
             <p>Customer expansion (raw): {selected.evidence.customerExpansionRaw ?? 'none'}</p>
+            <p>Salesforce Market: {selected.editable.sourceMarket ?? 'none'}</p>
+            <p>Salesforce Commercial Region: {selected.editable.sourceCommercialRegion ?? 'none'}</p>
+            <p>Salesforce GTM Cube: {selected.editable.sourceGtmCube ?? 'none'}</p>
           </div>
 
           {actionErrors.length > 0 && (
@@ -509,8 +547,9 @@ export default function OpportunityQueueManager({
                   className={selectClass + ' w-72'}
                 />
               </label>
-              <button type="submit" className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90">
-                Reconsider
+              <button type="submit" disabled={actionPending}
+                className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90 disabled:opacity-50">
+                {actionPending ? 'Saving…' : 'Reconsider'}
               </button>
             </form>
           )}
@@ -522,12 +561,13 @@ export default function OpportunityQueueManager({
               </p>
               <button
                 type="button"
+                disabled={actionPending}
                 onClick={() =>
                   void runAction('Reopen', () =>
                     repository.reopenReview(selected.reviewId ?? '', ctx()),
                   )
                 }
-                className={chipBase + chipOff}
+                className={chipBase + chipOff + ' disabled:opacity-50'}
               >
                 Reopen review
               </button>
@@ -553,7 +593,17 @@ export default function OpportunityQueueManager({
                 void runAction('Approval', () =>
                   repository.approveReview(
                     selected.reviewId ?? '',
-                    { channelId, leadId: leadId.trim() || null },
+                    {
+                      channelId,
+                      leadId: leadId.trim() || null,
+                      bdrName: bdrName.trim() || null,
+                      marketOverride: marketOverride.trim() || null,
+                      commercialRegionOverride,
+                      gtmCubeOverride: gtmCubeOverride.trim() || null,
+                      hppEnteredAt,
+                      oppEnteredAt: oppEnteredAt || null,
+                      pursuitEnteredAt: pursuitEnteredAt || null,
+                    },
                     ctx(),
                   ),
                 );
@@ -575,6 +625,68 @@ export default function OpportunityQueueManager({
                   ))}
                 </select>
               </label>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                <label className="space-y-1 text-slate-muted">
+                  <span className="block">Commercial Region (required)</span>
+                  <select
+                    aria-label="Commercial Region (required)"
+                    value={commercialRegionOverride}
+                    onChange={(e) => setCommercialRegionOverride(e.target.value)}
+                    className={selectClass + ' w-full'}
+                  >
+                    <option value="">Select a region…</option>
+                    {REGIONS.map((region) => <option key={region} value={region}>{region}</option>)}
+                  </select>
+                </label>
+                <label className="space-y-1 text-slate-muted">
+                  <span className="block">BDR</span>
+                  <select
+                    aria-label="BDR"
+                    value={bdrName}
+                    onChange={(e) => setBdrName(e.target.value)}
+                    className={selectClass + ' w-full'}
+                  >
+                    <option value="">No BDR</option>
+                    <option value="Dave Cummins">Dave Cummins</option>
+                    <option value="Garrett McNally">Garrett McNally</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-slate-muted">
+                  <span className="block">Market override</span>
+                  <input aria-label="Market override" value={marketOverride}
+                    onChange={(e) => setMarketOverride(e.target.value)} className={selectClass + ' w-full'} />
+                </label>
+                <label className="space-y-1 text-slate-muted">
+                  <span className="block">GTM Cube override</span>
+                  <input aria-label="GTM Cube override" value={gtmCubeOverride}
+                    onChange={(e) => setGtmCubeOverride(e.target.value)} className={selectClass + ' w-full'} />
+                </label>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <label className="space-y-1 text-slate-muted">
+                  <span className="block">HPP date (required)</span>
+                  <input type="date" aria-label="HPP date (required)" value={hppEnteredAt}
+                    onChange={(e) => setHppEnteredAt(e.target.value)} className={selectClass + ' w-full'} />
+                </label>
+                {selected.recordTypeState !== 'hpp' && (
+                  <label className="space-y-1 text-slate-muted">
+                    <span className="block">Opportunity date (required)</span>
+                    <input type="date" aria-label="Opportunity date" value={oppEnteredAt}
+                      onChange={(e) => setOppEnteredAt(e.target.value)} className={selectClass + ' w-full'} />
+                  </label>
+                )}
+                {selected.recordTypeState === 'pursuit' && (
+                  <label className="space-y-1 text-slate-muted">
+                    <span className="block">Pursuit date (required)</span>
+                  <input type="date" aria-label="Pursuit date (required)" value={pursuitEnteredAt}
+                    onChange={(e) => setPursuitEnteredAt(e.target.value)} className={selectClass + ' w-full'} />
+                  </label>
+                )}
+              </div>
+              <p className="text-slate-muted">
+                HPP defaults to the Salesforce creation date. Downstream dates stay blank until
+                Salesforce history or your review can prove them.
+              </p>
               <label className="flex items-center gap-2 text-slate-muted">
                 Lead (optional)
                 <input
@@ -585,8 +697,9 @@ export default function OpportunityQueueManager({
                   className={selectClass}
                 />
               </label>
-              <button type="submit" className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90">
-                Approve
+              <button type="submit" disabled={actionPending}
+                className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90 disabled:opacity-50">
+                {actionPending ? 'Saving…' : 'Approve'}
               </button>
             </form>
           )}
@@ -606,23 +719,25 @@ export default function OpportunityQueueManager({
               <div className="flex gap-2">
                 <button
                   type="button"
+                  disabled={actionPending}
                   onClick={() =>
                     void runAction('Ignore', () =>
                       repository.ignoreReview(selected.reviewId ?? '', ctx(note)),
                     )
                   }
-                  className={chipBase + chipOff}
+                  className={chipBase + chipOff + ' disabled:opacity-50'}
                 >
                   Ignore
                 </button>
                 <button
                   type="button"
+                  disabled={actionPending}
                   onClick={() =>
                     void runAction('Block', () =>
                       repository.blockReview(selected.reviewId ?? '', ctx(note)),
                     )
                   }
-                  className={chipBase + chipOff}
+                  className={chipBase + chipOff + ' disabled:opacity-50'}
                 >
                   Block
                 </button>

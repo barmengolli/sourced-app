@@ -229,8 +229,8 @@
       }
     },
     {
-      "id": "verify",
-      "name": "VERIFY: apply result",
+      "id": "verify-staging",
+      "name": "VERIFY: staging apply",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -239,7 +239,50 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const result = $input.first().json;\nif (result.ok !== true || result.contract_version !== 3) {\n  throw new Error('APPLY FAILED: database did not confirm the v3 contract.');\n}\nreturn [{ json: {\n  status: 'APPLY_COMPLETE',\n  dry_run: false,\n  writes_attempted: 1,\n  snapshots_applied: result.snapshots_applied,\n  snapshots_stale_skipped: result.snapshots_stale_skipped,\n  reviews_created: result.reviews_created,\n  reviews_reconciled: result.reviews_reconciled,\n  contract_version: result.contract_version\n} }];"
+        "jsCode": "const result = $input.first().json;\nif (result.ok !== true || result.contract_version !== 3) {\n  throw new Error('APPLY FAILED: database did not confirm the v3 contract.');\n}\nreturn [{ json: result }];"
+      }
+    },
+    {
+      "id": "refresh-reporting",
+      "name": "REFRESH: approved Opportunity reporting",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2840,
+        -120
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_refresh_all_approved_opportunity_reporting' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({}) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "verify",
+      "name": "VERIFY: apply result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        -120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const refresh = $input.first().json;\nconst result = $('VERIFY: staging apply').first().json;\nif (refresh.status !== 'refreshed') {\n  throw new Error('REPORTING REFRESH FAILED: database did not confirm reconciliation.');\n}\nreturn [{ json: {\n  status: 'APPLY_COMPLETE',\n  dry_run: false,\n  writes_attempted: 1,\n  snapshots_applied: result.snapshots_applied,\n  snapshots_stale_skipped: result.snapshots_stale_skipped,\n  reviews_created: result.reviews_created,\n  reviews_reconciled: result.reviews_reconciled,\n  contract_version: result.contract_version,\n  approved_opportunities_refreshed: refresh.approved_opportunities,\n  generated_reporting_rows: refresh.generated_rows\n} }];"
       }
     }
   ],
@@ -362,6 +405,28 @@
       ]
     },
     "APPLY: opportunity staging v3": {
+      "main": [
+        [
+          {
+            "node": "VERIFY: staging apply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VERIFY: staging apply": {
+      "main": [
+        [
+          {
+            "node": "REFRESH: approved Opportunity reporting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "REFRESH: approved Opportunity reporting": {
       "main": [
         [
           {

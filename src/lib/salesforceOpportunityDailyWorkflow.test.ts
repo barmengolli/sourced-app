@@ -105,8 +105,12 @@ describe('Salesforce Opportunity daily workflow', () => {
     const config = String(byName('CONFIG: closed by default').parameters.jsCode);
     expect(config).toContain('[a-z0-9-]+\\.supabase\\.co$');
     expect(JSON.stringify(workflow)).toContain('sf_apply_opportunity_ingestion_v3');
-    expect(String(byName('VERIFY: apply result').parameters.jsCode))
+    expect(String(byName('VERIFY: staging apply').parameters.jsCode))
       .toContain('result.contract_version !== 3');
+    expect(byName('REFRESH: approved Opportunity reporting').parameters.genericAuthType)
+      .toBe('httpHeaderAuth');
+    expect(String(byName('REFRESH: approved Opportunity reporting').parameters.url))
+      .toContain('sf_refresh_all_approved_opportunity_reporting');
   });
 
   it('emits executable configuration code and accepts a valid project URL', () => {
