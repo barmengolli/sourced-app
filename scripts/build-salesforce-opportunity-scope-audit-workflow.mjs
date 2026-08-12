@@ -14,10 +14,10 @@ export const INCLUDED_RECORD_TYPES = [
   'Leads',
   'Licensing',
 ];
-// Leave blank for discovery. When Salesforce has more than one Opportunity
-// field labelled "Market", set this to the exact API name selected from the
-// sanitized candidate list returned by the resolver.
-export const MARKET_FIELD_API_NAME = '';
+// Confirmed in Salesforce Setup on 2026-08-12: this is the editable
+// Opportunity picklist. Market_from_owner__c and Market_from_user__c are
+// derived Formula (Text) fields and must not drive Sourced reporting.
+export const MARKET_FIELD_API_NAME = 'Market__c';
 export const BDR_IDENTITIES = [
   {
     key: 'dave_cummins',

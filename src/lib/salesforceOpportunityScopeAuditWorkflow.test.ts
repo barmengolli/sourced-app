@@ -7,6 +7,7 @@ import {
   BDR_IDENTITIES,
   GUARD_CODE,
   INCLUDED_RECORD_TYPES,
+  MARKET_FIELD_API_NAME,
   REPORTING_YEARS,
   RESOLVE_FIELDS_CODE,
   VALIDATE_BDR_CODE,
@@ -131,6 +132,7 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
       'Leads',
       'Licensing',
     ]);
+    expect(MARKET_FIELD_API_NAME).toBe('Market__c');
   });
 
   it('resolves Dave or David and Garrett to exactly two Salesforce User IDs', () => {
