@@ -20,6 +20,21 @@ const SOQL = [
   "AND Existing_Customer_or_New_Business__c = 'New Project'",
   'ORDER BY CreatedDate ASC, Id ASC',
 ].join(' ');
+const RECORD_TYPE_SOQL = [
+  'SELECT Id, Name, DeveloperName, SobjectType',
+  'FROM RecordType',
+  "WHERE SobjectType = 'Opportunity'",
+  'ORDER BY DeveloperName ASC, Id ASC',
+].join(' ');
+const HISTORY_SOQL = [
+  'SELECT Id, OpportunityId, Field, OldValue, NewValue, CreatedDate',
+  'FROM OpportunityFieldHistory',
+  "WHERE Opportunity.CreatedDate >= 2025-01-01T00:00:00Z AND Opportunity.CreatedDate < 2027-01-01T00:00:00Z",
+  "AND Opportunity.RecordType.DeveloperName IN ('High_Potential_Prospect','Leads','Licensing')",
+  "AND Opportunity.Existing_Customer_or_New_Business__c = 'New Project'",
+  "AND Field IN ('RecordType','StageName')",
+  'ORDER BY OpportunityId ASC, CreatedDate ASC, Id ASC',
+].join(' ');
 
 const configCode = `// This is the only ordinary configuration node.
 const MODE = 'dry_run';
@@ -47,9 +62,13 @@ return [{ json: {
 const plannerCode = `${bundle}
 const cfg = $('CONFIG: closed by default').first().json;
 const state = $('READ: protected opportunity state').first().json;
-const opportunities = $input.all().map((item) => item.json);
+const opportunities = $('READ: 2025-2026 New Project opportunities').all().map((item) => item.json);
+const historyRecords = $input.all().map((item) => item.json).filter((row) => row.Id);
+const recordTypeRefs = $('READ: Opportunity RecordType references').all().map((item) => item.json);
 const result = OpportunityDailyRuntime.planOpportunityDailyRun({
   opportunities,
+  historyRecords,
+  recordTypeRefs,
   existingState: state,
   runStartedAt: cfg.run_started_at,
   reportingYears: cfg.reporting_years,
@@ -123,13 +142,19 @@ const nodes = [
     headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
     sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify({}) }}', options: {},
   }),
-  node('query-opps', 'READ: 2025-2026 New Project opportunities', 'n8n-nodes-base.salesforce', 1, [780, 0], {
+  node('record-types', 'READ: Opportunity RecordType references', 'n8n-nodes-base.salesforce', 1, [760, 0], {
+    resource: 'search', query: RECORD_TYPE_SOQL,
+  }, { executeOnce: true }),
+  node('query-opps', 'READ: 2025-2026 New Project opportunities', 'n8n-nodes-base.salesforce', 1, [1020, 0], {
     resource: 'search', query: SOQL,
-  }),
-  node('planner', 'AUTHORITATIVE: plan staging and review', 'n8n-nodes-base.code', 2, [1060, 0], {
+  }, { executeOnce: true }),
+  node('query-history', 'READ: complete Opportunity movement history', 'n8n-nodes-base.salesforce', 1, [1280, 0], {
+    resource: 'search', query: HISTORY_SOQL,
+  }, { executeOnce: true, alwaysOutputData: true }),
+  node('planner', 'AUTHORITATIVE: plan staging and review', 'n8n-nodes-base.code', 2, [1540, 0], {
     mode: 'runOnceForAllItems', jsCode: plannerCode,
   }),
-  node('if-apply', 'ROUTE: dry run or apply', 'n8n-nodes-base.if', 2.2, [1340, 0], {
+  node('if-apply', 'ROUTE: dry run or apply', 'n8n-nodes-base.if', 2.2, [1800, 0], {
     conditions: {
       options: { caseSensitive: true, leftValue: '', typeValidation: 'strict', version: 2 },
       conditions: [{ id: 'apply-authorized', leftValue: '={{ $json.apply_authorized }}', rightValue: true,
@@ -137,13 +162,13 @@ const nodes = [
       combinator: 'and',
     }, options: {},
   }),
-  node('dry', 'DRY RUN: aggregate summary', 'n8n-nodes-base.code', 2, [1620, 120], {
+  node('dry', 'DRY RUN: aggregate summary', 'n8n-nodes-base.code', 2, [2060, 120], {
     mode: 'runOnceForAllItems', jsCode: dryCode,
   }),
-  node('prepare', 'APPLY GATE: exact confirmation', 'n8n-nodes-base.code', 2, [1620, -120], {
+  node('prepare', 'APPLY GATE: exact confirmation', 'n8n-nodes-base.code', 2, [2060, -120], {
     mode: 'runOnceForAllItems', jsCode: prepareCode,
   }),
-  node('apply', 'APPLY: opportunity staging v3', 'n8n-nodes-base.httpRequest', 4.4, [1900, -120], {
+  node('apply', 'APPLY: opportunity staging v3', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
     method: 'POST',
     url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v3' }}",
     authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
@@ -151,7 +176,7 @@ const nodes = [
     headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
     sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify($json) }}', options: {},
   }),
-  node('verify', 'VERIFY: apply result', 'n8n-nodes-base.code', 2, [2180, -120], {
+  node('verify', 'VERIFY: apply result', 'n8n-nodes-base.code', 2, [2580, -120], {
     mode: 'runOnceForAllItems', jsCode: verifyCode,
   }),
 ];
@@ -163,8 +188,10 @@ const workflow = {
     'Manual Trigger': { main: [[{ node: 'CONFIG: closed by default', type: 'main', index: 0 }]] },
     'Daily 11:50 PM America/Denver': { main: [[{ node: 'CONFIG: closed by default', type: 'main', index: 0 }]] },
     'CONFIG: closed by default': { main: [[{ node: 'READ: protected opportunity state', type: 'main', index: 0 }]] },
-    'READ: protected opportunity state': { main: [[{ node: 'READ: 2025-2026 New Project opportunities', type: 'main', index: 0 }]] },
-    'READ: 2025-2026 New Project opportunities': { main: [[{ node: 'AUTHORITATIVE: plan staging and review', type: 'main', index: 0 }]] },
+    'READ: protected opportunity state': { main: [[{ node: 'READ: Opportunity RecordType references', type: 'main', index: 0 }]] },
+    'READ: Opportunity RecordType references': { main: [[{ node: 'READ: 2025-2026 New Project opportunities', type: 'main', index: 0 }]] },
+    'READ: 2025-2026 New Project opportunities': { main: [[{ node: 'READ: complete Opportunity movement history', type: 'main', index: 0 }]] },
+    'READ: complete Opportunity movement history': { main: [[{ node: 'AUTHORITATIVE: plan staging and review', type: 'main', index: 0 }]] },
     'AUTHORITATIVE: plan staging and review': { main: [[{ node: 'ROUTE: dry run or apply', type: 'main', index: 0 }]] },
     'ROUTE: dry run or apply': { main: [
       [{ node: 'APPLY GATE: exact confirmation', type: 'main', index: 0 }],

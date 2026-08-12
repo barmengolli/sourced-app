@@ -10,9 +10,15 @@ import type {
   IngestionConfig,
 } from './opportunityIngestionPlanner';
 import type { SalesforceOpportunityRecord } from './salesforceOpportunitySync';
+import type {
+  SalesforceOpportunityHistoryRecord,
+  SalesforceRecordTypeRef,
+} from './salesforceOpportunitySync';
 
 export interface OpportunityDailyRuntimeInput {
   opportunities: SalesforceOpportunityRecord[];
+  historyRecords: SalesforceOpportunityHistoryRecord[];
+  recordTypeRefs: SalesforceRecordTypeRef[];
   existingState: ExistingStagingState;
   runStartedAt: string;
   reportingYears: number[];
@@ -28,6 +34,8 @@ const EMPTY_STATE: ExistingStagingState = {
 
 export function planOpportunityDailyRun(input: OpportunityDailyRuntimeInput) {
   if (!Array.isArray(input.opportunities)) throw new Error('runtime: opportunities must be an array');
+  if (!Array.isArray(input.historyRecords)) throw new Error('runtime: historyRecords must be an array');
+  if (!Array.isArray(input.recordTypeRefs)) throw new Error('runtime: recordTypeRefs must be an array');
   if (!input.existingState || typeof input.existingState !== 'object') {
     throw new Error('runtime: existingState is required');
   }
@@ -53,9 +61,16 @@ export function planOpportunityDailyRun(input: OpportunityDailyRuntimeInput) {
     ...EMPTY_STATE,
     ...input.existingState,
   };
-  // Current-pipeline ingestion needs the current Salesforce snapshot. No
-  // cohort, velocity, or transition history is inferred in this workflow.
-  const plan = planStagingIngestion(input.opportunities, [], [], state, config);
+  // Current snapshots and append-only Salesforce history are planned by the
+  // same authoritative adapter. Regressions remain in the protected ledger;
+  // reporting promotion later derives the reversible current-qualified path.
+  const plan = planStagingIngestion(
+    input.opportunities,
+    input.historyRecords,
+    input.recordTypeRefs,
+    state,
+    config,
+  );
   const payload = serializeApplyPayload(plan);
   const currentPipeline = { hpp: 0, opp: 0, pursuit: 0 };
   const suggestedBdrs = { dave_cummins: 0, garrett_mcnally: 0, none: 0 };
@@ -89,6 +104,8 @@ export function planOpportunityDailyRun(input: OpportunityDailyRuntimeInput) {
       primary_revenue_field: 'SaaS_Revenue_USD__c',
       stored_hidden_revenue_fields: ['Amount', 'SaaS_Revenue__c'],
       source_opportunities: input.opportunities.length,
+      source_history_rows: input.historyRecords.length,
+      record_type_references: input.recordTypeRefs.length,
       open_current_pipeline: open,
       closed_staged_for_review: closed,
       current_pipeline_by_record_type: currentPipeline,

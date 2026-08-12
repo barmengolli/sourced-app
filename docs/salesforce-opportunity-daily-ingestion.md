@@ -46,6 +46,17 @@ Ingestion never clears or overwrites an override.
 The pending v3 contract also persists exact Salesforce `AccountId`. That ID,
 not the editable account name, is the only permitted MQL-account-to-HPP join.
 
+The regenerated v3 workflow also reads `OpportunityFieldHistory` for
+`RecordType` and `StageName`, plus the live Opportunity `RecordType` reference
+table. Those rows go through the repository's authoritative history adapter;
+n8n does not infer movement from two nightly snapshots. The protected event
+ledger therefore retains forward moves, regressions, re-entry, closing, and
+reopening. Reporting promotion will derive the reversible current-qualified
+path from that evidence: current HPP reports HPP only, current Opportunity
+reports HPP + Opportunity, and current Pursuit reports HPP + Opportunity +
+Pursuit. A regression removes the higher stage from reporting without deleting
+the historical movement.
+
 ## Review and attribution
 
 Every eligible Opportunity enters the protected review staging ledger. Creator,
@@ -67,7 +78,9 @@ Generated artifact: `src/generated/salesforceOpportunityDaily.workflow.json`.
 
 - Inactive by default, with Manual Trigger plus the required daily schedule at
   **11:50 PM America/Denver**.
-- Uses a native Salesforce search node and native Header Auth HTTP nodes.
+- Uses native Salesforce search nodes for current Opportunities, Opportunity
+  field history, and runtime RecordType references, plus native Header Auth
+  HTTP nodes.
 - Reads only the protected planner state through
   `sf_read_opportunity_ingestion_state`.
 - Runs the generated bundle of the repository planner and serializer; n8n does
@@ -90,12 +103,14 @@ unchanged until reviewed opportunities are explicitly linked or approved.
 
 1. Import the generated workflow and confirm it is **Inactive**.
 2. In `CONFIG: closed by default`, replace only the Supabase project URL.
-3. Attach the Salesforce credential to the Salesforce read node and the
+3. Attach the Salesforce credential to all three Salesforce read nodes and the
    service-role Header Auth credential to the two Supabase HTTP nodes.
 4. Keep `MODE = 'dry_run'` and `CONFIRM = ''`; execute manually.
-5. Review only `DRY RUN: aggregate summary`. Do not enable apply until its
-   counts reconcile with the accepted 71-record audit population or a newer
-   deliberately re-run audit.
+5. Review only `DRY RUN: aggregate summary`. It must report the current
+   Opportunity count, history-row count, RecordType-reference count, and the
+   planned event count. Do not enable apply until the Opportunity population
+   reconciles with the accepted 71-record audit (or a newer deliberately
+   re-run audit) and the history query is confirmed complete.
 
 The migration and initial staging apply are complete. Publish the workflow only
 with its explicit 11:50 PM `America/Denver` schedule and closed, credentialed

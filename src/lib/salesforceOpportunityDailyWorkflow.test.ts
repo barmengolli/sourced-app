@@ -14,6 +14,8 @@ const workflow = JSON.parse(readFileSync(
     type: string;
     parameters: Record<string, unknown>;
     credentials?: unknown;
+    executeOnce?: boolean;
+    alwaysOutputData?: boolean;
   }>;
   connections: Record<string, { main: Array<Array<{ node: string }>> }>;
 };
@@ -44,6 +46,22 @@ describe('Salesforce Opportunity daily workflow', () => {
       'SaaS_Revenue__c', 'SaaS_Revenue_USD__c']) {
       expect(query).toContain(field);
     }
+  });
+
+  it('reads complete RecordType and Stage history once for the same approved population', () => {
+    const refs = byName('READ: Opportunity RecordType references');
+    const history = byName('READ: complete Opportunity movement history');
+    expect(String(refs.parameters.query)).toContain("SobjectType = 'Opportunity'");
+    expect(refs.executeOnce).toBe(true);
+    const query = String(history.parameters.query);
+    expect(query).toContain('FROM OpportunityFieldHistory');
+    expect(query).toContain("Field IN ('RecordType','StageName')");
+    expect(query).toContain("Opportunity.Existing_Customer_or_New_Business__c = 'New Project'");
+    expect(history.executeOnce).toBe(true);
+    expect(history.alwaysOutputData).toBe(true);
+    const planner = String(byName('AUTHORITATIVE: plan staging and review').parameters.jsCode);
+    expect(planner).toContain('historyRecords');
+    expect(planner).toContain('recordTypeRefs');
   });
 
   it('uses the generated authoritative planner bundle instead of copying rules into n8n', () => {

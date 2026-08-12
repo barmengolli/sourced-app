@@ -29,6 +29,8 @@ function record(over: Record<string, unknown> = {}) {
 function run(records = [record()]) {
   return planOpportunityDailyRun({
     opportunities: records,
+    historyRecords: [],
+    recordTypeRefs: [],
     existingState: state,
     runStartedAt: '2026-08-12T12:00:00.000Z',
     reportingYears: [2025, 2026],
@@ -82,6 +84,36 @@ describe('Opportunity daily runtime', () => {
     expect(result.payload.p_snapshots).toHaveLength(2);
   });
 
+  it('plans real Opportunity history events and never fabricates them from snapshots', () => {
+    const result = planOpportunityDailyRun({
+      opportunities: [record()],
+      historyRecords: [{
+        Id: '0Hx000000000001AAA',
+        OpportunityId: 'SYNTH-OPP-DAILY-1',
+        Field: 'RecordType',
+        OldValue: '012000000000001AAA',
+        NewValue: '012000000000002AAA',
+        CreatedDate: '2026-08-05T12:00:00.000Z',
+      }],
+      recordTypeRefs: [
+        { Id: '012000000000001AAA', DeveloperName: 'High_Potential_Prospect', SobjectType: 'Opportunity' },
+        { Id: '012000000000002AAA', DeveloperName: 'Leads', SobjectType: 'Opportunity' },
+      ],
+      existingState: state,
+      runStartedAt: '2026-08-12T12:00:00.000Z',
+      reportingYears: [2025, 2026],
+      includedBusinessTypeApiValues: ['New Project'],
+    });
+
+    expect(result.summary.source_history_rows).toBe(1);
+    expect(result.payload.p_events).toHaveLength(1);
+    expect(result.payload.p_events[0]).toMatchObject({
+      sf_history_id: '0Hx000000000001AAA',
+      old_value: 'High_Potential_Prospect',
+      new_value: 'Leads',
+    });
+  });
+
   it('excludes blank, non-New-Logo, and out-of-year records', () => {
     const result = run([
       record({ Id: 'SYNTH-OPP-DAILY-A', Existing_Customer_or_New_Business__c: null }),
@@ -99,6 +131,8 @@ describe('Opportunity daily runtime', () => {
   it('refuses any guessed New Logo value', () => {
     expect(() => planOpportunityDailyRun({
       opportunities: [record()],
+      historyRecords: [],
+      recordTypeRefs: [],
       existingState: state,
       runStartedAt: '2026-08-12T12:00:00.000Z',
       reportingYears: [2025, 2026],

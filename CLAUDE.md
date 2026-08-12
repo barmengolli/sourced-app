@@ -145,6 +145,11 @@ alone is not proof of production state.
   the accepted scope exactly, and an immediate retry wrote 0 snapshots and 0
   reviews. Daily ingestion may stage new or changed records, but it must never
   approve attribution automatically or overwrite reviewer-owned fields.
+  The pending v3 workflow additionally reads OpportunityFieldHistory and
+  runtime RecordType references through native Salesforce nodes. The
+  repository planner is the only movement authority: raw regressions remain
+  append-only while later reporting promotion derives a reversible
+  current-qualified HPP / Opportunity / Pursuit path.
 
 #### Outreach
 

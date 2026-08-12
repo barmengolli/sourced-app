@@ -1450,6 +1450,8 @@ var OpportunityDailyRuntime = (function(exports) {
 	};
 	function planOpportunityDailyRun(input) {
 		if (!Array.isArray(input.opportunities)) throw new Error("runtime: opportunities must be an array");
+		if (!Array.isArray(input.historyRecords)) throw new Error("runtime: historyRecords must be an array");
+		if (!Array.isArray(input.recordTypeRefs)) throw new Error("runtime: recordTypeRefs must be an array");
 		if (!input.existingState || typeof input.existingState !== "object") throw new Error("runtime: existingState is required");
 		if (!Number.isFinite(Date.parse(input.runStartedAt))) throw new Error("runtime: runStartedAt must be a real timestamp");
 		if (!Array.isArray(input.reportingYears) || input.reportingYears.length === 0 || input.reportingYears.some((year) => !Number.isInteger(year))) throw new Error("runtime: reportingYears must contain integers");
@@ -1463,7 +1465,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			...EMPTY_STATE,
 			...input.existingState
 		};
-		const plan = planStagingIngestion(input.opportunities, [], [], state, config);
+		const plan = planStagingIngestion(input.opportunities, input.historyRecords, input.recordTypeRefs, state, config);
 		const payload = serializeApplyPayload(plan);
 		const currentPipeline = {
 			hpp: 0,
@@ -1503,6 +1505,8 @@ var OpportunityDailyRuntime = (function(exports) {
 				primary_revenue_field: "SaaS_Revenue_USD__c",
 				stored_hidden_revenue_fields: ["Amount", "SaaS_Revenue__c"],
 				source_opportunities: input.opportunities.length,
+				source_history_rows: input.historyRecords.length,
+				record_type_references: input.recordTypeRefs.length,
 				open_current_pipeline: open,
 				closed_staged_for_review: closed,
 				current_pipeline_by_record_type: currentPipeline,
