@@ -387,8 +387,8 @@ return [{ json: {
   },
   field_coverage: coverage,
   revenue_policy: {
-    primary_visible_field: 'Amount',
-    stored_hidden_fields: ['SaaS_Revenue__c','SaaS_Revenue_USD__c']
+    primary_visible_field: 'SaaS_Revenue_USD__c',
+    stored_hidden_fields: ['Amount','SaaS_Revenue__c']
   },
   overwrite_policy: {
     rule: 'manual_override_wins',

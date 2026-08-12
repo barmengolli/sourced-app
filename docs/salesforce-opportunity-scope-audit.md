@@ -38,10 +38,11 @@ Confirmed fields:
 
 - `Commercial_Region__c` (Commercial Region)
 - `GTM_Cube__c` (GTM - Cube)
-- `Amount` (primary visible revenue)
-- `SaaS_Revenue__c` and `SaaS_Revenue_USD__c` (stored but initially hidden)
+- `SaaS_Revenue_USD__c` (primary visible revenue)
+- `Amount` and `SaaS_Revenue__c` (still imported and stored, initially hidden)
 - `Existing_Customer_or_New_Business__c` (New Logo/New Business gate)
-- `CreatedById` (BDR identity)
+- `CreatedById` and `CreatedBy.Name` (source identity plus the narrowly
+  approved Dave/David Cummins and Garrett McNally review suggestion)
 
 The Opportunity Market field is `Market__c`, confirmed in Salesforce Setup on
 2026-08-12 as the editable Picklist. The two other fields carrying the same

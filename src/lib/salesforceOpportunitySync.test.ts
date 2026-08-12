@@ -562,15 +562,15 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
 
   it('classifies every Customer Expansion category', () => {
     const scope = scoped([
-      opp({ Existing_Customer_or_New_Business__c: 'New Logo' }),
-      opp({ Existing_Customer_or_New_Business__c: 'New Business' }),
-      opp({ Existing_Customer_or_New_Business__c: 'Existing Customer' }),
+      opp({ Existing_Customer_or_New_Business__c: 'New Project' }),
+      opp({ Existing_Customer_or_New_Business__c: 'Upsell/Cross-sell' }),
+      opp({ Existing_Customer_or_New_Business__c: 'Renewal' }),
       opp({ Existing_Customer_or_New_Business__c: 'Synthetic Mystery Segment' }),
       opp({ Existing_Customer_or_New_Business__c: null }),
     ]);
     expect(scope.customerExpansion).toEqual({
-      new_logo: 2,
-      existing_customer_or_expansion: 1,
+      new_logo: 1,
+      existing_customer_or_expansion: 2,
       other: 1,
       missing: 1,
     });
@@ -592,21 +592,21 @@ describe('business-scope diagnostic (diagnostic groups only)', () => {
   it('classifies campaign presence and produces every requested cross-tab', () => {
     const scope = scoped([
       opp({
-        Existing_Customer_or_New_Business__c: 'New Logo',
+        Existing_Customer_or_New_Business__c: 'New Project',
         Sales_Development_Rep__c: 'SYNTH-USER-BDR1',
         CreatedById: 'SYNTH-USER-BDR1',
         CampaignId: 'SYNTH-CAMP-1',
         RecordType: { DeveloperName: 'High_Potential_Prospect', Name: 'High Potential Prospect' },
       }),
       opp({
-        Existing_Customer_or_New_Business__c: 'New Logo',
+        Existing_Customer_or_New_Business__c: 'New Project',
         Sales_Development_Rep__c: null,
         CreatedById: 'SYNTH-USER-SELLER',
         CampaignId: null,
         RecordType: { DeveloperName: 'Licensing', Name: 'Pursuit' },
       }),
       opp({
-        Existing_Customer_or_New_Business__c: 'Existing Customer',
+        Existing_Customer_or_New_Business__c: 'Upsell/Cross-sell',
         Sales_Development_Rep__c: 'SYNTH-USER-SELLER',
         CreatedById: null,
         CampaignId: null,

@@ -133,6 +133,14 @@ alone is not proof of production state.
 - Ordered touches are stored separately.
 - An HPP may be created without a linked lead. Source channel is the required
   attribution evidence.
+- The approved Salesforce Opportunity daily-ingestion contract is documented
+  in `docs/salesforce-opportunity-daily-ingestion.md`. Its exact scope is
+  2025-2026 `New Project` records in the three funnel record types;
+  `SaaS_Revenue_USD__c` is primary visible revenue while `Amount` and
+  `SaaS_Revenue__c` remain stored. Source fields refresh nightly, separate
+  reviewer overrides win, approved creator names become BDR suggestions only
+  (never automatic attribution), and the disabled workflow must stay in dry-run mode
+  until its pending migration is applied and the 71-record scope reconciles.
 
 #### Outreach
 

@@ -351,8 +351,8 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
       source_values_refresh_without_clearing_manual_overrides: true,
     });
     expect(result.json.revenue_policy).toEqual({
-      primary_visible_field: 'Amount',
-      stored_hidden_fields: ['SaaS_Revenue__c', 'SaaS_Revenue_USD__c'],
+      primary_visible_field: 'SaaS_Revenue_USD__c',
+      stored_hidden_fields: ['Amount', 'SaaS_Revenue__c'],
     });
   });
 

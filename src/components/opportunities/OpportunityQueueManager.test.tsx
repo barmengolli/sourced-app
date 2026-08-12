@@ -67,6 +67,7 @@ describe('queue table and disclosures', () => {
           accountName: 'Synthetic Alpha Account',
           amount: 42000,
           amountCurrency: 'USD',
+          saasRevenueUsd: 41000,
           owner: 'Synthetic Owner A',
         }),
       ]),
@@ -75,7 +76,8 @@ describe('queue table and disclosures', () => {
       expect(screen.getByText('Synthetic Alpha Deal')).toBeTruthy();
     });
     expect(screen.getByText('Synthetic Alpha Account')).toBeTruthy();
-    expect(screen.getByText('$42,000')).toBeTruthy();
+    expect(screen.getByText('$41,000')).toBeTruthy();
+    expect(screen.getByText('SaaS Revenue USD')).toBeTruthy();
     expect(screen.getByText('Synthetic Owner A')).toBeTruthy();
     // Appears as both the filter chip and the issue chip on the row.
     expect(screen.getAllByText('Missing channel').length).toBeGreaterThanOrEqual(2);
@@ -92,6 +94,7 @@ describe('queue table and disclosures', () => {
           evidence: {
             bdrUserId: 'SYNTH-USER-BDR',
             creatorUserId: 'SYNTH-USER-CREATOR',
+            suggestedBdrName: 'Dave Cummins',
             primaryCampaignSource: 'SYNTH-CAMPAIGN-EV',
             customerExpansionRaw: 'Synthetic expansion value',
           },
@@ -103,6 +106,7 @@ describe('queue table and disclosures', () => {
     await user.click(screen.getByText('Synthetic Evidence Deal'));
     expect(screen.getByText(/informational only, never a decision/i)).toBeTruthy();
     expect(screen.getByText(/SYNTH-USER-BDR/)).toBeTruthy();
+    expect(screen.getByText(/Suggested BDR: Dave Cummins/)).toBeTruthy();
     expect(screen.getByText(/SYNTH-CAMPAIGN-EV/)).toBeTruthy();
     // The raw Salesforce ID lives only inside the diagnostics disclosure.
     expect(screen.getByText('Diagnostics')).toBeTruthy();
@@ -230,6 +234,7 @@ describe('not selected recovery view', () => {
           evidence: {
             bdrUserId: 'SYNTH-USER-BDR-NS',
             creatorUserId: null,
+            suggestedBdrName: 'Garrett McNally',
             primaryCampaignSource: 'SYNTH-CAMPAIGN-NS',
             customerExpansionRaw: null,
           },

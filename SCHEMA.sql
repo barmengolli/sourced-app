@@ -607,6 +607,11 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
   amount NUMERIC(14, 2),
   amount_currency TEXT,
   close_date DATE,
+  market TEXT,
+  -- Normalized review evidence derived only from the approved creator names.
+  -- It never assigns a channel or approves attribution.
+  suggested_bdr_name TEXT
+    CHECK (suggested_bdr_name IN ('Dave Cummins', 'Garrett McNally')),
   commercial_region TEXT,
   opportunity_owner TEXT,
   -- Supporting attribution EVIDENCE only; never treated as a verified
@@ -619,8 +624,8 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_synced_at TIMESTAMPTZ,
-  -- Review-evidence columns (Bite 5C2A): raw values and source USER IDS
-  -- only; configured employee names are never stored, no canonical
+  -- Review-evidence columns (Bite 5C2A): raw values, source USER IDS, and
+  -- the narrowly approved normalized BDR suggestion above. No canonical
   -- Industry Vertical field is chosen, and no Customer Expansion rule is
   -- applied.
   normalized_record_type_state TEXT
@@ -773,6 +778,11 @@ CREATE TABLE IF NOT EXISTS sf_opportunity_reviews (
   lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
   -- Matches the attributions.bdr_name convention.
   bdr_name TEXT,
+  -- Reviewer-owned corrections. Nightly ingestion refreshes the source
+  -- values on sf_opportunities and never writes these columns.
+  market_override TEXT,
+  commercial_region_override TEXT,
+  gtm_cube_override TEXT,
   reviewer_note TEXT,
   reviewed_at TIMESTAMPTZ,
   -- Free-text placeholder compatible with future SSO identities.
@@ -1756,3 +1766,21 @@ AFTER INSERT OR UPDATE OF lead_id, channel_id, source, campaign_member_id
 ON public.lead_campaign_touches
 FOR EACH ROW
 EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
+
+-- =============================================================
+-- Opportunity daily-ingestion v2 contract
+-- migrations/2026-08-12_opportunity_daily_ingestion_contract.sql
+-- STATUS: PENDING / NOT APPLIED.
+-- =============================================================
+--
+-- public.sf_apply_opportunity_ingestion_v2(JSONB, JSONB, JSONB, JSONB)
+-- delegates the atomic planner payload to the applied v1 function, then
+-- persists Market and the normalized BDR suggestion only when the accepted
+-- source timestamp and content hash still match. The suggestion remains
+-- review evidence and never writes source attribution or a channel.
+-- public.sf_read_opportunity_ingestion_state() exposes only
+-- the protected planner state needed for exact retry/stale/conflict checks.
+-- Both are SECURITY DEFINER with search_path=pg_catalog, revoked from
+-- PUBLIC/anon/authenticated, and executable only by service_role. See the
+-- migration for the full function bodies. The reviewer-owned override
+-- columns above are never written by ingestion.

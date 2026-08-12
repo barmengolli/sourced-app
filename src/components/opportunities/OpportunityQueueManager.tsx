@@ -394,7 +394,7 @@ export default function OpportunityQueueManager({
                 <th className="px-3 py-2 font-medium">Account</th>
                 <th className="px-3 py-2 font-medium">Type</th>
                 <th className="px-3 py-2 font-medium">Stage</th>
-                <th className="px-3 py-2 font-medium">Amount</th>
+                <th className="px-3 py-2 font-medium">SaaS Revenue USD</th>
                 <th className="px-3 py-2 font-medium">Created</th>
                 <th className="px-3 py-2 font-medium">Modified</th>
                 <th className="px-3 py-2 font-medium">Owner</th>
@@ -421,7 +421,7 @@ export default function OpportunityQueueManager({
                     <span className="text-slate-muted"> · {item.isClosed ? 'closed' : 'open'}</span>
                   </td>
                   <td className="px-3 py-2 tabular-nums">
-                    {formatAmount(item.amount, item.amountCurrency)}
+                    {formatAmount(item.saasRevenueUsd, 'USD')}
                   </td>
                   <td className="px-3 py-2 tabular-nums">{formatDate(item.createdAt)}</td>
                   <td className="px-3 py-2 tabular-nums">{formatDate(item.lastModifiedAt)}</td>
@@ -470,6 +470,7 @@ export default function OpportunityQueueManager({
             <h3 className="font-medium">Evidence (informational only, never a decision)</h3>
             <p>BDR evidence: {selected.evidence.bdrUserId ?? 'none'}</p>
             <p>Creator evidence: {selected.evidence.creatorUserId ?? 'none'}</p>
+            <p>Suggested BDR: {selected.evidence.suggestedBdrName ?? 'none'}</p>
             <p>Primary campaign source: {selected.evidence.primaryCampaignSource ?? 'none'}</p>
             <p>Customer expansion (raw): {selected.evidence.customerExpansionRaw ?? 'none'}</p>
           </div>
