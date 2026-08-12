@@ -140,8 +140,11 @@ alone is not proof of production state.
   `SaaS_Revenue__c` remain stored. Source fields refresh nightly, separate
   reviewer overrides win, approved creator names become BDR suggestions only
   (never automatic attribution). The supporting migration was applied and
-  permission-verified on 2026-08-12; the disabled workflow must stay in
-  dry-run mode until the 71-record scope reconciles.
+  permission-verified on 2026-08-12. The initial staging apply then stored 71
+  snapshots and created 71 pending reviews; direct SQL reconciliation matched
+  the accepted scope exactly, and an immediate retry wrote 0 snapshots and 0
+  reviews. Daily ingestion may stage new or changed records, but it must never
+  approve attribution automatically or overwrite reviewer-owned fields.
 
 #### Outreach
 

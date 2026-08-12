@@ -752,6 +752,10 @@ describe('daily-ingestion contract migration (applied)', () => {
 
     expect(DOC).toContain('migration **APPLIED on 2026-08-12**');
     expect(DOC).not.toContain('migration **PENDING / NOT APPLIED**');
+    expect(DOC).toContain('initial production staging apply completed on 2026-08-12');
+    expect(DOC).toContain('stored 71 snapshots and created 71 pending reviews');
+    expect(DOC).toContain('exact retry applied 0 snapshots and created 0 reviews');
+    expect(DOC).toContain('All 71 records remain pending human review');
   });
 });
 

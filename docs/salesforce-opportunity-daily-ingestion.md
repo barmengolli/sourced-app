@@ -1,7 +1,22 @@
 # Salesforce Opportunity daily ingestion
 
-Status: migration **APPLIED on 2026-08-12** and permissions verified; generated
-n8n workflow **disabled**; no production Opportunity ingestion has run.
+Status: migration **APPLIED on 2026-08-12** and permissions verified. The
+initial production staging apply completed on 2026-08-12; the generated n8n
+workflow is not yet published for its daily schedule.
+
+## Verified initial production staging
+
+The accepted dry run reconciled 71 eligible opportunities: 36 open current
+pipeline records and 35 closed records retained for review. The first apply
+stored 71 snapshots and created 71 pending reviews. Direct database
+verification confirmed 71 distinct opportunities, no missing reviews, no
+missing primary `SaaS_Revenue_USD__c` values, open stages of 9 HPP / 14
+Opportunity / 13 Pursuit, and BDR suggestions of 13 Dave Cummins / 7 Garrett
+McNally. An immediate exact retry applied 0 snapshots and created 0 reviews,
+confirming retry idempotency against the production state.
+
+This staging apply did not approve attribution, create reporting rows, or link
+Sourced deals. All 71 records remain pending human review.
 
 ## Approved scope
 
@@ -73,5 +88,7 @@ unchanged until reviewed opportunities are explicitly linked or approved.
    counts reconcile with the accepted 71-record audit population or a newer
    deliberately re-run audit.
 
-The migration is applied. The workflow remains unauthorized for production
-application or activation until the dry-run reconciliation is accepted.
+The migration and initial staging apply are complete. Publish the workflow only
+with its explicit 11:50 PM `America/Denver` schedule and closed, credentialed
+apply boundary intact. New eligible Opportunities are staged for review;
+ingestion never approves their attribution automatically.
