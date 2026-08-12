@@ -12,7 +12,9 @@ The proposed initial Opportunity population is:
 - Salesforce Opportunity `CreatedDate` in 2025 or 2026;
 - current `RecordType.DeveloperName` is `High_Potential_Prospect`, `Leads`,
   or `Licensing` (Sourced HPP, Opportunity, and Pursuit respectively);
-- Customer Expansion is exactly `New Logo` or `New Business`;
+- `Existing_Customer_or_New_Business__c` has the Salesforce UI label `New
+  Logo` but the API value `New Project`; only the exact API value `New Project`
+  is admitted;
 - both open and closed Opportunities are retained, but only open records
   appear in the Current Pipeline view;
 - every eligible record enters source review;
@@ -48,6 +50,13 @@ label—`Market_from_owner__c` and `Market_from_user__c`—are derived Formula
 locks `MARKET_FIELD_API_NAME` to `Market__c`. Runtime FieldDefinition discovery
 still verifies that this exact API name exists and remains labelled Market; an
 absent, malformed, or non-candidate value is refused rather than guessed.
+
+The New Logo mapping was confirmed in Salesforce Setup on 2026-08-12: the
+picklist label `New Logo` stores the API value `New Project`. Known non-New-Logo
+values—`Upsell/Cross-sell`, `Renewal`, `Reactivation`, `New Division or Entity`,
+`Contract Renegotiation`, and `Variable Revenue`—are excluded. Any future value
+outside those sets remains excluded and is reported as unrecognized so a source
+configuration change cannot silently widen the Opportunity population.
 
 ## Manual-overwrite contract for the later production sync
 

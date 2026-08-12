@@ -202,6 +202,17 @@ const stageByRecordType = {
   Leads: 'opp',
   Licensing: 'pursuit'
 };
+// Salesforce exposes the picklist's API value, not its UI label. In this org,
+// the UI label "New Logo" has the API value "New Project".
+const newLogoBusinessTypes = new Set(['New Project']);
+const knownNonNewLogoBusinessTypes = new Set([
+  'Upsell/Cross-sell',
+  'Renewal',
+  'Reactivation',
+  'New Division or Entity',
+  'Contract Renegotiation',
+  'Variable Revenue'
+]);
 const configuredYears = new Set(cfg.reporting_years);
 const seen = new Set();
 const businessTypeValueCounts = new Map();
@@ -258,10 +269,10 @@ for (const item of sourceItems) {
   if (!stage) { excluded.invalid_source_row += 1; continue; }
 
   if (!businessType) { excluded.missing_new_logo_value += 1; continue; }
-  if (['Existing Customer','Expansion','Existing Customer or Expansion','Customer Expansion'].includes(businessType)) {
+  if (knownNonNewLogoBusinessTypes.has(businessType)) {
     excluded.existing_customer_or_expansion += 1; continue;
   }
-  if (!['New Logo','New Business'].includes(businessType)) {
+  if (!newLogoBusinessTypes.has(businessType)) {
     excluded.unrecognized_business_type += 1; continue;
   }
 
@@ -349,6 +360,11 @@ return [{ json: {
     values: businessTypeValues,
     total: inventoriedBusinessTypes
   },
+  business_type_policy: {
+    new_logo_ui_label: 'New Logo',
+    included_api_values: [...newLogoBusinessTypes],
+    excluded_known_api_values: [...knownNonNewLogoBusinessTypes]
+  },
   current_pipeline: {
     open_opportunities: open,
     by_current_record_type: byOpenStage
@@ -401,6 +417,11 @@ if (!inventory || inventory.field_api_name !== 'Existing_Customer_or_New_Busines
   || inventory.blank + inventoryValueTotal !== summary.source_opportunities
   || inventory.total !== summary.source_opportunities) {
   throw new Error('GUARD FAILED: business-type value inventory is missing or incomplete.');
+}
+if (!summary.business_type_policy
+  || summary.business_type_policy.new_logo_ui_label !== 'New Logo'
+  || JSON.stringify(summary.business_type_policy.included_api_values) !== JSON.stringify(['New Project'])) {
+  throw new Error('GUARD FAILED: the confirmed New Logo API-value mapping changed.');
 }
 const serialized = JSON.stringify(summary);
 if (/[A-Za-z0-9]{15}([A-Za-z0-9]{3})?/.test(serialized) || /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i.test(serialized)) {

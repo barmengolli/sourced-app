@@ -102,7 +102,7 @@ function opportunity(index: number, overrides: Record<string, unknown> = {}): Re
     OwnerId: '005000000000099AAA',
     CampaignId: null,
     CreatedById: '005000000000001',
-    Existing_Customer_or_New_Business__c: 'New Logo',
+    Existing_Customer_or_New_Business__c: 'New Project',
     Commercial_Region__c: 'NA',
     GTM_Cube__c: 'Synthetic Cube',
     Market__c: 'North America',
@@ -201,7 +201,7 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
         RecordType: { DeveloperName: 'Licensing', Name: 'Pursuit' },
         CreatedDate: '2026-03-10T09:00:00.000Z',
         CreatedById: '005000000000002AAA',
-        Existing_Customer_or_New_Business__c: 'New Business',
+        Existing_Customer_or_New_Business__c: 'New Project',
         IsClosed: true,
         IsWon: true,
         CampaignId: '701000000000001AAA',
@@ -214,7 +214,7 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
         GTM_Cube__c: '',
         SaaS_Revenue_USD__c: null,
       }),
-      opportunity(4, { Existing_Customer_or_New_Business__c: 'Existing Customer' }),
+      opportunity(4, { Existing_Customer_or_New_Business__c: 'Upsell/Cross-sell' }),
       opportunity(5, { Existing_Customer_or_New_Business__c: '' }),
       opportunity(6, { CreatedDate: '2024-01-01T09:00:00.000Z' }),
     ]);
@@ -235,11 +235,22 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
         field_api_name: 'Existing_Customer_or_New_Business__c',
         blank: 1,
         values: [
-          { value: 'New Logo', count: 3 },
-          { value: 'Existing Customer', count: 1 },
-          { value: 'New Business', count: 1 },
+          { value: 'New Project', count: 4 },
+          { value: 'Upsell/Cross-sell', count: 1 },
         ],
         total: 6,
+      },
+      business_type_policy: {
+        new_logo_ui_label: 'New Logo',
+        included_api_values: ['New Project'],
+        excluded_known_api_values: [
+          'Upsell/Cross-sell',
+          'Renewal',
+          'Reactivation',
+          'New Division or Entity',
+          'Contract Renegotiation',
+          'Variable Revenue',
+        ],
       },
       current_pipeline: {
         open_opportunities: 2,
@@ -276,6 +287,22 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
       },
       reporting_lens: 'current_pipeline_only',
       reconciliation_complete: true,
+    });
+  });
+
+  it('admits only the confirmed New Logo API value and never its UI label', () => {
+    const [result] = executeAggregate([
+      opportunity(1, { Existing_Customer_or_New_Business__c: 'New Project' }),
+      opportunity(2, { Existing_Customer_or_New_Business__c: 'New Logo' }),
+      opportunity(3, { Existing_Customer_or_New_Business__c: 'New Business' }),
+      opportunity(4, { Existing_Customer_or_New_Business__c: 'Renewal' }),
+      opportunity(5, { Existing_Customer_or_New_Business__c: 'New Division or Entity' }),
+    ]);
+
+    expect(result.json.eligible_new_logo_opportunities).toBe(1);
+    expect(result.json.excluded_by_reason).toMatchObject({
+      existing_customer_or_expansion: 2,
+      unrecognized_business_type: 2,
     });
   });
 
@@ -339,6 +366,24 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
     expect(serialized).not.toContain('006000000000001AAA');
     expect(serialized).not.toContain('Synthetic Opportunity');
     expect(serialized).not.toContain('Synthetic Account');
+  });
+
+  it('makes the aggregate guard enforce the confirmed New Logo API value', () => {
+    const [summary] = executeAggregate([opportunity(1)]);
+    const fn = new Function('$input', GUARD_CODE) as (
+      input: { first: () => JsonItem },
+    ) => JsonItem[];
+    const changed = {
+      json: {
+        ...summary.json,
+        business_type_policy: {
+          ...(summary.json.business_type_policy as Record<string, unknown>),
+          included_api_values: ['New Logo'],
+        },
+      },
+    };
+    expect(() => fn({ first: () => changed }))
+      .toThrow('confirmed New Logo API-value mapping changed');
   });
 
   it('is disabled, manual-only, credential-free, unpinned, and write-free', () => {
