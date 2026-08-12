@@ -32,6 +32,17 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+function normalizeSupabaseUrl(value: string): string {
+  const url = new URL(value);
+  const path = url.pathname.replace(/\/$/, '');
+  // createClient adds /rest/v1 itself. Accept the common REST endpoint form
+  // from an existing HTTP node, but always pass the project origin onward.
+  if (path !== '' && path !== '/rest/v1') {
+    throw new Error('invalid SUPABASE_URL path');
+  }
+  return url.origin;
+}
+
 function sameOrigin(req: RequestLike): boolean {
   const origin = header(req, 'origin');
   const configured = process.env.OPPORTUNITY_QUEUE_ALLOWED_ORIGIN?.replace(/\/$/, '');
@@ -158,7 +169,7 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
   let supabaseUrl: string;
   let serviceKey: string;
   try {
-    supabaseUrl = requiredEnv('SUPABASE_URL');
+    supabaseUrl = normalizeSupabaseUrl(requiredEnv('SUPABASE_URL'));
     serviceKey = requiredEnv('SUPABASE_SERVICE_ROLE_KEY');
   } catch {
     return json(res, 503, { ok: false, error: { message: 'Opportunity queue database access is not configured' } });

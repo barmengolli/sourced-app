@@ -103,6 +103,19 @@ describe('Opportunity queue live server boundary', () => {
     expect(JSON.stringify(res.body)).not.toContain('synthetic-service-key');
   });
 
+  it('normalizes a copied Supabase REST endpoint before creating the client', async () => {
+    process.env.SUPABASE_URL = 'https://synthetic-project.supabase.co/rest/v1/';
+    const { cookie } = await login();
+    rpc.mockResolvedValueOnce({ data: [], error: null });
+    const res = response();
+    await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(createClient).toHaveBeenCalledWith(
+      'https://synthetic-project.supabase.co', 'synthetic-service-key', expect.any(Object),
+    );
+  });
+
   it('returns a safe database error reference without leaking raw details', async () => {
     const { cookie } = await login();
     rpc.mockResolvedValueOnce({
