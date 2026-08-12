@@ -113,6 +113,16 @@ CREATE INDEX idx_leads_event_activations ON leads USING GIN(event_activations);
 
 CREATE TABLE attributions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Manual rows are reviewer-created. Salesforce rows belong to the future
+  -- reversible Opportunity reporting projection and can be reconciled by
+  -- exact Opportunity identity without touching manual data.
+  source_system TEXT NOT NULL DEFAULT 'manual'
+    CHECK (source_system IN ('manual', 'salesforce')),
+  sf_opportunity_id TEXT,
+  CONSTRAINT attributions_salesforce_identity_required CHECK (
+    source_system = 'manual'
+    OR NULLIF(btrim(sf_opportunity_id), '') IS NOT NULL
+  ),
   lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
   deal_id TEXT,  -- shared across stages for the same deal (HPP -> Opp -> Pursuit -> Won)
   stage_key TEXT NOT NULL CHECK (stage_key IN ('hpp','opp','pursuit','closeWon','closeLost')),
@@ -153,6 +163,7 @@ CREATE TABLE attributions (
 );
 
 CREATE INDEX idx_attributions_deal ON attributions(deal_id);
+CREATE INDEX idx_attributions_sf_opportunity_id ON attributions(sf_opportunity_id);
 CREATE INDEX idx_attributions_lead ON attributions(lead_id);
 CREATE INDEX idx_attributions_sfdc_account_id ON attributions(sfdc_account_id);
 CREATE INDEX idx_attributions_stage ON attributions(stage_key);
@@ -169,6 +180,10 @@ CREATE INDEX idx_attributions_bdr_name ON attributions(bdr_name);
 CREATE UNIQUE INDEX attributions_deal_stage_uniq
   ON attributions (deal_id, stage_key)
   WHERE deal_id IS NOT NULL AND deal_id <> '';
+
+CREATE UNIQUE INDEX attributions_salesforce_opportunity_stage_uniq
+  ON attributions (sf_opportunity_id, stage_key)
+  WHERE source_system = 'salesforce';
 
 -- Ordered touches per attribution
 CREATE TABLE attribution_touches (

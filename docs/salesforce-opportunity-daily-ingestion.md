@@ -72,6 +72,15 @@ still requires the approved authenticated server/API runtime. This workflow
 does not pretend that browser access exists and does not write directly to
 reporting or attribution tables.
 
+The pure promotion boundary now exists in
+`src/lib/opportunityReportingProjection.ts`. It requires an approved review,
+an active exact link, a reviewer-selected channel, an effective Commercial
+Region in the application taxonomy, and real stage-entry dates. The authored
+`2026-08-12_opportunity_reporting_projection.sql` migration is pending and
+adds provenance that keeps generated Salesforce rows separate from manual
+attributions. Live promotion remains blocked on the authenticated server API
+described in `docs/opportunity-queue-api.md`; no browser bypass is permitted.
+
 ## Workflow
 
 Generated artifact: `src/generated/salesforceOpportunityDaily.workflow.json`.
