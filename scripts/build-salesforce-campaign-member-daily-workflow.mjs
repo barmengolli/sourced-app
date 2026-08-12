@@ -94,7 +94,7 @@ const query = [
   'Contact.Hubspot_lead_lifecycle__c, Lead.Email, Lead.FirstName, Lead.LastName,',
   'Lead.Title, Lead.Company, Lead.ConvertedAccountId, Lead.LeadSource, Lead.Country,',
   'Lead.Hubspot_lead_lifecycle__c',
-  
+
   'FROM CampaignMember',
   'WHERE Campaign.ParentId IN (' + ids.map(quote).join(',') + ')',
   'ORDER BY CampaignId ASC, Id ASC'
