@@ -26,6 +26,7 @@ import AttributionEditorModal from '../components/attribution/AttributionEditorM
 import { readJson, writeJson } from '../lib/storage';
 import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
 import { reportingContractFor } from '../constants/reportingPages';
+import { computeFunnelConversionCohorts } from '../lib/funnelConversionCohorts';
 
 const EDITS_LOCKED_STORAGE_KEY = 'sourced.funnel.editsLocked';
 
@@ -151,6 +152,18 @@ export default function FunnelDataEntryPage({
       filter,
       regions,
     ],
+  );
+
+  const conversionCohorts = useMemo(
+    () => computeFunnelConversionCohorts({
+      leads,
+      touches,
+      attributions: attributionsHook.attributions,
+      year,
+      filter,
+      regions,
+    }),
+    [leads, touches, attributionsHook.attributions, year, filter, regions],
   );
 
   // parent map keyed by child id: id → parent id. Drives the
@@ -375,7 +388,7 @@ export default function FunnelDataEntryPage({
           }}
           editsLocked={editsLocked}
         />
-        <ConversionsPanel totals={grid.totals} />
+        <ConversionsPanel conversions={conversionCohorts} />
       </div>
 
       {createOpen && (

@@ -227,7 +227,7 @@ describe('multi-attribution counting (the deliberate change)', () => {
     expect(year.uniqueContacts.lead).toBeLessThanOrEqual(year.totals.lead.actual!);
   });
 
-  it('keeps MQLs inside the original lead cohort without subtracting them from Leads', () => {
+  it('keeps Lead in its touch period and records witnessed MQL activity in its later period', () => {
     const cohort = Array.from({ length: 20 }, (_, i) =>
       lead({
         id: `P${i + 1}`,
@@ -247,17 +247,14 @@ describe('multi-attribution counting (the deliberate change)', () => {
     const q1 = computeGrid({ ...base(cohort, touches), year: 2026, filter: 'Q1' });
     const row = q1.rows.find((candidate) => candidate.channelId === 'cA');
     expect(row?.cells.lead.actual).toBe(20);
-    expect(row?.cells.mql.actual).toBe(10);
-    expect(conversionPercent(row?.cells.mql.actual ?? null, row?.cells.lead.actual ?? null)).toBe(50);
+    expect(row?.cells.mql.actual).toBe(0);
 
-    // The MQL happened in Q3, but Data Entry is an acquisition-cohort report:
-    // the conversion follows the Q1 membership rather than becoming Q3 volume.
     const q3 = computeGrid({ ...base(cohort, touches), year: 2026, filter: 'Q3' });
     expect(q3.totals.lead.actual).toBeNull();
-    expect(q3.totals.mql.actual).toBeNull();
+    expect(q3.totals.mql.actual).toBe(10);
   });
 
-  it('anchors each campaign membership to its own touch period', () => {
+  it('counts each campaign membership at the later of its touch and witnessed MQL date', () => {
     const person = lead({
       id: 'P1',
       region: 'NA',
@@ -268,11 +265,44 @@ describe('multi-attribution counting (the deliberate change)', () => {
       touchRow({ lead_id: 'P1', channel_id: 'cB', touch_date: '2026-08-05' }),
     ];
     const q1 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' });
-    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(0);
     expect(q1.rows.find((r) => r.channelId === 'cB')?.cells.mql.actual).toBeNull();
     const q3 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' });
-    expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
+    expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
     expect(q3.rows.find((r) => r.channelId === 'cB')?.cells.mql.actual).toBe(1);
+  });
+
+  it('keeps a first-observed MQL baseline in the CampaignMember touch period', () => {
+    const person = lead({
+      id: 'P1',
+      region: 'NA',
+      current_stage: 'mql',
+      stage_history: [stageHistory('mql', '2026-08-11', {
+        event_kind: 'baseline',
+        edited_by: 'n8n Salesforce daily sync',
+      })],
+    });
+    const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-01-10' })];
+    const q1 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' });
+    const q3 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' });
+    expect(q1.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
+    expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
+  });
+
+  it('treats the original untyped n8n baseline as a baseline, not an Aug transition', () => {
+    const person = lead({
+      id: 'P1',
+      region: 'NA',
+      current_stage: 'mql',
+      stage_history: [stageHistory('mql', '2026-08-11', {
+        edited_by: 'n8n Salesforce daily sync',
+      })],
+    });
+    const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-02-10' })];
+    expect(computeGrid({ ...base([person], touches), year: 2026, filter: 'Q1' })
+      .rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
+    expect(computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' })
+      .rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
   });
 
   it('counts a person observed at MQL even when historical transition timing is unavailable', () => {
@@ -322,10 +352,11 @@ describe('multi-attribution counting (the deliberate change)', () => {
     });
     const touches = [touchRow({ lead_id: 'P1', channel_id: 'cA', touch_date: '2026-07-01' })];
     expect(mqlEventDates(person)).toEqual(['2026-08-10', '2027-02-01']);
-    // Q3 is the membership cohort and counts this person once.
+    // Q3 is the first witnessed MQL period and counts this person once.
     const q3 = computeGrid({ ...base([person], touches), year: 2026, filter: 'Q3' });
     expect(q3.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBe(1);
-    // A later re-qualification is activity, not a second cohort member.
+    // Persistent achievement means a later re-qualification does not create
+    // a second Data Entry membership.
     const q1_27 = computeGrid({ ...base([person], touches), year: 2027, filter: 'Q1' });
     expect(q1_27.rows.find((r) => r.channelId === 'cA')?.cells.mql.actual).toBeNull();
     const y2026 = computeGrid({ ...base([person], touches), year: 2026, filter: 'year' });

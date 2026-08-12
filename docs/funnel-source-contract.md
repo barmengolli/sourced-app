@@ -1,8 +1,8 @@
 # Funnel cohort, lifecycle, and source-attribution contract
 
-Status: Foundation contract (Bite 4A). Calculation, validation, and
-documentation only. Nothing in this document changes visible dashboard
-behavior yet; the implementing modules are not wired into any page.
+Status: Evolved contract. The Data Entry grid now uses stage activity while
+the Conversion panel follows explicit cohorts; these two questions are never
+calculated by dividing the same visible totals.
 
 Implementing modules:
 
@@ -10,6 +10,8 @@ Implementing modules:
   deal uniqueness, HPP-anchored deal cohorts, cohort comparison.
 - `src/lib/campaignAttribution.ts`: touch dedupe, primary-source resolution,
   campaign influence.
+- `src/lib/funnelConversionCohorts.ts`: the live, explicitly followed cohorts
+  used by the Data Entry conversion panel.
 
 Both are pure: every calculation takes an explicit `asOf` date, nothing reads
 the clock, and results carry explicit states (`complete`, `incomplete`,
@@ -60,6 +62,12 @@ A surface must state which model it uses. A Q2 lead that becomes MQL in Q3 is
 a Q2-cohort MQL, a Q3-activity transition, and a snapshot MQL as of any date
 after the transition. All three statements are true at once; they answer
 different questions.
+
+The Data Entry table is the activity surface: it renders Lead in Q2 and MQL in
+Q3. Its Conversion panel is the cohort surface: Lead-to-MQL follows selected-
+period CampaignMember Leads forward, MQL-to-HPP dedupes exact Salesforce
+Account IDs, and HPP-to-later stages follows selected-period HPP opportunities
+through the reversible current-qualified projection.
 
 ## 3. Acquisition cohort progression
 

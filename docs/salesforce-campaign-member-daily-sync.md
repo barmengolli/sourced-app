@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the simple production path for Lead and MQL cohort reporting:
+This is the simple production path for Lead and MQL reporting:
 
 1. Read every current Salesforce CampaignMember under the approved parent
    campaigns.
@@ -11,14 +11,16 @@ This is the simple production path for Lead and MQL cohort reporting:
 4. Run daily at 11:50 PM in `America/Denver`.
 
 It does not use Salesforce lifecycle history and it does not calculate
-velocity. The reporting rule is acquisition cohort math:
+velocity. It preserves both membership and observed stage evidence:
 
 - every eligible CampaignMember counts once as Lead in that campaign;
-- if the person is observed as MQL, that same membership also counts once as
-  MQL;
+- if the first observation is already MQL, that membership has a baseline MQL
+  on the membership date;
+- a later witnessed Lead-to-MQL change places MQL activity in the observation
+  period while preserving the earlier Lead count;
 - becoming MQL never removes the Lead count;
 - a person first seen as MQL on the nightly run still produces Lead = 1 and
-  MQL = 1;
+  MQL = 1 in the membership period;
 - one person in several campaigns counts once in each campaign, by design.
 
 The membership is always attributed to the Salesforce child campaign. The
@@ -90,6 +92,12 @@ source total = eligible + skipped must always reconcile.
   `scripts/build-salesforce-campaign-member-daily-workflow.mjs`
 - Applied database function:
   `migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql`
+- Pending Account-ID and lifecycle-provenance extension:
+  `migrations/2026-08-12_funnel_account_identity_and_lifecycle_provenance.sql`
+
+The generated artifact now targets the versioned v2 function. Do not replace
+the active production workflow until that pending migration is applied and
+its permissions are verified.
 
 The generated workflow is disabled, has no credentials, has no pinned data,
 and starts in `dry_run` mode. The apply path requires both `MODE = 'apply'`
@@ -168,6 +176,8 @@ transaction. An error rolls back the batch. An exact rerun is idempotent:
 - first-touch channel and date move only to an earlier source touch unless
   locked;
 - MQL evidence is appended once and never erased by a later Lead snapshot;
+- versioned v2 stores exact Contact AccountId / converted Lead AccountId and
+  labels MQL evidence as baseline or transition instead of guessing;
 - a real membership supersedes a backfill seed in the same channel family.
 - an authoritative n8n membership supersedes a legacy ID-less `import` touch
   for the same canonical person and exact child channel. This prevention is

@@ -7,6 +7,7 @@ function record(over: Record<string, unknown> = {}) {
   return {
     Id: 'SYNTH-OPP-DAILY-1',
     Name: 'Synthetic Daily Opportunity',
+    AccountId: '001000000000001AAA',
     RecordType: { DeveloperName: 'High_Potential_Prospect', Name: 'HPP' },
     StageName: 'Qualification',
     IsClosed: false,
@@ -44,6 +45,7 @@ describe('Opportunity daily runtime', () => {
       amount: 1,
       saas_revenue: 2,
       saas_revenue_usd: 3,
+      account_id: '001000000000001AAA',
       market: 'Synthetic Market',
       suggested_bdr_name: 'Dave Cummins',
     });

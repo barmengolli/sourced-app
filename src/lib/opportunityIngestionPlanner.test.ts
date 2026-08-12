@@ -507,6 +507,7 @@ describe('serialization boundary (hardening)', () => {
   it('round-trips a synthetic record into the full RPC payload without loss or leakage of excluded records', () => {
     const included = opp({
       Id: 'SYNTH-OPP-RT1',
+      AccountId: '001000000000001AAA',
       Existing_Customer_or_New_Business__c: 'New Project',
       Sales_Development_Rep__c: 'SYNTH-USER-SDR1',
       CreatedById: 'SYNTH-USER-CREATOR',
@@ -529,6 +530,7 @@ describe('serialization boundary (hardening)', () => {
     expect(payload.p_snapshots).toHaveLength(1);
     const snap = payload.p_snapshots[0];
     expect(snap.sf_opportunity_id).toBe('SYNTH-OPP-RT1');
+    expect(snap.account_id).toBe('001000000000001AAA');
     expect(snap.normalized_record_type_state).toBe('hpp');
     expect(snap.is_closed).toBe(false);
     expect(snap.is_won).toBe(false);

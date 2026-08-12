@@ -39,6 +39,7 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(query).toContain("RecordType.DeveloperName IN ('High_Potential_Prospect','Leads','Licensing')");
     expect(query).toContain("Existing_Customer_or_New_Business__c = 'New Project'");
     expect(query).toContain('CreatedById, CreatedBy.Name');
+    expect(query).toContain('AccountId, Account.Name');
     for (const field of ['Market__c', 'Commercial_Region__c', 'GTM_Cube__c', 'Amount',
       'SaaS_Revenue__c', 'SaaS_Revenue_USD__c']) {
       expect(query).toContain(field);
@@ -77,7 +78,7 @@ describe('Salesforce Opportunity daily workflow', () => {
   it('uses native credentialed nodes with no embedded credentials or production URL', () => {
     expect(byName('READ: 2025-2026 New Project opportunities').type).toBe('n8n-nodes-base.salesforce');
     expect(byName('READ: protected opportunity state').parameters.genericAuthType).toBe('httpHeaderAuth');
-    expect(byName('APPLY: opportunity staging v2').parameters.genericAuthType).toBe('httpHeaderAuth');
+    expect(byName('APPLY: opportunity staging v3').parameters.genericAuthType).toBe('httpHeaderAuth');
     expect(workflow.nodes.every((node) => node.credentials === undefined)).toBe(true);
     const raw = JSON.stringify(workflow);
     expect(raw).toContain('PASTE_PROJECT_REF_HERE');
@@ -85,6 +86,9 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(raw).not.toMatch(/rsyjxtuatrwtqajjkgvd/);
     const config = String(byName('CONFIG: closed by default').parameters.jsCode);
     expect(config).toContain('[a-z0-9-]+\\.supabase\\.co$');
+    expect(JSON.stringify(workflow)).toContain('sf_apply_opportunity_ingestion_v3');
+    expect(String(byName('VERIFY: apply result').parameters.jsCode))
+      .toContain('result.contract_version !== 3');
   });
 
   it('emits executable configuration code and accepts a valid project URL', () => {

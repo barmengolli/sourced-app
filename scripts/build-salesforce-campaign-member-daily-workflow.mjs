@@ -88,9 +88,9 @@ const ids = Object.keys(parentById).sort();
 const query = [
   'SELECT Id, CreatedDate, SystemModstamp, CampaignId, Campaign.Name, Campaign.ParentId,',
   'ContactId, LeadId, Contact.Email, Contact.FirstName, Contact.LastName,',
-  'Contact.Title, Contact.Account.Name, Contact.LeadSource, Contact.MailingCountry,',
+  'Contact.Title, Contact.AccountId, Contact.Account.Name, Contact.LeadSource, Contact.MailingCountry,',
   'Contact.Hubspot_lead_lifecycle__c, Lead.Email, Lead.FirstName, Lead.LastName,',
-  'Lead.Title, Lead.Company, Lead.LeadSource, Lead.Country,',
+  'Lead.Title, Lead.Company, Lead.ConvertedAccountId, Lead.LeadSource, Lead.Country,',
   'Lead.Hubspot_lead_lifecycle__c',
   
   'FROM CampaignMember',
@@ -160,6 +160,7 @@ for (const item of sourceItems) {
   const subCampaign = clean(get(source, 'Campaign.Name'));
   const contactId = clean(get(source, 'ContactId')) || null;
   const leadId = clean(get(source, 'LeadId')) || null;
+  const accountId = clean(get(source, 'Contact.AccountId', 'Lead.ConvertedAccountId')) || null;
   const email = clean(get(source, 'Contact.Email', 'Lead.Email')).toLowerCase();
   const touchDate = dateOnly(get(source, 'CreatedDate'));
 
@@ -167,7 +168,7 @@ for (const item of sourceItems) {
   if (!campaignId || !parentCampaign || !subCampaign) { skipped.missing_campaign_id += 1; continue; }
   if (!touchDate) { skipped.missing_touch_date += 1; continue; }
   if (!contactId && !leadId) { skipped.missing_identity += 1; continue; }
-  if (!sfid(memberId) || !sfid(campaignId) || (contactId && !sfid(contactId)) || (leadId && !sfid(leadId))) {
+  if (!sfid(memberId) || !sfid(campaignId) || (contactId && !sfid(contactId)) || (leadId && !sfid(leadId)) || (accountId && !sfid(accountId))) {
     skipped.malformed_id += 1; continue;
   }
   if (!email) { skipped.missing_email += 1; continue; }
@@ -210,7 +211,8 @@ for (const item of sourceItems) {
     lifecycle_label: lifecycle,
     current_stage: currentStage,
     sfdc_contact_id: contactId,
-    sfdc_lead_id: leadId
+    sfdc_lead_id: leadId,
+    sfdc_account_id: accountId
   });
 }
 
@@ -340,7 +342,7 @@ export function buildWorkflow() {
     }),
     node('apply-rpc', 'APPLY: campaign members to Sourced', 'n8n-nodes-base.httpRequest', 4.4, [1800, -100], {
       method: 'POST',
-      url: "={{ $('Normalize, validate, and reconcile').first().json._private_supabase_url + '/rest/v1/rpc/sourced_apply_sfdc_campaign_members' }}",
+      url: "={{ $('Normalize, validate, and reconcile').first().json._private_supabase_url + '/rest/v1/rpc/sourced_apply_sfdc_campaign_members_v2' }}",
       authentication: 'genericCredentialType',
       genericAuthType: 'httpHeaderAuth',
       sendBody: true,

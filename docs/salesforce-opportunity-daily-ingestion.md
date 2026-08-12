@@ -1,8 +1,10 @@
 # Salesforce Opportunity daily ingestion
 
 Status: migration **APPLIED on 2026-08-12** and permissions verified. The
-initial production staging apply completed on 2026-08-12; the generated n8n
-workflow is not yet published for its daily schedule.
+initial production staging apply completed on 2026-08-12 and the v2 workflow
+is active. Exact Account-ID support is prepared in a separate pending v3
+migration; the active workflow remains authoritative until that migration is
+deliberately applied and verified.
 
 ## Verified initial production staging
 
@@ -41,6 +43,9 @@ stored separately as `market_override`, `commercial_region_override`,
 future live review API must resolve each field as `override ?? source`.
 Ingestion never clears or overwrites an override.
 
+The pending v3 contract also persists exact Salesforce `AccountId`. That ID,
+not the editable account name, is the only permitted MQL-account-to-HPP join.
+
 ## Review and attribution
 
 Every eligible Opportunity enters the protected review staging ledger. Creator,
@@ -71,6 +76,10 @@ Generated artifact: `src/generated/salesforceOpportunityDaily.workflow.json`.
   confirmation phrase, plus successful reconciliation.
 - The dry-run terminal emits aggregate diagnostics only and is structurally
   separate from the apply RPC.
+- The regenerated artifact targets v3 and must not replace the active v2
+  workflow until
+  `2026-08-12_funnel_account_identity_and_lifecycle_provenance.sql` is applied
+  and its restricted permissions are verified.
 
 No Google Sheet is used here. The protected `sf_opportunity_*` staging ledger
 is the QA/review layer and has stronger stable IDs, retry protection, review

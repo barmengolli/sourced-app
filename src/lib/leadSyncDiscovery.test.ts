@@ -1005,7 +1005,10 @@ describe('generated local evaluator (external module resolution)', () => {
   const EVALUATOR = '/Users/barmengolli/Downloads/4g1-local-evaluator.mjs';
   const repoRoot = process.cwd();
 
-  const evaluatorExists = (() => {
+  // The evaluator intentionally lives outside the repository and can contain
+  // private exports. Keep normal local/CI verification deterministic; these
+  // integration checks run only when a developer explicitly opts in.
+  const evaluatorExists = process.env.RUN_PRIVATE_4G1_EVALUATOR_TESTS === '1' && (() => {
     try {
       readFileSync(EVALUATOR, 'utf8');
       return true;
@@ -1350,7 +1353,7 @@ describe('unmeasured metrics are disclosed, never implied as zero', () => {
 describe('generated evaluator: STAGE_VALUE_MAP validation', () => {
   const EVALUATOR = '/Users/barmengolli/Downloads/4g1-local-evaluator.mjs';
   const repoRoot = process.cwd();
-  const evaluatorExists = (() => {
+  const evaluatorExists = process.env.RUN_PRIVATE_4G1_EVALUATOR_TESTS === '1' && (() => {
     try {
       readFileSync(EVALUATOR, 'utf8');
       return true;

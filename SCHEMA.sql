@@ -44,6 +44,10 @@ CREATE TABLE leads (
   -- External system IDs
   sfdc_lead_id TEXT,
   sfdc_contact_id TEXT,
+  -- Exact Account identity for account-level MQL-to-HPP cohort reporting.
+  -- Contact.AccountId or a converted Lead's ConvertedAccountId; never
+  -- inferred from the editable account name.
+  sfdc_account_id TEXT,
   hubspot_contact_id TEXT,
 
   -- Person fields
@@ -93,6 +97,7 @@ CREATE TABLE leads (
 
 CREATE INDEX idx_leads_email ON leads(email);
 CREATE INDEX idx_leads_account ON leads(account);
+CREATE INDEX idx_leads_sfdc_account_id ON leads(sfdc_account_id);
 CREATE INDEX idx_leads_marketing_sourced_date ON leads(marketing_sourced_date);
 CREATE INDEX idx_leads_current_stage ON leads(current_stage);
 CREATE INDEX idx_leads_source_channel ON leads(source_channel_id);
@@ -117,6 +122,9 @@ CREATE TABLE attributions (
 
   label TEXT,            -- Deal name, e.g. "Acme Corp"
   account TEXT,
+  -- Exact Salesforce Account identity for account-level conversion cohorts.
+  -- The editable account name above remains display-only.
+  sfdc_account_id TEXT,
   amount NUMERIC(12,2),
   sf_link TEXT,
   -- Region: NA / EMEA / APAC / LATAM / Other. Manually entered in the
@@ -146,6 +154,7 @@ CREATE TABLE attributions (
 
 CREATE INDEX idx_attributions_deal ON attributions(deal_id);
 CREATE INDEX idx_attributions_lead ON attributions(lead_id);
+CREATE INDEX idx_attributions_sfdc_account_id ON attributions(sfdc_account_id);
 CREATE INDEX idx_attributions_stage ON attributions(stage_key);
 CREATE INDEX idx_attributions_period ON attributions(year, period_index);
 CREATE INDEX idx_attributions_channel ON attributions(channel_id);
@@ -603,6 +612,7 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
   record_type_label TEXT,
   stage_name TEXT,
   opportunity_name TEXT,
+  account_id TEXT,
   account_name TEXT,
   amount NUMERIC(14, 2),
   amount_currency TEXT,
@@ -652,6 +662,8 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
 
 CREATE INDEX IF NOT EXISTS idx_sf_opportunities_modified
   ON sf_opportunities (sf_last_modified_at);
+CREATE INDEX IF NOT EXISTS idx_sf_opportunities_account_id
+  ON sf_opportunities (account_id);
 
 -- =============================================================
 -- 3. Append-only history events

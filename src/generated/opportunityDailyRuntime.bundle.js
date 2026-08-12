@@ -1008,6 +1008,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			is_closed: typeof rec.IsClosed === "boolean" ? rec.IsClosed : null,
 			is_won: typeof rec.IsWon === "boolean" ? rec.IsWon : null,
 			opportunity_name: str(rec.Name),
+			account_id: str(rec.AccountId),
 			account_name: str(rec.Account?.Name),
 			amount: num(rec.Amount),
 			amount_currency: str(rec.CurrencyIsoCode),

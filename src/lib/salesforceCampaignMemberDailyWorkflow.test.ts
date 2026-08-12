@@ -52,6 +52,7 @@ function sourceRow(overrides: Record<string, unknown> = {}): Record<string, unkn
     'Contact.FirstName': 'Synthetic',
     'Contact.LastName': 'Fixture',
     'Contact.Title': 'Tester',
+    'Contact.AccountId': '001000000000001AAA',
     'Contact.Account.Name': 'Example Test',
     'Contact.LeadSource': 'Content Syndication',
     'Contact.MailingCountry': 'United States',
@@ -81,6 +82,7 @@ describe('Salesforce CampaignMember daily workflow', () => {
       current_stage: 'mql',
       campaign_member_id: '00v000000000001AAA',
       touch_date: '2026-08-11',
+      sfdc_account_id: '001000000000001AAA',
     });
   });
 
@@ -147,6 +149,8 @@ describe('Salesforce CampaignMember daily workflow', () => {
     const code = String(queryBuilder?.parameters.jsCode ?? '');
     expect(code).toContain('Contact.Hubspot_lead_lifecycle__c');
     expect(code).toContain('Lead.Hubspot_lead_lifecycle__c');
+    expect(code).toContain('Contact.AccountId');
+    expect(code).toContain('Lead.ConvertedAccountId');
     expect(code).not.toContain('Hubspot_Lifecycle_Stage__c');
     expect(code).not.toContain('LIMIT 5000');
     expect(code).not.toContain('minus({days: 2})');
@@ -169,6 +173,8 @@ describe('Salesforce CampaignMember daily workflow', () => {
     const query = String(result.json.member_query);
     expect(query).toContain('FROM CampaignMember WHERE Campaign.ParentId IN');
     expect(query).toContain('Contact.Hubspot_lead_lifecycle__c');
+    expect(query).toContain('Contact.AccountId');
+    expect(query).toContain('Lead.ConvertedAccountId');
     expect(query).not.toContain('LIMIT');
     expect(Object.keys(result.json.parent_by_id as object)).toHaveLength(5);
   });
@@ -186,6 +192,8 @@ describe('Salesforce CampaignMember daily workflow', () => {
     expect(workflow.connections['IF: exact apply authorization'].main[1][0].node).toBe(
       'DRY RUN: aggregate reconciliation',
     );
+    const apply = workflow.nodes.find((node) => node.name === 'APPLY: campaign members to Sourced');
+    expect(String(apply?.parameters.url)).toContain('sourced_apply_sfdc_campaign_members_v2');
   });
 
   it('has a generated artifact identical to the builder output', () => {
@@ -233,5 +241,39 @@ describe('sourced_apply_sfdc_campaign_members migration', () => {
     expect(sql).toContain('FROM anon');
     expect(sql).toContain('FROM authenticated');
     expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.sourced_apply_sfdc_campaign_members(JSONB) TO service_role');
+  });
+});
+
+describe('account identity and lifecycle provenance migration', () => {
+  const sql = readFileSync(
+    resolve('migrations/2026-08-12_funnel_account_identity_and_lifecycle_provenance.sql'),
+    'utf8',
+  );
+
+  it('is pending, forward-only, and adds exact account identities', () => {
+    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS sfdc_account_id TEXT');
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS account_id TEXT');
+    expect(sql).not.toMatch(/DROP\s+(TABLE|COLUMN)/i);
+  });
+
+  it('records baseline and transition provenance without replacing the proven apply', () => {
+    expect(sql).toContain('public.sourced_apply_sfdc_campaign_members(p_rows)');
+    expect(sql).toContain("THEN 'transition' ELSE 'baseline'");
+    expect(sql).toContain("'event_kind', 'baseline'");
+    expect(sql).toContain("AT TIME ZONE 'America/Denver'");
+    expect(sql).toContain('existing person carries a different Salesforce Account identity');
+  });
+
+  it('keeps both versioned boundaries service-role only', () => {
+    for (const fn of [
+      'sourced_apply_sfdc_campaign_members_v2(JSONB)',
+      'sf_apply_opportunity_ingestion_v3(JSONB, JSONB, JSONB, JSONB)',
+    ]) {
+      expect(sql).toContain(`REVOKE ALL ON FUNCTION public.${fn} FROM PUBLIC`);
+      expect(sql).toContain(`REVOKE ALL ON FUNCTION public.${fn} FROM anon`);
+      expect(sql).toContain(`REVOKE ALL ON FUNCTION public.${fn} FROM authenticated`);
+      expect(sql).toContain(`GRANT EXECUTE ON FUNCTION public.${fn} TO service_role`);
+    }
   });
 });

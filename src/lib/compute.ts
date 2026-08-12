@@ -139,13 +139,36 @@ export function mqlEventDates(lead: Lead): string[] {
   return [...dates].sort();
 }
 
-// Data Entry is an acquisition-cohort surface. Once a person has been
-// observed at MQL, that person remains an MQL member of every campaign-touch
-// cohort they belong to. The transition date is intentionally irrelevant
-// here; activity surfaces continue to use mqlEventDates/firstMqlDate.
 export function hasReachedMql(lead: Lead): boolean {
   if (lead.current_stage === 'mql') return true;
   return (lead.stage_history ?? []).some((entry) => entry.stage === 'mql');
+}
+
+// Data Entry is a stage-activity surface. A witnessed MQL transition belongs
+// to the period when it occurred, while a first observation that was already
+// MQL is a baseline and therefore stays with the CampaignMember touch period.
+// If a person joins another campaign after qualifying, that later membership
+// cannot become MQL before it exists, so its activity date is the later touch.
+//
+// The 2026-08-11 production baseline predates event_kind. Those rows are
+// recognizable by their ingestion author and are conservatively treated as
+// baselines instead of fabricating thousands of Aug-2026 transitions.
+export function mqlActivityDateForTouch(
+  lead: Lead,
+  touchDate: string | null | undefined,
+): string | null {
+  if (!touchDate || !hasReachedMql(lead)) return null;
+  const events = (lead.stage_history ?? [])
+    .filter((entry) => entry.stage === 'mql' && Boolean(entry.entered_at))
+    .slice()
+    .sort((a, b) => a.entered_at.localeCompare(b.entered_at));
+  const first = events[0];
+  // A current MQL with no retained event date is an observed baseline.
+  if (!first) return touchDate;
+  const legacyDailyBaseline =
+    first.event_kind === undefined && first.edited_by === 'n8n Salesforce daily sync';
+  if (first.event_kind === 'baseline' || legacyDailyBaseline) return touchDate;
+  return first.entered_at > touchDate ? first.entered_at : touchDate;
 }
 
 export function computeGrid(input: ComputeInput): ComputedGrid {
@@ -182,15 +205,11 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   const attribKey = (cid: string, y: number, p: number, s: string): string =>
     `${cid}\x1f${y}\x1f${p}\x1f${s}`;
 
-  // 2. Acquisition-cohort lead pass. Every campaign membership is anchored
-  //    to its own touch_date. Lead actual is the number of memberships in the
-  //    selected cohort; MQL actual is the subset of those same memberships
-  //    whose person has ever been observed at MQL. Becoming MQL never removes
-  //    a Lead: 20 memberships with 10 MQLs render Leads=20, MQLs=10.
-  //
-  //    The MQL transition date does not move the person into a later cohort.
-  //    A Q1 membership first observed at MQL in Q3 remains a Q1-cohort MQL.
-  //    Month/week activity surfaces still bucket MQL events by entered_at.
+  // 2. Stage-activity lead pass. Every CampaignMember counts as Lead in its
+  //    touch period. MQL counts when the membership first has MQL evidence:
+  //    at a witnessed transition date, or at the membership date for an
+  //    already-MQL baseline. Lead is persistent, so qualifying never removes
+  //    the earlier Lead count.
   //
   //    The manual fallback below dedupes against sourceCoverage (built from raw
   //    records before filtering), not against what these loops land, so a
@@ -215,23 +234,29 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
     const touchLead = leadById.get(t.lead_id);
     if (!touchLead) continue; // orphan in-flight row; FK cascade prevents at rest
     if (!matchesRegionFilter(touchLead.region, regions)) continue;
-    const bucket = quarterOfIsoDate(t.touch_date);
-    if (!bucket || !matchesPeriod(bucket, year, filter)) continue;
-    if (!t.channel_id) {
-      unassignedLeadCount += 1;
-      continue;
-    }
-    const row = rowMap.get(t.channel_id);
-    if (row) {
-      row.cells.lead.actual = (row.cells.lead.actual ?? 0) + 1;
-      // A touched cohort with no qualifying members is a proven zero, not
-      // missing data. Initializing here keeps 0 distinct from null.
-      row.cells.mql.actual = row.cells.mql.actual ?? 0;
-      if (hasReachedMql(touchLead)) {
-        row.cells.mql.actual += 1;
-        uniqueMqlIds.add(t.lead_id);
+    const leadBucket = quarterOfIsoDate(t.touch_date);
+    if (leadBucket && matchesPeriod(leadBucket, year, filter)) {
+      if (!t.channel_id) {
+        unassignedLeadCount += 1;
+      } else {
+        const row = rowMap.get(t.channel_id);
+        if (row) {
+          row.cells.lead.actual = (row.cells.lead.actual ?? 0) + 1;
+          // Evaluating a source-backed membership proves the period's MQL
+          // activity can be zero; missing and zero stay distinct.
+          row.cells.mql.actual = row.cells.mql.actual ?? 0;
+          uniqueLeadIds.add(t.lead_id);
+        }
       }
-      uniqueLeadIds.add(t.lead_id);
+    }
+
+    const mqlDate = mqlActivityDateForTouch(touchLead, t.touch_date);
+    const mqlBucket = quarterOfIsoDate(mqlDate);
+    if (!t.channel_id || !mqlBucket || !matchesPeriod(mqlBucket, year, filter)) continue;
+    const mqlRow = rowMap.get(t.channel_id);
+    if (mqlRow) {
+      mqlRow.cells.mql.actual = (mqlRow.cells.mql.actual ?? 0) + 1;
+      uniqueMqlIds.add(t.lead_id);
     }
   }
 
@@ -246,59 +271,17 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   //      rows AND no leads, so the dedupe is a no-op in that case and
   //      the fallback row supplies the count.
 
-  // Strict-cohort rule (non-HPP deal stages): an Opp / Pursuit /
-  // closeWon / closeLost row only counts toward an (channel, period)
-  // cell when the same deal's HPP transition was ALSO in the period.
-  // This makes every conversion rate ≤ 100% under the standard funnel
-  // path and keeps the grid coherent for cohort math. Cross-period
-  // progressions (HPP in 2025-Q4, Opp in 2026-Q1) are intentionally
-  // invisible from the grid; users see them via the Opportunity
-  // Influence year tabs.
-  //
-  // hppPeriodsByDeal: deal_id → list of HPP (year, quarter) buckets.
-  // A deal typically has at most one HPP row, but we accept multiple
-  // defensively (re-source edge case) and treat any match as "HPP in
-  // period". Region filter on the HPP row applies — a 2025 HPP for a
-  // region the user has toggled off doesn't unlock downstream stages
-  // for that deal under the active filter.
-  const hppPeriodsByDeal = new Map<
-    string,
-    Array<{ year: number; quarter: PeriodIndex }>
-  >();
-  for (const a of attributions) {
-    if (a.stage_key !== 'hpp') continue;
-    if (!a.deal_id) continue;
-    if (!matchesRegionFilter(a.region, regions)) continue;
-    const arr = hppPeriodsByDeal.get(a.deal_id) ?? [];
-    arr.push({ year: a.year, quarter: a.period_index });
-    hppPeriodsByDeal.set(a.deal_id, arr);
-  }
-  const dealHppInPeriod = (dealId: string | null | undefined): boolean => {
-    if (!dealId) return false;
-    const buckets = hppPeriodsByDeal.get(dealId);
-    if (!buckets) return false;
-    for (const b of buckets) {
-      if (matchesPeriod(b, year, filter)) return true;
-    }
-    return false;
-  };
-
   // Count attributions per (channel, year, period, stage). One attribution row
-  // contributes 1 to its leaf channel's stage cell. Channel rollup to parents
-  // happens later in step 5. Region filter applied per attribution.
+  // contributes 1 to its own stage-entry period. This is stage activity, not
+  // an HPP-entry cohort: a Q2 HPP that reaches Opp in Q3 is HPP=1 in Q2 and
+  // Opp=1 in Q3. Regressions are handled by the current-qualified projection,
+  // which removes higher-stage attribution rows while the protected event
+  // ledger retains the raw movement history.
   for (const a of attributions) {
     if (!a.channel_id) continue;
     if (!matchesRegionFilter(a.region, regions)) continue;
     const bucket = { year: a.year, quarter: a.period_index };
     if (!matchesPeriod(bucket, year, filter)) continue;
-    // Strict-cohort: non-HPP deal stages require the deal's HPP to
-    // also fall in the selected period. HPP rows themselves are
-    // exempt (they ARE the cohort anchor) — same with rows that lack
-    // a deal_id (orphan singletons can't be cohort-joined, so we
-    // continue to include them under the bucket they were entered).
-    if (a.stage_key !== 'hpp' && a.deal_id && !dealHppInPeriod(a.deal_id)) {
-      continue;
-    }
     const row = rowMap.get(a.channel_id);
     if (!row) continue;
     const cell = row.cells[a.stage_key];
@@ -321,9 +304,9 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
   // empty source period is indistinguishable from an unimported one. Presence of
   // any eligible source record is the coverage signal for this cleanup.
   const sourceCoverage = new Set<string>();
-  // Lead/MQL coverage comes from the same dated cohort touches (pre-region,
-  // per stored quarter). A cohort touch proves both the Lead denominator and
-  // the MQL numerator were evaluated, even when the MQL result is zero.
+  // Lead coverage comes from CampaignMember dates. MQL coverage includes both
+  // the evaluated Lead period (which can prove zero MQL activity) and the
+  // effective MQL activity period for memberships that qualified later.
   for (const t of touches) {
     if (!t.channel_id) continue;
     const tb = quarterOfIsoDate(t.touch_date);
@@ -331,6 +314,11 @@ export function computeGrid(input: ComputeInput): ComputedGrid {
       sourceCoverage.add(attribKey(t.channel_id, tb.year, tb.quarter, 'lead'));
       sourceCoverage.add(attribKey(t.channel_id, tb.year, tb.quarter, 'mql'));
     }
+    const touchLead = leadById.get(t.lead_id);
+    const mb = touchLead
+      ? quarterOfIsoDate(mqlActivityDateForTouch(touchLead, t.touch_date))
+      : null;
+    if (mb) sourceCoverage.add(attribKey(t.channel_id, mb.year, mb.quarter, 'mql'));
   }
   for (const a of attributions) {
     if (!a.channel_id) continue;
