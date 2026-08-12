@@ -228,7 +228,9 @@ export function buildSnapshotPayload(rec: SalesforceOpportunityRecord): Snapshot
     close_date: str(rec.CloseDate),
     market: str(rec.Market__c),
     commercial_region: str(rec.Commercial_Region__c),
-    opportunity_owner: str(rec.OwnerId),
+    // Human-facing review evidence uses the Salesforce owner name. OwnerId
+    // remains a transport concern and must not leak into the review UI.
+    opportunity_owner: str(rec.Owner?.Name),
     primary_campaign_source: str(rec.CampaignId),
     customer_expansion_raw: str(rec.Existing_Customer_or_New_Business__c),
     sales_development_rep_user_id: str(rec.Sales_Development_Rep__c),

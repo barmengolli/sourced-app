@@ -1017,7 +1017,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			close_date: str(rec.CloseDate),
 			market: str(rec.Market__c),
 			commercial_region: str(rec.Commercial_Region__c),
-			opportunity_owner: str(rec.OwnerId),
+			opportunity_owner: str(rec.Owner?.Name),
 			primary_campaign_source: str(rec.CampaignId),
 			customer_expansion_raw: str(rec.Existing_Customer_or_New_Business__c),
 			sales_development_rep_user_id: str(rec.Sales_Development_Rep__c),

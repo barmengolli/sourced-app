@@ -11,7 +11,7 @@ const CONFIRM = 'APPLY 2025-2026 NEW PROJECT OPPORTUNITIES';
 const SOQL = [
   'SELECT Id, Name, AccountId, Account.Name, RecordType.DeveloperName, RecordType.Name,',
   'StageName, IsClosed, IsWon, CreatedDate, LastModifiedDate, SystemModstamp,',
-  'Amount, CurrencyIsoCode, CloseDate, OwnerId, CampaignId, CreatedById, CreatedBy.Name,',
+  'Amount, CurrencyIsoCode, CloseDate, OwnerId, Owner.Name, CampaignId, CreatedById, CreatedBy.Name,',
   'Market__c, Commercial_Region__c, GTM_Cube__c,',
   'Existing_Customer_or_New_Business__c, SaaS_Revenue__c, SaaS_Revenue_USD__c',
   'FROM Opportunity',

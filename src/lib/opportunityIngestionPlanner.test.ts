@@ -415,6 +415,15 @@ describe('plan safety invariants', () => {
 });
 
 describe('fingerprints and stale protection (hardening)', () => {
+  it('stores the human-readable Salesforce owner name instead of the user id', () => {
+    const payload = buildSnapshotPayload(opp({
+      OwnerId: 'SYNTH-USER-OWNER-ID',
+      Owner: { Name: 'Synthetic Opportunity Owner' },
+    }));
+    expect(payload.opportunity_owner).toBe('Synthetic Opportunity Owner');
+    expect(payload.opportunity_owner).not.toContain('SYNTH-USER-OWNER-ID');
+  });
+
   it('SHA-256 fingerprint covers every staged field and ignores key order', () => {
     const a = buildSnapshotPayload(opp({ Id: 'SYNTH-OPP-F1' }));
     expect(a.content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);

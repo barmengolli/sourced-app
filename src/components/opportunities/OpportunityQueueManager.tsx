@@ -439,6 +439,7 @@ export default function OpportunityQueueManager({
                 <th className="px-3 py-2 font-medium">Owner</th>
                 <th className="px-3 py-2 font-medium">Issues</th>
                 <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -446,7 +447,11 @@ export default function OpportunityQueueManager({
                 <tr
                   key={item.reviewId ?? item.diagnostics.sfOpportunityId}
                   onClick={() => selectItem(item)}
-                  className="border-b border-border last:border-b-0 cursor-pointer hover:bg-muted/40"
+                  aria-selected={item.reviewId === selectedId}
+                  className={
+                    'border-b border-border last:border-b-0 cursor-pointer hover:bg-muted/40 ' +
+                    (item.reviewId === selectedId ? 'bg-muted/60' : '')
+                  }
                 >
                   <td className="px-3 py-2 text-charcoal font-medium">{item.opportunityName}</td>
                   <td className="px-3 py-2">{item.accountName ?? 'n/a'}</td>
@@ -479,6 +484,18 @@ export default function OpportunityQueueManager({
                   <td className="px-3 py-2">
                     {item.review ? REVIEW_STATE_LABELS[item.review.reviewState] : 'n/a'}
                   </td>
+                  <td className="px-3 py-2">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        selectItem(item);
+                      }}
+                      className={chipBase + chipOff + ' whitespace-nowrap'}
+                    >
+                      Review / edit
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -487,10 +504,18 @@ export default function OpportunityQueueManager({
       )}
 
       {selected && selected.review && (
-        <section className="border border-border rounded bg-bg p-4 space-y-3">
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-charcoal/40 p-4 sm:p-8">
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="opportunity-review-title"
+          className="mx-auto max-w-4xl border border-border rounded bg-bg p-4 shadow-xl space-y-3"
+        >
           <header className="flex items-start justify-between gap-3">
             <div>
-              <h2 className="text-sm font-semibold text-charcoal">{selected.opportunityName}</h2>
+              <h2 id="opportunity-review-title" className="text-sm font-semibold text-charcoal">
+                {selected.opportunityName}
+              </h2>
               <p className="text-xs text-slate-muted">
                 {selected.accountName ?? 'No account'} · {selected.recordTypeState.toUpperCase()} ·{' '}
                 {REVIEW_STATE_LABELS[selected.review.reviewState]}
@@ -751,6 +776,7 @@ export default function OpportunityQueueManager({
             <p>Link status: {selected.linkStatus}</p>
           </details>
         </section>
+        </div>
       )}
     </div>
   );
