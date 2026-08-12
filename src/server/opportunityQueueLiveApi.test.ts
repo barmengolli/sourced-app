@@ -103,6 +103,30 @@ describe('Opportunity queue live server boundary', () => {
     expect(JSON.stringify(res.body)).not.toContain('synthetic-service-key');
   });
 
+  it('returns a safe database error reference without leaking raw details', async () => {
+    const { cookie } = await login();
+    rpc.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: '42501',
+        message: 'permission denied for function sf_list_opportunity_reviews',
+        details: 'sensitive source detail',
+      },
+    });
+    const res = response();
+    await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
+
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        message: 'The configured Supabase key does not have service-role access. Reference: 42501',
+      },
+    });
+    expect(JSON.stringify(res.body)).not.toContain('sensitive source detail');
+    expect(JSON.stringify(res.body)).not.toContain('sf_list_opportunity_reviews');
+  });
+
   it('requires CSRF and sends the opaque review identity to the atomic RPC', async () => {
     const { cookie, csrf } = await login();
     const missingCsrf = response();

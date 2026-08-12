@@ -107,6 +107,21 @@ function loginAllowed(req: RequestLike): boolean {
   return current.count <= 10;
 }
 
+function queueReadFailure(error: { code?: string; message?: string }): string {
+  const code = error.code?.trim() || 'UNKNOWN';
+  const message = error.message?.toLowerCase() || '';
+  if (code === '42501') {
+    return 'The configured Supabase key does not have service-role access. Reference: 42501';
+  }
+  if (code === 'PGRST202') {
+    return 'Supabase REST has not loaded the queue function. Reference: PGRST202';
+  }
+  if (code === 'PGRST301' || message.includes('invalid api key') || message.includes('jwt')) {
+    return `The configured Supabase service-role key is invalid. Reference: ${code}`;
+  }
+  return `The review queue could not be loaded. Reference: ${code}`;
+}
+
 export default async function handler(req: RequestLike, res: ResponseLike) {
   if (req.method !== 'POST') return json(res, 405, { ok: false, error: { message: 'Method not allowed' } });
 
@@ -155,7 +170,11 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
   if (operation === 'list') {
     const view = body.view === 'not_selected' ? 'not_selected' : 'attention';
     const { data, error } = await supabase.rpc('sf_list_opportunity_reviews', { p_view: view });
-    if (error) return json(res, 500, { ok: false, error: { message: 'The review queue could not be loaded' } });
+    if (error) {
+      // Expose only a stable error category/code to the authenticated reviewer.
+      // Raw database messages, details, and source values stay server-side.
+      return json(res, 500, { ok: false, error: { message: queueReadFailure(error) } });
+    }
     const items = (Array.isArray(data) ? data : []).map((row) => {
       if (row && typeof row === 'object' && 'sf_list_opportunity_reviews' in row) {
         return (row as { sf_list_opportunity_reviews: unknown }).sf_list_opportunity_reviews;
