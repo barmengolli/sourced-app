@@ -19,6 +19,8 @@ export const APPROVED_PARENT_CAMPAIGNS = [
 export const CONFIRMATION_PHRASE =
   'APPLY APPROVED SALESFORCE CAMPAIGN MEMBERS TO SOURCED';
 
+export const APPLY_BATCH_SIZE = 100;
+
 const CONFIG_CODE = `// This is the only node whose values are edited before activation.
 // Keep MODE at dry_run until the migration is applied and the aggregate
 // reconciliation has been reviewed. Never paste a Supabase key into this node.
@@ -268,13 +270,62 @@ return [{ json: {
   ...summary
 } }];`;
 
-const VERIFY_CODE = `const request = $('Normalize, validate, and reconcile').first().json;
-const response = $input.first().json;
-const result = Array.isArray(response) ? response[0] : response;
-if (!result || Number(result.processed_memberships) !== Number(request.eligible_memberships)) {
+export const BUILD_APPLY_BATCHES_CODE = `const request = $input.first().json;
+const rows = request._private_rows;
+const BATCH_SIZE = ${APPLY_BATCH_SIZE};
+if (request.apply_authorized !== true || !Array.isArray(rows) || rows.length === 0) {
+  throw new Error('APPLY BATCHING FAILED: an authorized non-empty payload is required.');
+}
+const batches = [];
+for (let start = 0; start < rows.length; start += BATCH_SIZE) {
+  const batchRows = rows.slice(start, start + BATCH_SIZE);
+  batches.push({
+    batch_index: batches.length,
+    batch_size: batchRows.length,
+    batch_mql_memberships: batchRows.filter((row) => row.current_stage === 'mql').length,
+    batches_expected: Math.ceil(rows.length / BATCH_SIZE),
+    _private_rows: batchRows
+  });
+}
+if (batches.reduce((sum, batch) => sum + batch.batch_size, 0) !== rows.length) {
+  throw new Error('APPLY BATCHING FAILED: planned rows do not reconcile.');
+}
+return batches.map((batch) => ({ json: batch }));`;
+
+export const VERIFY_CODE = `const request = $('Normalize, validate, and reconcile').first().json;
+const responses = $input.all().map((item) => {
+  const value = item.json;
+  return Array.isArray(value) ? value[0] : value;
+});
+const expectedBatches = Math.ceil(Number(request.eligible_memberships) / ${APPLY_BATCH_SIZE});
+if (responses.length !== expectedBatches) {
+  throw new Error('APPLY VERIFICATION FAILED: completed batch count does not match the plan.');
+}
+const totals = {
+  processed_memberships: 0,
+  mql_memberships: 0,
+  inserted_leads: 0,
+  updated_leads: 0,
+  inserted_touches: 0,
+  updated_touches: 0,
+  backfill_seeds_superseded: 0
+};
+for (const result of responses) {
+  if (!result || result.status !== 'applied' || Number(result.contract_version) !== 2) {
+    throw new Error('APPLY VERIFICATION FAILED: a batch did not confirm the v2 contract.');
+  }
+  for (const key of Object.keys(totals)) {
+    const value = Number(result[key]);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error('APPLY VERIFICATION FAILED: a batch returned an invalid ' + key + '.');
+    }
+    totals[key] += value;
+  }
+}
+if (totals.processed_memberships !== Number(request.eligible_memberships)) {
   throw new Error('APPLY VERIFICATION FAILED: processed membership count does not match the reconciled payload.');
 }
-if (Number(result.mql_memberships) !== Number(request.mql_memberships)) {
+if (totals.mql_memberships !== Number(request.mql_memberships)) {
   throw new Error('APPLY VERIFICATION FAILED: MQL membership count does not match the reconciled payload.');
 }
 return [{ json: {
@@ -289,7 +340,12 @@ return [{ json: {
   distinct_people: request.distinct_people,
   by_parent_campaign: request.by_parent_campaign,
   reconciliation_complete: true,
-  database_result: result
+  database_result: {
+    status: 'applied',
+    contract_version: 2,
+    batches_completed: responses.length,
+    ...totals
+  }
 } }];`;
 
 const node = (id, name, type, typeVersion, position, parameters) => ({
@@ -340,17 +396,25 @@ export function buildWorkflow() {
       },
       options: {},
     }),
-    node('apply-rpc', 'APPLY: campaign members to Sourced', 'n8n-nodes-base.httpRequest', 4.4, [1800, -100], {
+    node('build-apply-batches', 'Build 100-row apply batches', 'n8n-nodes-base.code', 2, [1800, -100], {
+      mode: 'runOnceForAllItems',
+      jsCode: BUILD_APPLY_BATCHES_CODE,
+    }),
+    node('loop-apply-batches', 'Loop apply batches sequentially', 'n8n-nodes-base.splitInBatches', 3, [2060, -100], {
+      batchSize: 1,
+      options: {},
+    }),
+    node('apply-rpc', 'APPLY: campaign members to Sourced', 'n8n-nodes-base.httpRequest', 4.4, [2320, -100], {
       method: 'POST',
       url: "={{ $('Normalize, validate, and reconcile').first().json._private_supabase_url + '/rest/v1/rpc/sourced_apply_sfdc_campaign_members_v2' }}",
       authentication: 'genericCredentialType',
       genericAuthType: 'httpHeaderAuth',
       sendBody: true,
       specifyBody: 'json',
-      jsonBody: "={{ JSON.stringify({ p_rows: $('Normalize, validate, and reconcile').first().json._private_rows }) }}",
+      jsonBody: "={{ JSON.stringify({ p_rows: $json._private_rows }) }}",
       options: {},
     }),
-    node('verify', 'VERIFY: applied counts', 'n8n-nodes-base.code', 2, [2060, -100], {
+    node('verify', 'VERIFY: applied counts', 'n8n-nodes-base.code', 2, [2320, -260], {
       mode: 'runOnceForAllItems',
       jsCode: VERIFY_CODE,
     }),
@@ -373,10 +437,15 @@ export function buildWorkflow() {
       'Query all approved CampaignMembers': { main: [[{ node: 'Normalize, validate, and reconcile', type: 'main', index: 0 }]] },
       'Normalize, validate, and reconcile': { main: [[{ node: 'IF: exact apply authorization', type: 'main', index: 0 }]] },
       'IF: exact apply authorization': { main: [
-        [{ node: 'APPLY: campaign members to Sourced', type: 'main', index: 0 }],
+        [{ node: 'Build 100-row apply batches', type: 'main', index: 0 }],
         [{ node: 'DRY RUN: aggregate reconciliation', type: 'main', index: 0 }],
       ] },
-      'APPLY: campaign members to Sourced': { main: [[{ node: 'VERIFY: applied counts', type: 'main', index: 0 }]] },
+      'Build 100-row apply batches': { main: [[{ node: 'Loop apply batches sequentially', type: 'main', index: 0 }]] },
+      'Loop apply batches sequentially': { main: [
+        [{ node: 'VERIFY: applied counts', type: 'main', index: 0 }],
+        [{ node: 'APPLY: campaign members to Sourced', type: 'main', index: 0 }],
+      ] },
+      'APPLY: campaign members to Sourced': { main: [[{ node: 'Loop apply batches sequentially', type: 'main', index: 0 }]] },
     },
     active: false,
     settings: {

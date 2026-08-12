@@ -10,7 +10,8 @@
 -- The timed-out PostgreSQL statement was canceled atomically; this migration
 -- does not assume that any part of that invocation committed.
 --
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. This migration
+-- changed function code only and did not import or alter business data.
 
 BEGIN;
 

@@ -1,7 +1,10 @@
 export const APPROVED_PARENT_CAMPAIGNS: string[];
 export const CONFIRMATION_PHRASE: string;
+export const APPLY_BATCH_SIZE: number;
+export const BUILD_APPLY_BATCHES_CODE: string;
 export const MEMBER_QUERY_CODE: string;
 export const NORMALIZE_CODE: string;
+export const VERIFY_CODE: string;
 export interface GeneratedWorkflowNode {
   id: string;
   name: string;

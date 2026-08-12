@@ -3,10 +3,13 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  APPLY_BATCH_SIZE,
   APPROVED_PARENT_CAMPAIGNS,
+  BUILD_APPLY_BATCHES_CODE,
   CONFIRMATION_PHRASE,
   MEMBER_QUERY_CODE,
   NORMALIZE_CODE,
+  VERIFY_CODE,
   buildWorkflow,
 } from '../../scripts/build-salesforce-campaign-member-daily-workflow.mjs';
 
@@ -187,13 +190,93 @@ describe('Salesforce CampaignMember daily workflow', () => {
     expect(code).toContain("const CONFIRM = ''");
     expect(code).toContain(CONFIRMATION_PHRASE);
     expect(workflow.connections['IF: exact apply authorization'].main[0][0].node).toBe(
-      'APPLY: campaign members to Sourced',
+      'Build 100-row apply batches',
     );
     expect(workflow.connections['IF: exact apply authorization'].main[1][0].node).toBe(
       'DRY RUN: aggregate reconciliation',
     );
     const apply = workflow.nodes.find((node) => node.name === 'APPLY: campaign members to Sourced');
     expect(String(apply?.parameters.url)).toContain('sourced_apply_sfdc_campaign_members_v2');
+  });
+
+  it('plans finite 100-row batches that reconcile to the authorized payload', () => {
+    expect(APPLY_BATCH_SIZE).toBe(100);
+    const rows = Array.from({ length: 2618 }, (_, index) => ({
+      current_stage: index < 541 ? 'mql' : 'lead',
+      campaign_member_id: `synthetic-${index}`,
+    }));
+    const fn = new Function('$input', BUILD_APPLY_BATCHES_CODE) as (
+      input: { first: () => JsonItem },
+    ) => JsonItem[];
+    const batches = fn({ first: () => ({ json: { apply_authorized: true, _private_rows: rows } }) });
+    expect(batches).toHaveLength(27);
+    expect(batches.slice(0, 26).every((item) => item.json.batch_size === 100)).toBe(true);
+    expect(batches[26].json.batch_size).toBe(18);
+    expect(batches.reduce((sum, item) => sum + Number(item.json.batch_size), 0)).toBe(2618);
+    expect(batches.reduce((sum, item) => sum + Number(item.json.batch_mql_memberships), 0)).toBe(541);
+  });
+
+  it('fails batching closed without both authorization and a payload', () => {
+    const fn = new Function('$input', BUILD_APPLY_BATCHES_CODE) as (
+      input: { first: () => JsonItem },
+    ) => JsonItem[];
+    expect(() => fn({ first: () => ({ json: { apply_authorized: false, _private_rows: [{}] } }) }))
+      .toThrow('authorized non-empty payload');
+    expect(() => fn({ first: () => ({ json: { apply_authorized: true, _private_rows: [] } }) }))
+      .toThrow('authorized non-empty payload');
+  });
+
+  it('serializes apply batches through the loop output and aggregates every v2 response', () => {
+    const workflow = buildWorkflow();
+    expect(workflow.connections['Loop apply batches sequentially'].main[0][0].node).toBe(
+      'VERIFY: applied counts',
+    );
+    expect(workflow.connections['Loop apply batches sequentially'].main[1][0].node).toBe(
+      'APPLY: campaign members to Sourced',
+    );
+    expect(workflow.connections['APPLY: campaign members to Sourced'].main[0][0].node).toBe(
+      'Loop apply batches sequentially',
+    );
+    const apply = workflow.nodes.find((node) => node.name === 'APPLY: campaign members to Sourced');
+    expect(String(apply?.parameters.jsonBody)).toContain('$json._private_rows');
+
+    const request = {
+      source_memberships: 2634,
+      eligible_memberships: 2618,
+      skipped_memberships: 16,
+      skipped_by_reason: { missing_email: 16 },
+      mql_memberships: 541,
+      lead_memberships: 2618,
+      distinct_people: 2573,
+      by_parent_campaign: {},
+    };
+    const responses = Array.from({ length: 27 }, (_, index) => {
+      const processed = index === 26 ? 18 : 100;
+      const mql = index === 26 ? 0 : index < 5 ? 100 : index === 5 ? 41 : 0;
+      return { json: {
+        status: 'applied', contract_version: 2,
+        processed_memberships: processed, mql_memberships: mql,
+        inserted_leads: 0, updated_leads: processed,
+        inserted_touches: 0, updated_touches: processed,
+        backfill_seeds_superseded: 0,
+      } };
+    });
+    const dollar = (name: string) => {
+      if (name !== 'Normalize, validate, and reconcile') throw new Error(`unexpected node ${name}`);
+      return { first: () => ({ json: request }) };
+    };
+    const fn = new Function('$input', '$', VERIFY_CODE) as (
+      input: { all: () => JsonItem[] },
+      lookup: typeof dollar,
+    ) => JsonItem[];
+    const [verified] = fn({ all: () => responses }, dollar);
+    expect(verified.json.status).toBe('APPLY_COMPLETE');
+    expect(verified.json.database_result).toMatchObject({
+      contract_version: 2,
+      batches_completed: 27,
+      processed_memberships: 2618,
+      mql_memberships: 541,
+    });
   });
 
   it('has a generated artifact identical to the builder output', () => {
@@ -291,8 +374,9 @@ describe('CampaignMember v2 set-based timeout hardening', () => {
     sql.indexOf('REVOKE ALL ON FUNCTION public.sourced_apply_sfdc_campaign_members_v2'),
   );
 
-  it('is pending and replaces only the v2 wrapper', () => {
-    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
+  it('records the applied status and replaces only the v2 wrapper', () => {
+    expect(sql).toContain('STATUS: Applied manually to production on 2026-08-12');
+    expect(sql).not.toContain('PENDING / NOT YET APPLIED');
     expect(sql).toContain('CREATE OR REPLACE FUNCTION public.sourced_apply_sfdc_campaign_members_v2');
     expect(sql).not.toContain('CREATE OR REPLACE FUNCTION public.sourced_apply_sfdc_campaign_members(');
     expect(sql).not.toMatch(/ALTER TABLE|INSERT INTO public\.(leads|lead_campaign_touches)/i);

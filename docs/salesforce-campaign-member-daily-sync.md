@@ -101,11 +101,19 @@ generated workflow is ready for a controlled dry run before replacing the
 active v1 workflow.
 
 The first controlled 2,618-membership v2 apply was canceled by Supabase's
-statement timeout and rolled back atomically. The pending
+statement timeout and rolled back atomically. The applied
 `2026-08-12_campaign_member_v2_set_based_hardening.sql` keeps the proven v1
 apply unchanged and replaces only the wrapper's per-membership Account and
-provenance queries with set-based statements. Do not retry v2 apply until that
-hardening migration is applied and verified.
+provenance queries with set-based statements. A second whole-population call
+still exceeded the managed production timeout because the underlying v1 apply
+must reconcile the populated production tables.
+
+The generated workflow therefore sends sequential 100-row batches. Each batch
+is its own atomic, idempotent function call. The workflow reports
+`APPLY_COMPLETE` only after every batch response is present and the combined
+processed and MQL totals exactly match the source reconciliation. If any batch
+fails, rerun the whole workflow; already-completed batches are safe no-ops.
+Never restore the single full-population request.
 
 The generated workflow is disabled, has no credentials, has no pinned data,
 and starts in `dry_run` mode. The apply path requires both `MODE = 'apply'`
@@ -146,6 +154,8 @@ Do this only after the dry-run reconciliation is accepted.
    and enter the exact confirmation phrase shown in that node.
 5. Run once manually. `VERIFY: applied counts` must be the only successful
    terminal.
+   The terminal must also report every planned batch as completed; a partial
+   batch run is not an accepted apply.
 6. Confirm Sourced Data Entry matches Salesforce by parent campaign and child
    campaign for both Lead and MQL.
 7. Only then publish the workflow so the daily schedule becomes active.
