@@ -8,8 +8,10 @@ const MIGRATION = readFileSync(
 const EXECUTABLE = MIGRATION.replace(/^\s*--.*$/gm, '');
 
 describe('Opportunity reporting projection storage', () => {
-  it('is explicitly pending and structural only', () => {
-    expect(MIGRATION).toContain('STATUS: PENDING / NOT YET APPLIED');
+  it('records its true applied status and remains structural only', () => {
+    expect(MIGRATION).toContain('Applied manually to production on 2026-08-12');
+    expect(MIGRATION).toContain('no attribution was created');
+    expect(MIGRATION).not.toContain('PENDING / NOT YET APPLIED');
     expect(MIGRATION).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE)\b(?![^\n]*business)/i);
   });
 

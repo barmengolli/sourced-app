@@ -7,7 +7,10 @@
 -- data. The authenticated review API remains responsible for the eventual
 -- atomic approval/promotion transaction.
 --
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. Direct catalog
+-- verification confirmed both provenance columns, both check constraints,
+-- and the exact Salesforce Opportunity/stage partial unique index. Existing
+-- rows remain manual; no review was approved and no attribution was created.
 
 BEGIN;
 

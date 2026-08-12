@@ -250,8 +250,11 @@ describe('account identity and lifecycle provenance migration', () => {
     'utf8',
   );
 
-  it('is pending, forward-only, and adds exact account identities', () => {
-    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
+  it('records its true applied status and adds exact account identities', () => {
+    expect(sql).toContain('Applied manually to production on 2026-08-12');
+    expect(sql).toContain('26');
+    expect(sql).toContain('zero left unclassified');
+    expect(sql).not.toContain('PENDING / NOT YET APPLIED');
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS sfdc_account_id TEXT');
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS account_id TEXT');
     expect(sql).not.toMatch(/DROP\s+(TABLE|COLUMN)/i);

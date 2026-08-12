@@ -9,7 +9,11 @@
 --
 -- RUN ORDER: after the applied 2026-08-11 CampaignMember apply migration and
 -- the applied 2026-08-12 Opportunity daily ingestion contract.
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. Direct catalog
+-- verification confirmed all five Account/provenance columns and indexes,
+-- both versioned functions owned by postgres with SECURITY DEFINER and
+-- search_path=pg_catalog, EXECUTE granted only to service_role, and 26
+-- initial MQL observations labelled baseline with zero left unclassified.
 
 BEGIN;
 

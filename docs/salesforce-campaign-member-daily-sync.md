@@ -92,12 +92,13 @@ source total = eligible + skipped must always reconcile.
   `scripts/build-salesforce-campaign-member-daily-workflow.mjs`
 - Applied database function:
   `migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql`
-- Pending Account-ID and lifecycle-provenance extension:
+- Applied Account-ID and lifecycle-provenance extension:
   `migrations/2026-08-12_funnel_account_identity_and_lifecycle_provenance.sql`
 
-The generated artifact now targets the versioned v2 function. Do not replace
-the active production workflow until that pending migration is applied and
-its permissions are verified.
+The generated artifact targets the versioned v2 function. The migration was
+applied and its restricted permissions were verified on 2026-08-12, so the
+generated workflow is ready for a controlled dry run before replacing the
+active v1 workflow.
 
 The generated workflow is disabled, has no credentials, has no pinned data,
 and starts in `dry_run` mode. The apply path requires both `MODE = 'apply'`

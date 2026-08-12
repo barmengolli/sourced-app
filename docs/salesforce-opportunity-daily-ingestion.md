@@ -76,7 +76,7 @@ The pure promotion boundary now exists in
 `src/lib/opportunityReportingProjection.ts`. It requires an approved review,
 an active exact link, a reviewer-selected channel, an effective Commercial
 Region in the application taxonomy, and real stage-entry dates. The authored
-`2026-08-12_opportunity_reporting_projection.sql` migration is pending and
+`2026-08-12_opportunity_reporting_projection.sql` migration is applied and
 adds provenance that keeps generated Salesforce rows separate from manual
 attributions. Live promotion remains blocked on the authenticated server API
 described in `docs/opportunity-queue-api.md`; no browser bypass is permitted.
@@ -98,10 +98,9 @@ Generated artifact: `src/generated/salesforceOpportunityDaily.workflow.json`.
   confirmation phrase, plus successful reconciliation.
 - The dry-run terminal emits aggregate diagnostics only and is structurally
   separate from the apply RPC.
-- The regenerated artifact targets v3 and must not replace the active v2
-  workflow until
-  `2026-08-12_funnel_account_identity_and_lifecycle_provenance.sql` is applied
-  and its restricted permissions are verified.
+- The regenerated artifact targets v3. Its required migration and restricted
+  permissions were verified on 2026-08-12, so it is ready for a controlled dry
+  run before replacing the active v2 workflow.
 
 No Google Sheet is used here. The protected `sf_opportunity_*` staging ledger
 is the QA/review layer and has stronger stable IDs, retry protection, review
