@@ -98,9 +98,11 @@ Generated artifact: `src/generated/salesforceOpportunityDaily.workflow.json`.
   confirmation phrase, plus successful reconciliation.
 - The dry-run terminal emits aggregate diagnostics only and is structurally
   separate from the apply RPC.
-- The regenerated artifact targets v3. Its required migration and restricted
-  permissions were verified on 2026-08-12, so it is ready for a controlled dry
-  run before replacing the active v2 workflow.
+- The regenerated artifact targets v5. Its narrow compatibility input can
+  repair the first baseline's OwnerId display and pre-account-id fingerprint
+  only when the exact legacy hash and database prestate agree. Ordinary
+  ingestion still delegates to the proven v3 boundary; unrelated
+  same-timestamp differences remain blocked.
 
 No Google Sheet is used here. The protected `sf_opportunity_*` staging ledger
 is the QA/review layer and has stronger stable IDs, retry protection, review

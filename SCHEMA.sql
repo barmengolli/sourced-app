@@ -1864,3 +1864,15 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- OwnerId-to-Owner.Name representation repair at the identical Salesforce
 -- timestamp. Opportunity id, old owner id, timestamp, and both content hashes
 -- are guarded; every unrelated same-timestamp content difference stays blocked.
+
+-- =============================================================
+-- Initial Opportunity snapshot-shape compatibility boundary
+-- migrations/2026-08-12_opportunity_snapshot_shape_upgrade.sql
+-- STATUS: PENDING / NOT YET APPLIED.
+-- =============================================================
+-- public.sf_apply_opportunity_ingestion_v5(JSONB, JSONB, JSONB, JSONB, JSONB)
+-- delegates ordinary ingestion to v3, then permits only a fingerprint-proven
+-- legacy repair. It supports both the later OwnerId-only representation and
+-- the first 71-row baseline whose fingerprint omitted account_id entirely.
+-- Database preconditions bind Opportunity id, OwnerId, account_id shape,
+-- source timestamp, and both hashes; unrelated conflicts remain blocked.

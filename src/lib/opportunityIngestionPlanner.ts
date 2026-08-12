@@ -170,8 +170,10 @@ export interface SnapshotPayload {
 
 export interface OwnerLabelRepair {
   sf_opportunity_id: string;
+  repair_kind: 'owner_label_only' | 'owner_and_account_shape';
   legacy_owner_user_id: string;
   owner_name: string;
+  account_id: string | null;
   sf_last_modified_at: string;
   prior_content_hash: string;
   content_hash: string;
@@ -266,7 +268,7 @@ const INDUSTRY_VERTICAL_CANDIDATES_FULL = [
 // Collision-resistant deterministic fingerprint: SHA-256 over an explicitly
 // ORDERED canonical [field, value] list covering every staged snapshot
 // field. Key order of the source object is irrelevant by construction.
-export function snapshotFingerprint(payload: Omit<SnapshotPayload, 'content_hash'>): string {
+export function snapshotFingerprint<T extends object>(payload: T): string {
   const orderedFields = Object.keys(payload).sort();
   const canonical = JSON.stringify(
     orderedFields.map((field) => [field, (payload as Record<string, unknown>)[field] ?? null]),
@@ -565,21 +567,41 @@ export function planStagingIngestion(
         const ownerName = str(rec.Owner?.Name);
         if (legacyOwnerId !== null && ownerName !== null && legacyOwnerId !== ownerName) {
           const { content_hash: incomingHash, ...incomingFields } = payload;
-          const legacyContentHash = snapshotFingerprint({
+          const ownerOnlyLegacyHash = snapshotFingerprint({
             ...incomingFields,
             opportunity_owner: legacyOwnerId,
           });
-          if (prior.contentHash === legacyContentHash) {
+          // The first 71-row production baseline also predates account_id in
+          // the snapshot contract. Its fingerprint therefore omitted the key
+          // entirely; null would be a different canonical value. Reconstruct
+          // that exact older shape independently from the later owner-only
+          // shape so either upgrade is provable without accepting anything
+          // else at the same Salesforce timestamp.
+          const { account_id: incomingAccountId, ...preAccountFields } = incomingFields;
+          const ownerAndAccountLegacyHash = snapshotFingerprint({
+            ...preAccountFields,
+            opportunity_owner: legacyOwnerId,
+          });
+          const repairKind = prior.contentHash === ownerOnlyLegacyHash
+            ? 'owner_label_only'
+            : prior.contentHash === ownerAndAccountLegacyHash
+              ? 'owner_and_account_shape'
+              : null;
+          if (repairKind !== null) {
             operations.push({
               op: 'repair_owner_label',
               table: 'sf_opportunities',
               sfOpportunityId: rec.Id,
               repair: {
                 sf_opportunity_id: rec.Id,
+                repair_kind: repairKind,
                 legacy_owner_user_id: legacyOwnerId,
                 owner_name: ownerName,
+                account_id: incomingAccountId,
                 sf_last_modified_at: payload.sf_last_modified_at,
-                prior_content_hash: legacyContentHash,
+                prior_content_hash: repairKind === 'owner_label_only'
+                  ? ownerOnlyLegacyHash
+                  : ownerAndAccountLegacyHash,
                 content_hash: incomingHash,
               },
             });

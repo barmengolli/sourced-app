@@ -1175,21 +1175,29 @@ var OpportunityDailyRuntime = (function(exports) {
 					const ownerName = str(rec.Owner?.Name);
 					if (legacyOwnerId !== null && ownerName !== null && legacyOwnerId !== ownerName) {
 						const { content_hash: incomingHash, ...incomingFields } = payload;
-						const legacyContentHash = snapshotFingerprint({
+						const ownerOnlyLegacyHash = snapshotFingerprint({
 							...incomingFields,
 							opportunity_owner: legacyOwnerId
 						});
-						if (prior.contentHash === legacyContentHash) {
+						const { account_id: incomingAccountId, ...preAccountFields } = incomingFields;
+						const ownerAndAccountLegacyHash = snapshotFingerprint({
+							...preAccountFields,
+							opportunity_owner: legacyOwnerId
+						});
+						const repairKind = prior.contentHash === ownerOnlyLegacyHash ? "owner_label_only" : prior.contentHash === ownerAndAccountLegacyHash ? "owner_and_account_shape" : null;
+						if (repairKind !== null) {
 							operations.push({
 								op: "repair_owner_label",
 								table: "sf_opportunities",
 								sfOpportunityId: rec.Id,
 								repair: {
 									sf_opportunity_id: rec.Id,
+									repair_kind: repairKind,
 									legacy_owner_user_id: legacyOwnerId,
 									owner_name: ownerName,
+									account_id: incomingAccountId,
 									sf_last_modified_at: payload.sf_last_modified_at,
-									prior_content_hash: legacyContentHash,
+									prior_content_hash: repairKind === "owner_label_only" ? ownerOnlyLegacyHash : ownerAndAccountLegacyHash,
 									content_hash: incomingHash
 								}
 							});

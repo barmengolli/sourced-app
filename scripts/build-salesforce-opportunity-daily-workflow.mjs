@@ -109,8 +109,8 @@ if (!planned._private_apply_payload) throw new Error('APPLY GATE CLOSED: payload
 return [{ json: planned._private_apply_payload }];`;
 
 const verifyStagingCode = `const result = $input.first().json;
-if (result.ok !== true || result.contract_version !== 4) {
-  throw new Error('APPLY FAILED: database did not confirm the v4 contract.');
+if (result.ok !== true || result.contract_version !== 5) {
+  throw new Error('APPLY FAILED: database did not confirm the v5 contract.');
 }
 return [{ json: result }];`;
 
@@ -127,6 +127,8 @@ return [{ json: {
   snapshots_stale_skipped: result.snapshots_stale_skipped,
   reviews_created: result.reviews_created,
   reviews_reconciled: result.reviews_reconciled,
+  snapshot_repairs_applied: result.snapshot_repairs_applied,
+  snapshot_repairs_idempotent: result.snapshot_repairs_idempotent,
   contract_version: result.contract_version,
   approved_opportunities_refreshed: refresh.approved_opportunities,
   generated_reporting_rows: refresh.generated_rows
@@ -178,9 +180,9 @@ const nodes = [
   node('prepare', 'APPLY GATE: exact confirmation', 'n8n-nodes-base.code', 2, [2060, -120], {
     mode: 'runOnceForAllItems', jsCode: prepareCode,
   }),
-  node('apply', 'APPLY: opportunity staging v4', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
+  node('apply', 'APPLY: opportunity staging v5', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
     method: 'POST',
-    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v4' }}",
+    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v5' }}",
     authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
     sendHeaders: true,
     headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
@@ -218,8 +220,8 @@ const workflow = {
       [{ node: 'APPLY GATE: exact confirmation', type: 'main', index: 0 }],
       [{ node: 'DRY RUN: aggregate summary', type: 'main', index: 0 }],
     ] },
-    'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v4', type: 'main', index: 0 }]] },
-    'APPLY: opportunity staging v4': { main: [[{ node: 'VERIFY: staging apply', type: 'main', index: 0 }]] },
+    'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v5', type: 'main', index: 0 }]] },
+    'APPLY: opportunity staging v5': { main: [[{ node: 'VERIFY: staging apply', type: 'main', index: 0 }]] },
     'VERIFY: staging apply': { main: [[{ node: 'REFRESH: approved Opportunity reporting', type: 'main', index: 0 }]] },
     'REFRESH: approved Opportunity reporting': { main: [[{ node: 'VERIFY: apply result', type: 'main', index: 0 }]] },
   },

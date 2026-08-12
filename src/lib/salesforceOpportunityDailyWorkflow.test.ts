@@ -96,16 +96,16 @@ describe('Salesforce Opportunity daily workflow', () => {
   it('uses native credentialed nodes with no embedded credentials', () => {
     expect(byName('READ: 2025-2026 New Project opportunities').type).toBe('n8n-nodes-base.salesforce');
     expect(byName('READ: protected opportunity state').parameters.genericAuthType).toBe('httpHeaderAuth');
-    expect(byName('APPLY: opportunity staging v4').parameters.genericAuthType).toBe('httpHeaderAuth');
+    expect(byName('APPLY: opportunity staging v5').parameters.genericAuthType).toBe('httpHeaderAuth');
     expect(workflow.nodes.every((node) => node.credentials === undefined)).toBe(true);
     const raw = JSON.stringify(workflow);
     expect(raw).toContain('https://rsyjxtuatrwtqajjkgvd.supabase.co');
     expect(raw).not.toMatch(/service_role|Bearer\s+[A-Za-z0-9]/i);
     const config = String(byName('CONFIG: closed by default').parameters.jsCode);
     expect(config).toContain('[a-z0-9-]+\\.supabase\\.co$');
-    expect(JSON.stringify(workflow)).toContain('sf_apply_opportunity_ingestion_v4');
+    expect(JSON.stringify(workflow)).toContain('sf_apply_opportunity_ingestion_v5');
     expect(String(byName('VERIFY: staging apply').parameters.jsCode))
-      .toContain('result.contract_version !== 4');
+      .toContain('result.contract_version !== 5');
     expect(byName('REFRESH: approved Opportunity reporting').parameters.genericAuthType)
       .toBe('httpHeaderAuth');
     expect(String(byName('REFRESH: approved Opportunity reporting').parameters.url))
@@ -126,7 +126,7 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(workflow.nodes.some((node) => node.type.toLowerCase().includes('supabase'))).toBe(false);
   });
 
-  it('binds the v4 owner-label repair migration without weakening ordinary conflicts', () => {
+  it('binds the applied v4 owner-label repair migration without weakening ordinary conflicts', () => {
     const sql = readFileSync(
       resolve(process.cwd(), 'migrations/2026-08-12_opportunity_owner_label_upgrade.sql'),
       'utf8',
@@ -142,5 +142,20 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(sql).toContain('STATUS: Applied manually to production on 2026-08-12');
     expect(sql).toContain('this migration invoked no RPC');
     expect(sql).not.toContain('PENDING / NOT YET APPLIED');
+  });
+
+  it('binds the pending v5 snapshot-shape repair and its account preconditions', () => {
+    const sql = readFileSync(
+      resolve(process.cwd(), 'migrations/2026-08-12_opportunity_snapshot_shape_upgrade.sql'),
+      'utf8',
+    );
+    expect(sql).toContain('sf_apply_opportunity_ingestion_v5');
+    expect(sql).toContain('public.sf_apply_opportunity_ingestion_v3');
+    expect(sql).toContain("v_repair_kind = 'owner_and_account_shape' AND account_id IS NULL");
+    expect(sql).toContain('account_id IS NOT DISTINCT FROM v_account_id');
+    expect(sql).toContain("content_hash = v_item->>'prior_content_hash'");
+    expect(sql).toContain('TO service_role');
+    expect(sql).toContain('FROM PUBLIC');
+    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
   });
 });
