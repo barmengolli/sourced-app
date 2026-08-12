@@ -467,6 +467,8 @@ describe('list contract', () => {
           'isClosed',
           'amount',
           'amountCurrency',
+          'saasRevenue',
+          'saasRevenueUsd',
           'createdAt',
           'lastModifiedAt',
           'owner',
@@ -491,6 +493,7 @@ describe('list contract', () => {
         evidence: {
           bdrUserId: 'SYNTH-USER-BDR-HIDDEN',
           creatorUserId: 'SYNTH-USER-CREATOR-HIDDEN',
+          suggestedBdrName: 'Dave Cummins',
           primaryCampaignSource: 'SYNTH-CAMPAIGN-HIDDEN',
           customerExpansionRaw: 'Synthetic expansion label',
         },
@@ -506,10 +509,12 @@ describe('list contract', () => {
     expect(serialized).not.toContain('SYNTH-CAMPAIGN-HIDDEN');
     // No real-Salesforce-ID-shaped values of any kind.
     expect(serialized).not.toMatch(/\b(006|005|008|017|012|00Q|003|001)[A-Za-z0-9]{12}\b/);
-    // Evidence is reduced to presence flags plus the non-identifying label.
+    // Evidence is reduced to presence flags, the approved normalized BDR
+    // suggestion, and the non-identifying label.
     expect(list.body.items[0].evidence).toEqual({
       bdrEvidencePresent: true,
       creatorEvidencePresent: true,
+      suggestedBdrName: 'Dave Cummins',
       campaignEvidencePresent: true,
       customerExpansionRaw: 'Synthetic expansion label',
     });

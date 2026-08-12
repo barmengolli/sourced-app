@@ -44,6 +44,10 @@ CREATE TABLE leads (
   -- External system IDs
   sfdc_lead_id TEXT,
   sfdc_contact_id TEXT,
+  -- Exact Account identity for account-level MQL-to-HPP cohort reporting.
+  -- Contact.AccountId or a converted Lead's ConvertedAccountId; never
+  -- inferred from the editable account name.
+  sfdc_account_id TEXT,
   hubspot_contact_id TEXT,
 
   -- Person fields
@@ -93,6 +97,7 @@ CREATE TABLE leads (
 
 CREATE INDEX idx_leads_email ON leads(email);
 CREATE INDEX idx_leads_account ON leads(account);
+CREATE INDEX idx_leads_sfdc_account_id ON leads(sfdc_account_id);
 CREATE INDEX idx_leads_marketing_sourced_date ON leads(marketing_sourced_date);
 CREATE INDEX idx_leads_current_stage ON leads(current_stage);
 CREATE INDEX idx_leads_source_channel ON leads(source_channel_id);
@@ -108,6 +113,16 @@ CREATE INDEX idx_leads_event_activations ON leads USING GIN(event_activations);
 
 CREATE TABLE attributions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Manual rows are reviewer-created. Salesforce rows belong to the future
+  -- reversible Opportunity reporting projection and can be reconciled by
+  -- exact Opportunity identity without touching manual data.
+  source_system TEXT NOT NULL DEFAULT 'manual'
+    CHECK (source_system IN ('manual', 'salesforce')),
+  sf_opportunity_id TEXT,
+  CONSTRAINT attributions_salesforce_identity_required CHECK (
+    source_system = 'manual'
+    OR NULLIF(btrim(sf_opportunity_id), '') IS NOT NULL
+  ),
   lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
   deal_id TEXT,  -- shared across stages for the same deal (HPP -> Opp -> Pursuit -> Won)
   stage_key TEXT NOT NULL CHECK (stage_key IN ('hpp','opp','pursuit','closeWon','closeLost')),
@@ -117,6 +132,9 @@ CREATE TABLE attributions (
 
   label TEXT,            -- Deal name, e.g. "Acme Corp"
   account TEXT,
+  -- Exact Salesforce Account identity for account-level conversion cohorts.
+  -- The editable account name above remains display-only.
+  sfdc_account_id TEXT,
   amount NUMERIC(12,2),
   sf_link TEXT,
   -- Region: NA / EMEA / APAC / LATAM / Other. Manually entered in the
@@ -145,7 +163,9 @@ CREATE TABLE attributions (
 );
 
 CREATE INDEX idx_attributions_deal ON attributions(deal_id);
+CREATE INDEX idx_attributions_sf_opportunity_id ON attributions(sf_opportunity_id);
 CREATE INDEX idx_attributions_lead ON attributions(lead_id);
+CREATE INDEX idx_attributions_sfdc_account_id ON attributions(sfdc_account_id);
 CREATE INDEX idx_attributions_stage ON attributions(stage_key);
 CREATE INDEX idx_attributions_period ON attributions(year, period_index);
 CREATE INDEX idx_attributions_channel ON attributions(channel_id);
@@ -160,6 +180,10 @@ CREATE INDEX idx_attributions_bdr_name ON attributions(bdr_name);
 CREATE UNIQUE INDEX attributions_deal_stage_uniq
   ON attributions (deal_id, stage_key)
   WHERE deal_id IS NOT NULL AND deal_id <> '';
+
+CREATE UNIQUE INDEX attributions_salesforce_opportunity_stage_uniq
+  ON attributions (sf_opportunity_id, stage_key)
+  WHERE source_system = 'salesforce';
 
 -- Ordered touches per attribution
 CREATE TABLE attribution_touches (
@@ -603,10 +627,16 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
   record_type_label TEXT,
   stage_name TEXT,
   opportunity_name TEXT,
+  account_id TEXT,
   account_name TEXT,
   amount NUMERIC(14, 2),
   amount_currency TEXT,
   close_date DATE,
+  market TEXT,
+  -- Normalized review evidence derived only from the approved creator names.
+  -- It never assigns a channel or approves attribution.
+  suggested_bdr_name TEXT
+    CHECK (suggested_bdr_name IN ('Dave Cummins', 'Garrett McNally')),
   commercial_region TEXT,
   opportunity_owner TEXT,
   -- Supporting attribution EVIDENCE only; never treated as a verified
@@ -619,8 +649,8 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_synced_at TIMESTAMPTZ,
-  -- Review-evidence columns (Bite 5C2A): raw values and source USER IDS
-  -- only; configured employee names are never stored, no canonical
+  -- Review-evidence columns (Bite 5C2A): raw values, source USER IDS, and
+  -- the narrowly approved normalized BDR suggestion above. No canonical
   -- Industry Vertical field is chosen, and no Customer Expansion rule is
   -- applied.
   normalized_record_type_state TEXT
@@ -647,6 +677,8 @@ CREATE TABLE IF NOT EXISTS sf_opportunities (
 
 CREATE INDEX IF NOT EXISTS idx_sf_opportunities_modified
   ON sf_opportunities (sf_last_modified_at);
+CREATE INDEX IF NOT EXISTS idx_sf_opportunities_account_id
+  ON sf_opportunities (account_id);
 
 -- =============================================================
 -- 3. Append-only history events
@@ -773,6 +805,11 @@ CREATE TABLE IF NOT EXISTS sf_opportunity_reviews (
   lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
   -- Matches the attributions.bdr_name convention.
   bdr_name TEXT,
+  -- Reviewer-owned corrections. Nightly ingestion refreshes the source
+  -- values on sf_opportunities and never writes these columns.
+  market_override TEXT,
+  commercial_region_override TEXT,
+  gtm_cube_override TEXT,
   reviewer_note TEXT,
   reviewed_at TIMESTAMPTZ,
   -- Free-text placeholder compatible with future SSO identities.
@@ -1678,3 +1715,103 @@ ALTER TABLE sf_lifecycle_observations
 -- for the full body, the LC001..LC005 SQLSTATE vocabulary, and the
 -- sanitized failure contract (SQLSTATE plus an allowlisted category,
 -- never SQLERRM).
+
+-- =============================================================
+-- Salesforce CampaignMember daily apply boundary
+-- =============================================================
+-- Added by migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql.
+-- STATUS: Applied manually to production on 2026-08-11. Direct catalog
+-- inspection verified postgres ownership, SECURITY DEFINER,
+-- search_path=pg_catalog, no EXECUTE for PUBLIC/anon/authenticated, and
+-- EXECUTE for service_role only. No CampaignMember batch was invoked and no
+-- business data was imported by the migration itself. A separate controlled
+-- first invocation on 2026-08-11 processed 2,614 eligible memberships and
+-- inserted 2,614 child-campaign touches; 16 missing-email rows were excluded.
+--
+-- public.sourced_apply_sfdc_campaign_members(p_rows JSONB) RETURNS JSONB
+--
+-- Applies one fully reconciled CampaignMember batch atomically against
+-- channels, leads, and lead_campaign_touches. CampaignMember ID is the
+-- membership idempotency key. Exact Salesforce identity takes precedence
+-- over normalized email, 15/18-character IDs match by the exact
+-- case-sensitive 15-character prefix, and conflicting people fail closed.
+-- Existing Marketing edit locks are preserved. The earliest campaign touch
+-- remains the primary source unless locked. A person first observed as MQL
+-- receives MQL history evidence while retaining the Lead cohort membership,
+-- so fast conversion counts as Lead and MQL rather than MQL only.
+--
+-- SECURITY DEFINER with search_path=pg_catalog. PUBLIC, anon, and
+-- authenticated cannot execute it; service_role is the only grantee. The
+-- function creates no rows until invoked by the separately disabled n8n
+-- workflow. See the migration for the executable body.
+
+-- =============================================================
+-- Salesforce CampaignMember legacy-import supersession
+-- =============================================================
+-- Added by
+-- migrations/2026-08-11_sfdc_campaign_touch_import_supersession.sql.
+-- STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-11.
+-- Verified after application: zero remaining shadows, 2,614 authoritative n8n
+-- touches, one intentionally unmatched legacy import, and trigger present.
+--
+-- An authoritative CampaignMember-keyed n8n touch supersedes an older ID-less
+-- import touch only when both resolve to the same canonical person and exact
+-- child channel. The production repair migration also removes existing proven
+-- shadows; SCHEMA records only the permanent trigger structure.
+
+CREATE OR REPLACE FUNCTION public.sourced_supersede_legacy_import_touch()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF current_user <> 'postgres' THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.source = 'n8n_sync'
+     AND NEW.campaign_member_id IS NOT NULL
+     AND NEW.channel_id IS NOT NULL THEN
+    DELETE FROM public.lead_campaign_touches AS legacy
+    WHERE legacy.id <> NEW.id
+      AND legacy.source = 'import'
+      AND legacy.campaign_member_id IS NULL
+      AND legacy.lead_id = NEW.lead_id
+      AND legacy.channel_id = NEW.channel_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sourced_supersede_legacy_import_touch() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.sourced_supersede_legacy_import_touch() FROM anon;
+REVOKE ALL ON FUNCTION public.sourced_supersede_legacy_import_touch() FROM authenticated;
+
+DROP TRIGGER IF EXISTS trg_sourced_supersede_legacy_import_touch
+  ON public.lead_campaign_touches;
+CREATE TRIGGER trg_sourced_supersede_legacy_import_touch
+AFTER INSERT OR UPDATE OF lead_id, channel_id, source, campaign_member_id
+ON public.lead_campaign_touches
+FOR EACH ROW
+EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
+
+-- =============================================================
+-- Opportunity daily-ingestion v2 contract
+-- migrations/2026-08-12_opportunity_daily_ingestion_contract.sql
+-- STATUS: Applied manually to production on 2026-08-12. Supabase returned
+-- Success. No rows returned. Direct catalog verification confirmed both RPCs
+-- are SECURITY DEFINER with search_path=pg_catalog; PUBLIC, anon, and
+-- authenticated cannot execute them; service_role can. Structure/functions
+-- only; no Opportunity data was imported or backfilled by this migration.
+-- =============================================================
+--
+-- public.sf_apply_opportunity_ingestion_v2(JSONB, JSONB, JSONB, JSONB)
+-- delegates the atomic planner payload to the applied v1 function, then
+-- persists Market and the normalized BDR suggestion only when the accepted
+-- source timestamp and content hash still match. The suggestion remains
+-- review evidence and never writes source attribution or a channel.
+-- public.sf_read_opportunity_ingestion_state() exposes only
+-- the protected planner state needed for exact retry/stale/conflict checks.
+-- Both are SECURITY DEFINER with search_path=pg_catalog, revoked from
+-- PUBLIC/anon/authenticated, and executable only by service_role. See the
+-- migration for the full function bodies. The reviewer-owned override
+-- columns above are never written by ingestion.

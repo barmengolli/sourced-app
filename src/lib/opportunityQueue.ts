@@ -50,6 +50,7 @@ export type QueueRecordTypeState = 'hpp' | 'opp' | 'pursuit' | 'out_of_scope' | 
 export interface QueueEvidence {
   bdrUserId: string | null;
   creatorUserId: string | null;
+  suggestedBdrName: 'Dave Cummins' | 'Garrett McNally' | null;
   primaryCampaignSource: string | null;
   customerExpansionRaw: string | null;
 }
@@ -74,8 +75,12 @@ export interface OpportunityQueueItem {
   recordTypeState: QueueRecordTypeState;
   stageName: string | null;
   isClosed: boolean;
+  // Imported for future comparison, but not the primary queue value.
   amount: number | null;
   amountCurrency: string | null;
+  saasRevenue: number | null;
+  // Primary visible revenue, confirmed by the 2026-08-12 scope audit.
+  saasRevenueUsd: number | null;
   createdAt: string | null;
   lastModifiedAt: string | null;
   owner: string | null;

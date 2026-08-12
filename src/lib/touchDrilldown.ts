@@ -1,16 +1,17 @@
 // touchDrilldown.ts: pure selection logic for the Bite 4E funnel-grid
 // drilldown. Clicking a Lead or MQL actual lists the underlying TOUCHES
 // (memberships), not just leads: a lead appearing via two touches in the
-// inspected scope appears once per touch. Undated touches cannot bucket
-// into any period, so they are excluded from counts but surfaced in a
-// separate undated group whenever their channel is inspected, never
-// silently dropped.
+// inspected scope appears once per touch. Lead rows use the CampaignMember
+// touch date. MQL rows use the same effective stage-activity date as the
+// grid: a witnessed transition date, or the touch date for a first-observed
+// MQL baseline. Undated touches cannot bucket into any period, so they are
+// excluded from counts but surfaced separately, never silently dropped.
 
 import type { Lead, LeadCampaignTouchRow, PeriodIndex } from '../types/db';
 import type { RegionKey } from '../constants/regions';
 import { matchesRegionFilter } from './regionFilter';
 import { quarterOfIsoDate } from './dates';
-import { hasReachedMql, mqlEventDates, type PeriodFilter } from './compute';
+import { mqlActivityDateForTouch, type PeriodFilter } from './compute';
 
 export interface TouchDrilldownEntry {
   touchId: string;
@@ -18,12 +19,13 @@ export interface TouchDrilldownEntry {
   account: string | null;
   region: string | null;
   channelId: string;
-  // Lead stage: the touch date (null only in the undated group). MQL
-  // stage: the touch date of the membership row backing the count.
+  // CampaignMember date. It is the Lead activity date and remains useful
+  // provenance for MQL rows whose stage activity happened later.
   touchDate: string | null;
-  // MQL stage only: earliest known qualification date, when available. This
-  // is supporting context; the membership's touchDate anchors the cohort.
-  mqlEventDate?: string;
+  // MQL stage only: the effective date that placed this membership in the
+  // selected reporting period. It is the witnessed transition date, or the
+  // touch date when the first observation was already an MQL baseline.
+  mqlActivityDate?: string;
   parentCampaign: string | null;
   subCampaign: string | null;
   // 'backfill' rows are the preserved historical seeds; everything else
@@ -94,26 +96,29 @@ export function computeTouchDrilldown(input: TouchDrilldownInput): TouchDrilldow
     return { counted, undated };
   }
 
-  // MQL stage: one row per membership touch in the selected acquisition
-  // cohort, restricted to people who have ever been observed at MQL. The MQL
-  // event date is supporting context only and never moves the membership to
-  // a later period. Undated touches cannot be assigned to a cohort.
+  // MQL stage: one row per membership whose effective MQL activity date is in
+  // the selected period. This mirrors computeGrid exactly; the drilldown must
+  // never show a Q1 row underneath a Q3 MQL total. Undated touches cannot
+  // establish an activity date, including for first-observed baselines.
   const counted: TouchDrilldownEntry[] = [];
   const undated: TouchDrilldownEntry[] = [];
   for (const t of scoped) {
     const lead = leadById.get(t.lead_id)!;
-    if (!hasReachedMql(lead)) continue;
+    const activityDate = mqlActivityDateForTouch(lead, t.touch_date);
+    if (!activityDate) {
+      if (t.touch_date === null) undated.push(entry(t, lead));
+      continue;
+    }
     const candidate = {
       ...entry(t, lead),
-      mqlEventDate: mqlEventDates(lead)[0],
+      mqlActivityDate: activityDate,
     };
-    if (t.touch_date === null) undated.push(candidate);
-    else if (inPeriod(t.touch_date, year, filter)) counted.push(candidate);
+    if (inPeriod(activityDate, year, filter)) counted.push(candidate);
   }
   counted.sort(
     (a, b) =>
-      (a.touchDate ?? '').localeCompare(b.touchDate ?? '') ||
-      (a.mqlEventDate ?? '').localeCompare(b.mqlEventDate ?? ''),
+      (a.mqlActivityDate ?? '').localeCompare(b.mqlActivityDate ?? '') ||
+      (a.touchDate ?? '').localeCompare(b.touchDate ?? ''),
   );
   return { counted, undated };
 }

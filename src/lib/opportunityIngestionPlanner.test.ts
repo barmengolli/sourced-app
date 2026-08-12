@@ -1,6 +1,6 @@
 // Tests for the Bite 5C2A staging-ingestion planner. Synthetic records only;
 // no real Salesforce identifiers, names, or customer data. Also carries the
-// static safety assertions for the PENDING apply-function migration and the
+// static safety assertions for the applied apply-function migrations and the
 // staging workflow template.
 
 import { describe, it, expect } from 'vitest';
@@ -12,6 +12,7 @@ import {
   buildSnapshotPayload,
   snapshotFingerprint,
   serializeApplyPayload,
+  suggestedBdrName,
   summarizeDryRunPlan,
   PROTECTED_STAGING_TABLES,
 } from './opportunityIngestionPlanner';
@@ -21,7 +22,11 @@ import type {
   SalesforceOpportunityHistoryRecord,
 } from './salesforceOpportunitySync';
 
-const CONFIG: IngestionConfig = { initialCohortYear: 2026, runStartedAt: '2026-07-27T12:00:00Z' };
+const CONFIG: IngestionConfig = {
+  reportingYears: [2025, 2026],
+  includedBusinessTypeApiValues: ['New Project'],
+  runStartedAt: '2026-07-27T12:00:00Z',
+};
 
 const EMPTY: ExistingStagingState = {
   snapshots: {},
@@ -50,6 +55,7 @@ function opp(over: Partial<SalesforceOpportunityRecord> = {}): SalesforceOpportu
     OwnerId: 'SYNTH-USER-1',
     Owner: { Name: 'Synthetic Owner' },
     CampaignId: null,
+    Existing_Customer_or_New_Business__c: 'New Project',
     ...over,
   };
 }
@@ -89,12 +95,12 @@ describe('candidate eligibility', () => {
     expect(p.diagnostics.eligibility.eligible_new_candidate).toBe(1);
   });
 
-  it('an older closed unlinked record is excluded and NOT staged: no snapshot, event, or review', () => {
+  it('a record outside the configured years is excluded and NOT staged: no snapshot, event, or review', () => {
     const p = plan(
       [opp({ Id: 'SYNTH-OPP-OLD', IsClosed: true, CreatedDate: '2024-03-01T09:00:00.000+0000' })],
       [hist({ OpportunityId: 'SYNTH-OPP-OLD' })],
     );
-    expect(p.diagnostics.eligibility.excluded_older_closed).toBe(1);
+    expect(p.diagnostics.eligibility.excluded_outside_reporting_years).toBe(1);
     expect(p.diagnostics.reviewsCreated).toBe(0);
     expect(p.diagnostics.snapshotsPlanned).toBe(0);
     expect(p.diagnostics.eventsPlanned).toBe(0);
@@ -103,11 +109,22 @@ describe('candidate eligibility', () => {
     expect(JSON.stringify(p.operations)).not.toContain('SYNTH-OPP-OLD');
   });
 
-  it('the cohort year is configuration, not a hardcoded 2026', () => {
+  it('the reporting years are configuration, not hardcoded', () => {
     const rec = opp({ IsClosed: true, CreatedDate: '2027-03-01T09:00:00.000+0000' });
-    const p2027 = planStagingIngestion([rec], [], [], EMPTY, { ...CONFIG, initialCohortYear: 2027 });
+    const p2027 = planStagingIngestion([rec], [], [], EMPTY, { ...CONFIG, reportingYears: [2027] });
     expect(p2027.diagnostics.eligibility.eligible_new_candidate).toBe(1);
-    expect(classifyCandidateEligibility(rec, EMPTY, CONFIG)).toBe('excluded_older_closed');
+    expect(classifyCandidateEligibility(rec, EMPTY, CONFIG)).toBe('excluded_outside_reporting_years');
+  });
+
+  it('requires the confirmed New Logo API value and excludes blank or other business types', () => {
+    const eligible = plan([opp({ Existing_Customer_or_New_Business__c: 'New Project' })]);
+    const blank = plan([opp({ Existing_Customer_or_New_Business__c: null })]);
+    const expansion = plan([opp({ Existing_Customer_or_New_Business__c: 'Upsell/Cross-sell' })]);
+    expect(eligible.diagnostics.eligibility.eligible_new_candidate).toBe(1);
+    expect(blank.diagnostics.eligibility.excluded_missing_business_type).toBe(1);
+    expect(expansion.diagnostics.eligibility.excluded_non_new_logo).toBe(1);
+    expect(blank.diagnostics.snapshotsPlanned).toBe(0);
+    expect(expansion.diagnostics.reviewsCreated).toBe(0);
   });
 
   it('an unlinked current Service opportunity is excluded and NOT staged at all', () => {
@@ -163,7 +180,7 @@ describe('candidate eligibility', () => {
       opp({
         CampaignId: null,
         Sales_Development_Rep__c: null,
-        Existing_Customer_or_New_Business__c: null,
+        Existing_Customer_or_New_Business__c: 'New Project',
         CreatedById: 'SYNTH-USER-BDR1',
       }),
     ]);
@@ -490,14 +507,17 @@ describe('serialization boundary (hardening)', () => {
   it('round-trips a synthetic record into the full RPC payload without loss or leakage of excluded records', () => {
     const included = opp({
       Id: 'SYNTH-OPP-RT1',
-      Existing_Customer_or_New_Business__c: 'Synthetic Segment',
+      AccountId: '001000000000001AAA',
+      Existing_Customer_or_New_Business__c: 'New Project',
       Sales_Development_Rep__c: 'SYNTH-USER-SDR1',
       CreatedById: 'SYNTH-USER-CREATOR',
+      CreatedBy: { Name: 'David Cummins' },
       Commercial_Region__c: 'NA',
       Industry_Vertical__c: 'Synthetic Vertical A',
       Pursuit_Industry_Vertical__c: 'Synthetic Vertical B',
       Insurance_vertical__c: 'Synthetic Vertical C',
       GTM_Cube__c: 'Synthetic Cube',
+      Market__c: 'Synthetic Market',
       Business_Units__c: 'Synthetic LOB',
       SaaS_Revenue__c: 111,
       SaaS_Revenue_USD__c: 222,
@@ -510,13 +530,16 @@ describe('serialization boundary (hardening)', () => {
     expect(payload.p_snapshots).toHaveLength(1);
     const snap = payload.p_snapshots[0];
     expect(snap.sf_opportunity_id).toBe('SYNTH-OPP-RT1');
+    expect(snap.account_id).toBe('001000000000001AAA');
     expect(snap.normalized_record_type_state).toBe('hpp');
     expect(snap.is_closed).toBe(false);
     expect(snap.is_won).toBe(false);
-    expect(snap.customer_expansion_raw).toBe('Synthetic Segment');
+    expect(snap.customer_expansion_raw).toBe('New Project');
     expect(snap.sales_development_rep_user_id).toBe('SYNTH-USER-SDR1');
     expect(snap.created_by_user_id).toBe('SYNTH-USER-CREATOR');
+    expect(snap.suggested_bdr_name).toBe('Dave Cummins');
     expect(snap.commercial_region).toBe('NA');
+    expect(snap.market).toBe('Synthetic Market');
     expect(snap.industry_vertical_raw).toBe('Synthetic Vertical A');
     expect(snap.pursuit_industry_vertical_raw).toBe('Synthetic Vertical B');
     expect(snap.insurance_vertical_raw).toBe('Synthetic Vertical C');
@@ -642,8 +665,99 @@ describe('apply-function migration safety (static SQL)', () => {
     ]) {
       expect(MIGRATION).toContain(col);
     }
-    // Names never enter storage; only user ids as evidence.
+    // The applied v1 migration predates and therefore does not store the
+    // normalized BDR suggestion added by the pending v2 contract.
     expect(MIGRATION.toLowerCase()).not.toContain('bdr_name');
+  });
+});
+
+describe('approved BDR suggestion', () => {
+  it.each([
+    ['Dave Cummins', 'Dave Cummins'],
+    ['David Cummins', 'Dave Cummins'],
+    ['Garrett McNally', 'Garrett McNally'],
+    ['Synthetic Other Creator', null],
+    [null, null],
+  ])('maps %s without assigning attribution', (creator, expected) => {
+    expect(suggestedBdrName(opp({ CreatedBy: creator === null ? null : { Name: creator } })))
+      .toBe(expected);
+  });
+});
+
+describe('daily-ingestion contract migration (applied)', () => {
+  const MIGRATION = readFileSync(
+    resolve(process.cwd(), 'migrations/2026-08-12_opportunity_daily_ingestion_contract.sql'),
+    'utf8',
+  );
+  const SCHEMA = readFileSync(resolve(process.cwd(), 'SCHEMA.sql'), 'utf8');
+  const LEDGER = readFileSync(resolve(process.cwd(), 'migrations/README.md'), 'utf8');
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/salesforce-opportunity-daily-ingestion.md'),
+    'utf8',
+  );
+
+  it('adds source Market, normalized BDR evidence, and reviewer-owned overrides', () => {
+    expect(MIGRATION).toContain('ADD COLUMN IF NOT EXISTS market TEXT');
+    expect(MIGRATION).toContain('ADD COLUMN IF NOT EXISTS suggested_bdr_name TEXT');
+    expect(MIGRATION).toContain("suggested_bdr_name IN ('Dave Cummins', 'Garrett McNally')");
+    expect(SCHEMA).toContain('suggested_bdr_name TEXT');
+    for (const field of [
+      'market_override',
+      'commercial_region_override',
+      'gtm_cube_override',
+    ]) {
+      expect(MIGRATION).toContain(`ADD COLUMN IF NOT EXISTS ${field} TEXT`);
+      expect(SCHEMA).toContain(`${field} TEXT`);
+    }
+    expect(SCHEMA).toContain('market TEXT');
+  });
+
+  it('never lets ingestion overwrite any manual override', () => {
+    const codeOnly = MIGRATION.split('\n').filter((line) => !line.trim().startsWith('--')).join('\n');
+    expect(codeOnly).not.toMatch(/UPDATE public\.sf_opportunity_reviews/);
+    expect(codeOnly).not.toMatch(/SET\s+(market_override|commercial_region_override|gtm_cube_override)/);
+    expect(codeOnly).not.toMatch(/SET\s+channel_id/);
+  });
+
+  it('persists source evidence only for the exact accepted snapshot and keeps the hardened v1 authority', () => {
+    expect(MIGRATION).toContain('public.sf_apply_opportunity_ingestion(');
+    expect(MIGRATION).toContain("SET market = v_item->>'market'");
+    expect(MIGRATION).toContain("suggested_bdr_name = v_item->>'suggested_bdr_name'");
+    expect(MIGRATION).toContain("sf_last_modified_at = NULLIF(v_item->>'sf_last_modified_at', '')::TIMESTAMPTZ");
+    expect(MIGRATION).toContain("content_hash IS NOT DISTINCT FROM v_item->>'content_hash'");
+  });
+
+  it('keeps both RPCs restricted to service_role with a pinned search path', () => {
+    for (const fn of ['sf_apply_opportunity_ingestion_v2', 'sf_read_opportunity_ingestion_state']) {
+      expect(MIGRATION).toContain(`FUNCTION public.${fn}`);
+      expect(MIGRATION).toMatch(new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}[^;]* FROM PUBLIC`));
+      expect(MIGRATION).toMatch(new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}[^;]* FROM anon`));
+      expect(MIGRATION).toMatch(new RegExp(`REVOKE ALL ON FUNCTION public\\.${fn}[^;]* FROM authenticated`));
+      expect(MIGRATION).toMatch(new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${fn}[^;]* TO service_role`));
+    }
+    expect(MIGRATION.match(/SET search_path = pg_catalog/g)).toHaveLength(2);
+  });
+
+  it('records the verified production application consistently', () => {
+    expect(MIGRATION).toContain('Applied manually to production on 2026-08-12');
+    expect(MIGRATION).not.toContain('PENDING / NOT APPLIED');
+
+    const schemaStatus = SCHEMA.slice(SCHEMA.indexOf('-- Opportunity daily-ingestion v2 contract'));
+    expect(schemaStatus).toContain('Applied manually to production on 2026-08-12');
+    expect(schemaStatus).not.toContain('PENDING / NOT APPLIED');
+
+    const ledgerRow = LEDGER.split('\n').find((line) =>
+      line.includes('2026-08-12_opportunity_daily_ingestion_contract.sql')) ?? '';
+    expect(ledgerRow).toContain('| APPLIED |');
+    expect(ledgerRow).toContain('service_role');
+    expect(ledgerRow).not.toContain('NOT APPLIED');
+
+    expect(DOC).toContain('migration **APPLIED on 2026-08-12**');
+    expect(DOC).not.toContain('migration **PENDING / NOT APPLIED**');
+    expect(DOC).toContain('initial production staging apply completed on 2026-08-12');
+    expect(DOC).toContain('stored 71 snapshots and created 71 pending reviews');
+    expect(DOC).toContain('exact retry applied 0 snapshots and created 0 reviews');
+    expect(DOC).toContain('All 71 records remain pending human review');
   });
 });
 

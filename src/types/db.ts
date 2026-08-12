@@ -14,6 +14,11 @@ export type PeriodIndex = 1 | 2 | 3 | 4;
 export interface StageHistoryEntry {
   stage: StageKey;
   entered_at: string;
+  // `baseline` means the person was already at this stage when the daily
+  // observation ledger first saw them. `transition` means the ledger
+  // witnessed the change after an earlier observation. Older rows predate
+  // this discriminator and remain valid.
+  event_kind?: 'baseline' | 'transition';
   edited_by?: string;
   edit_locked?: boolean;
   notes?: string;
@@ -26,6 +31,9 @@ export interface Lead {
   last_name?: string | null;
   sfdc_lead_id?: string | null;
   sfdc_contact_id?: string | null;
+  // Exact Salesforce Account identity used for account-level conversion
+  // cohorts. Names remain display-only and are never an identity join key.
+  sfdc_account_id?: string | null;
   hubspot_contact_id?: string | null;
   account?: string | null;
   title?: string | null;
@@ -122,6 +130,11 @@ export interface FunnelActual {
 
 export interface Attribution {
   id: string;
+  // Manual rows predate source_system and are treated as manual when absent.
+  // Salesforce-generated rows carry both fields so regression cleanup can
+  // never delete a reviewer-created attribution by mistake.
+  source_system?: 'manual' | 'salesforce';
+  sf_opportunity_id?: string | null;
   // M7 leaves lead_id null. M8 will add an "associate lead" picker.
   lead_id?: string | null;
   // Shared across stages for the same deal so HPP -> Opp -> Pursuit -> Won
@@ -134,6 +147,9 @@ export interface Attribution {
   period_index: PeriodIndex;
   label?: string | null;     // Deal name, e.g. "Acme Corp"
   account?: string | null;
+  // Exact Salesforce Account identity. Account names are display-only and
+  // never used to join an MQL cohort to an Opportunity.
+  sfdc_account_id?: string | null;
   amount?: number | null;
   sf_link?: string | null;
   region?: RegionKey | null;

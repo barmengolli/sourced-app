@@ -114,9 +114,12 @@ export interface ExistingStagingState {
 }
 
 export interface IngestionConfig {
-  // The approved first-run cohort year (2026). Explicit configuration:
-  // never hardcoded, never derived from today's date.
-  initialCohortYear: number;
+  // The approved source CreatedDate years. Explicit configuration: never
+  // inferred from today's date and never widened silently.
+  reportingYears: number[];
+  // Exact Salesforce API values that represent New Logo business. In this
+  // org the UI label "New Logo" is exposed by the API as "New Project".
+  includedBusinessTypeApiValues: string[];
   // Injected run timestamp for audit events and baselines.
   runStartedAt: string;
 }
@@ -125,10 +128,11 @@ export interface IngestionConfig {
 // The full staged snapshot payload (apply-ready review evidence)
 // ---------------------------------------------------------------------------
 // Enough evidence to review a candidate WITHOUT querying raw Salesforce
-// again. Classification evidence is raw values and source USER IDS only:
-// configured employee names never enter storage. No canonical Industry
-// Vertical field is chosen and no Customer Expansion rule is applied; the
-// raw values are evidence.
+// again. Classification evidence includes source user ids plus one narrowly
+// approved, normalized BDR suggestion. That suggestion is review evidence
+// only: it never selects a channel or creates attribution. No canonical
+// Industry Vertical field is chosen and no Customer Expansion rule is
+// applied; the raw values are evidence.
 
 export interface SnapshotPayload {
   sf_opportunity_id: string;
@@ -139,18 +143,21 @@ export interface SnapshotPayload {
   is_closed: boolean | null;
   is_won: boolean | null;
   opportunity_name: string | null;
+  account_id: string | null;
   account_name: string | null;
   amount: number | null;
   amount_currency: string | null;
   saas_revenue: number | null;
   saas_revenue_usd: number | null;
   close_date: string | null;
+  market: string | null;
   commercial_region: string | null;
   opportunity_owner: string | null;
   primary_campaign_source: string | null;
   customer_expansion_raw: string | null;
   sales_development_rep_user_id: string | null;
   created_by_user_id: string | null;
+  suggested_bdr_name: 'Dave Cummins' | 'Garrett McNally' | null;
   insurance_vertical_raw: string | null;
   industry_vertical_raw: string | null;
   pursuit_industry_vertical_raw: string | null;
@@ -170,6 +177,15 @@ export function normalizedRecordTypeState(
   const dev = normalizeSourceValue(rec.RecordType?.DeveloperName ?? null);
   if (dev === null) return 'unknown';
   return DEFAULT_OPPORTUNITY_RECORD_TYPE_MAP[dev] ?? 'unknown';
+}
+
+export function suggestedBdrName(
+  rec: SalesforceOpportunityRecord,
+): 'Dave Cummins' | 'Garrett McNally' | null {
+  const creator = str(rec.CreatedBy?.Name);
+  if (creator === 'Dave Cummins' || creator === 'David Cummins') return 'Dave Cummins';
+  if (creator === 'Garrett McNally') return 'Garrett McNally';
+  return null;
 }
 
 // Parse a source timestamp into a numeric instant. Deterministic (no clock
@@ -203,18 +219,21 @@ export function buildSnapshotPayload(rec: SalesforceOpportunityRecord): Snapshot
     is_closed: typeof rec.IsClosed === 'boolean' ? rec.IsClosed : null,
     is_won: typeof rec.IsWon === 'boolean' ? rec.IsWon : null,
     opportunity_name: str(rec.Name),
+    account_id: str(rec.AccountId),
     account_name: str(rec.Account?.Name),
     amount: num(rec.Amount),
     amount_currency: str(rec.CurrencyIsoCode),
     saas_revenue: num(rec.SaaS_Revenue__c),
     saas_revenue_usd: num(rec.SaaS_Revenue_USD__c),
     close_date: str(rec.CloseDate),
+    market: str(rec.Market__c),
     commercial_region: str(rec.Commercial_Region__c),
     opportunity_owner: str(rec.OwnerId),
     primary_campaign_source: str(rec.CampaignId),
     customer_expansion_raw: str(rec.Existing_Customer_or_New_Business__c),
     sales_development_rep_user_id: str(rec.Sales_Development_Rep__c),
     created_by_user_id: str(rec.CreatedById),
+    suggested_bdr_name: suggestedBdrName(rec),
     insurance_vertical_raw: str(rec[INDUSTRY_VERTICAL_CANDIDATES_FULL[0]]),
     industry_vertical_raw: str(rec[INDUSTRY_VERTICAL_CANDIDATES_FULL[1]]),
     pursuit_industry_vertical_raw: str(rec[INDUSTRY_VERTICAL_CANDIDATES_FULL[2]]),
@@ -363,7 +382,9 @@ export type EligibilityOutcome =
   | 'blocked_by_review_state'
   | 'excluded_out_of_scope'
   | 'excluded_unknown_record_type'
-  | 'excluded_older_closed'
+  | 'excluded_outside_reporting_years'
+  | 'excluded_missing_business_type'
+  | 'excluded_non_new_logo'
   | 'linked_active'
   | 'linked_retired';
 
@@ -392,9 +413,20 @@ export function classifyCandidateEligibility(
   if (state === 'unknown') return 'excluded_unknown_record_type';
   if (!FUNNEL_STATES.has(state)) return 'excluded_out_of_scope';
 
-  const createdYear = (rec.CreatedDate ?? '').slice(0, 4);
-  const inCohort = rec.IsClosed === false || createdYear === String(config.initialCohortYear);
-  if (!inCohort) return 'excluded_older_closed';
+  const createdYear = Number((rec.CreatedDate ?? '').slice(0, 4));
+  if (!Number.isInteger(createdYear) || !config.reportingYears.includes(createdYear)) {
+    return 'excluded_outside_reporting_years';
+  }
+
+  const businessType = normalizeSourceValue(
+    typeof rec.Existing_Customer_or_New_Business__c === 'string'
+      ? rec.Existing_Customer_or_New_Business__c
+      : null,
+  );
+  if (businessType === null) return 'excluded_missing_business_type';
+  if (!config.includedBusinessTypeApiValues.includes(businessType)) {
+    return 'excluded_non_new_logo';
+  }
 
   const review = existing.reviews[rec.Id];
   if (review) {
@@ -420,7 +452,9 @@ function isStaged(outcome: EligibilityOutcome, hasExistingReview: boolean): bool
       return true;
     case 'excluded_out_of_scope':
     case 'excluded_unknown_record_type':
-    case 'excluded_older_closed':
+    case 'excluded_outside_reporting_years':
+    case 'excluded_missing_business_type':
+    case 'excluded_non_new_logo':
       return hasExistingReview;
   }
 }
@@ -446,7 +480,9 @@ export function planStagingIngestion(
     blocked_by_review_state: 0,
     excluded_out_of_scope: 0,
     excluded_unknown_record_type: 0,
-    excluded_older_closed: 0,
+    excluded_outside_reporting_years: 0,
+    excluded_missing_business_type: 0,
+    excluded_non_new_logo: 0,
     linked_active: 0,
     linked_retired: 0,
   };

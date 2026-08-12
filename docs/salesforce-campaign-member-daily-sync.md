@@ -1,0 +1,231 @@
+# Salesforce CampaignMember daily sync
+
+## Purpose
+
+This is the simple production path for Lead and MQL reporting:
+
+1. Read every current Salesforce CampaignMember under the approved parent
+   campaigns.
+2. Reconcile the complete source response before any write.
+3. Upsert the person and the campaign membership together in Sourced.
+4. Run daily at 11:50 PM in `America/Denver`.
+
+It does not use Salesforce lifecycle history and it does not calculate
+velocity. It preserves both membership and observed stage evidence:
+
+- every eligible CampaignMember counts once as Lead in that campaign;
+- if the first observation is already MQL, that membership has a baseline MQL
+  on the membership date;
+- a later witnessed Lead-to-MQL change places MQL activity in the observation
+  period while preserving the earlier Lead count;
+- becoming MQL never removes the Lead count;
+- a person first seen as MQL on the nightly run still produces Lead = 1 and
+  MQL = 1 in the membership period;
+- one person in several campaigns counts once in each campaign, by design.
+
+The membership is always attributed to the Salesforce child campaign. The
+parent campaign is stored only as hierarchy and scope metadata; it is not the
+membership's reporting channel.
+
+Sales (New Logo) is not in the approved parent campaign list. It remains
+deal-only from HPP forward.
+
+## Approved scope
+
+The generated workflow contains these explicit parent campaigns:
+
+- `2026 - Content Syndication`
+- `2026 - Email`
+- `2026 - Events`
+- `2026 - Marketing SDR`
+- `2026 - Website`
+
+New child campaigns under those parents are included automatically. A new
+parent campaign must be deliberately added to the CONFIG node and reviewed.
+
+## Why this replaces the old workflow
+
+The old nightly workflow is not a trustworthy reporting feed because it:
+
+- reads only CampaignMembers created in the last two days;
+- stops at 5,000 rows;
+- reads the wrong lifecycle field name and therefore defaults every person to
+  Lead;
+- discards CampaignMember and Campaign identity;
+- updates `leads` but does not write `lead_campaign_touches`, which is the
+  table the cohort dashboard now counts;
+- can log a failed RPC as a success.
+
+The replacement performs a full approved-scope read each day. The current
+population is small enough that this is simpler and safer than a watermark.
+The native Salesforce query node follows Salesforce pagination and has no
+hard row limit in the SOQL.
+
+## Source reconciliation benchmark
+
+The Salesforce report exported on 2026-08-10 provides the initial acceptance
+benchmark. It contains no committed contact-level data.
+
+| Measure | Count |
+|---|---:|
+| Source campaign memberships | 2,629 |
+| Eligible memberships | 2,613 |
+| Distinct eligible people | 2,568 |
+| MQL memberships under the current app mapping | 538 |
+| Rows excluded because email is blank | 16 |
+| Duplicate CampaignMember IDs | 0 |
+
+All 353 Content Syndication memberships in that export are eligible. Under the
+current application lifecycle mapping, 263 of those memberships have reached
+MQL. These are a point-in-time benchmark, not values hardcoded into the
+workflow.
+
+Rows without email are never silently counted as imported and never receive a
+fabricated identity. The dry-run result reports every exclusion by reason, so
+source total = eligible + skipped must always reconcile.
+
+## Files
+
+- Generated n8n workflow:
+  `src/generated/salesforceCampaignMemberDaily.workflow.json`
+- Generator:
+  `scripts/build-salesforce-campaign-member-daily-workflow.mjs`
+- Applied database function:
+  `migrations/2026-08-11_sfdc_campaign_member_daily_apply.sql`
+- Applied Account-ID and lifecycle-provenance extension:
+  `migrations/2026-08-12_funnel_account_identity_and_lifecycle_provenance.sql`
+
+The generated artifact targets the versioned v2 function. The migration was
+applied and its restricted permissions were verified on 2026-08-12, so the
+generated workflow is ready for a controlled dry run before replacing the
+active v1 workflow.
+
+The first controlled 2,618-membership v2 apply was canceled by Supabase's
+statement timeout and rolled back atomically. The applied
+`2026-08-12_campaign_member_v2_set_based_hardening.sql` keeps the proven v1
+apply unchanged and replaces only the wrapper's per-membership Account and
+provenance queries with set-based statements. A second whole-population call
+still exceeded the managed production timeout because the underlying v1 apply
+must reconcile the populated production tables.
+
+The generated workflow therefore sends sequential 100-row batches. Each batch
+is its own atomic, idempotent function call. The workflow reports
+`APPLY_COMPLETE` only after every batch response is present and the combined
+processed and MQL totals exactly match the source reconciliation. If any batch
+fails, rerun the whole workflow; already-completed batches are safe no-ops.
+Never restore the single full-population request.
+
+The generated workflow is disabled, has no credentials, has no pinned data,
+and starts in `dry_run` mode. The apply path requires both `MODE = 'apply'`
+and the exact confirmation phrase. Either one by itself is insufficient.
+
+## First dry run
+
+1. Import `src/generated/salesforceCampaignMemberDaily.workflow.json` into
+   n8n.
+2. Confirm the workflow is inactive.
+3. Add the existing read-only Salesforce OAuth credential to:
+   - `Query approved parent campaigns`
+   - `Query all approved CampaignMembers`
+4. Do not configure the Supabase apply node yet.
+5. Execute the workflow manually.
+6. The only successful terminal must be
+   `DRY RUN: aggregate reconciliation`.
+7. Review `source_memberships`, `eligible_memberships`,
+   `skipped_by_reason`, `mql_memberships`, and `by_parent_campaign` against a
+   Salesforce report with the same campaign scope.
+
+The dry-run terminal contains aggregate counts only. Contact rows remain in a
+private in-memory field used solely by the closed apply branch.
+
+## Production activation
+
+Do this only after the dry-run reconciliation is accepted.
+
+1. The migration was applied manually to production on 2026-08-11; do not
+   rerun it as part of workflow activation.
+2. The production catalog verification confirmed the function is
+   `SECURITY DEFINER`, has
+   `search_path=pg_catalog`, is not executable by PUBLIC, anon, or
+   authenticated, and is executable by service_role.
+3. Add the existing Supabase Header Auth credential to
+   `APPLY: campaign members to Sourced`.
+4. In the CONFIG node, enter the Supabase project URL, set MODE to `apply`,
+   and enter the exact confirmation phrase shown in that node.
+5. Run once manually. `VERIFY: applied counts` must be the only successful
+   terminal.
+   The terminal must also report every planned batch as completed; a partial
+   batch run is not an accepted apply.
+6. Confirm Sourced Data Entry matches Salesforce by parent campaign and child
+   campaign for both Lead and MQL.
+7. Only then publish the workflow so the daily schedule becomes active.
+8. After one successful scheduled replacement run, deactivate the old
+   `[Sourced] - SFDC Leads Automated Sync` workflow. Do not leave both active.
+
+## First controlled production apply
+
+The first controlled invocation completed on 2026-08-11:
+
+- 2,630 source memberships;
+- 2,614 eligible memberships processed;
+- 16 missing-email memberships excluded;
+- 2,614 child-campaign touches inserted;
+- zero duplicate CampaignMember IDs;
+- zero touches assigned directly to a parent campaign;
+- 2,568 canonical Sourced people after exact identity/email reconciliation;
+- 539 currently-MQL memberships plus 135 historical-only MQL memberships,
+  producing 674 acquisition-cohort MQL memberships.
+
+Forty-two canonical people carry both a Salesforce Lead ID and Contact ID,
+confirming that converted identities are bridged instead of automatically
+creating separate Sourced people.
+
+## Database behavior
+
+`sourced_apply_sfdc_campaign_members` applies one reconciled batch in one
+transaction. An error rolls back the batch. An exact rerun is idempotent:
+
+- leads resolve by exact Salesforce identity first, then normalized email;
+- 15-character and 18-character Salesforce IDs match by the exact
+  case-sensitive 15-character prefix;
+- conflicting identities fail instead of merging people;
+- CampaignMember ID is the unique membership key;
+- existing Marketing edit locks are respected;
+- first-touch channel and date move only to an earlier source touch unless
+  locked;
+- MQL evidence is appended once and never erased by a later Lead snapshot;
+- versioned v2 stores exact Contact AccountId / converted Lead AccountId and
+  labels MQL evidence as baseline or transition instead of guessing;
+- a real membership supersedes a backfill seed in the same channel family.
+- an authoritative n8n membership supersedes a legacy ID-less `import` touch
+  for the same canonical person and exact child channel. This prevention is
+  installed by the applied
+  `2026-08-11_sfdc_campaign_touch_import_supersession.sql` migration.
+
+## Legacy-import overlap found after first apply
+
+The first controlled apply correctly inserted 2,614 CampaignMember-keyed
+`n8n_sync` touches, but 2,608 older ID-less `import` rows represented the same
+person and child channel and remained beside them. The grid correctly counted
+both stored rows, inflating all five affected campaign families. Content
+Syndication Q3 therefore rendered 150 Leads / 82 MQLs instead of the
+authoritative n8n population of 77 Leads / 43 MQLs.
+
+The supersession migration was applied manually to production on 2026-08-11.
+It removed only those proven legacy shadows and installed a trigger enforcing
+the same rule for future writes through the
+postgres-owned `SECURITY DEFINER` execution path used by the apply function.
+Direct browser/anon/authenticated writes cannot activate deletion. One unmatched
+legacy import remains untouched by design. No lead, channel, manual touch,
+backfill touch, or authoritative n8n touch is deleted.
+
+Direct aggregate-only verification after application returned **0 remaining
+shadows**, **2,614 authoritative n8n touches**, **1 intentionally unmatched
+legacy import**, and **prevention trigger present = true**. This is a permanent
+reporting invariant: a CampaignMember-keyed `n8n_sync` touch and an ID-less
+legacy `import` touch must never coexist for the same canonical person and exact
+child channel.
+
+The sync does not delete historical campaign memberships or people when a
+later source snapshot omits them. Historical cohort reporting must remain
+stable. Corrections and removals require a separate reviewed process.

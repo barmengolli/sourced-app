@@ -133,6 +133,23 @@ alone is not proof of production state.
 - Ordered touches are stored separately.
 - An HPP may be created without a linked lead. Source channel is the required
   attribution evidence.
+- The approved Salesforce Opportunity daily-ingestion contract is documented
+  in `docs/salesforce-opportunity-daily-ingestion.md`. Its exact scope is
+  2025-2026 `New Project` records in the three funnel record types;
+  `SaaS_Revenue_USD__c` is primary visible revenue while `Amount` and
+  `SaaS_Revenue__c` remain stored. Source fields refresh nightly, separate
+  reviewer overrides win, approved creator names become BDR suggestions only
+  (never automatic attribution). The supporting migration was applied and
+  permission-verified on 2026-08-12. The initial staging apply then stored 71
+  snapshots and created 71 pending reviews; direct SQL reconciliation matched
+  the accepted scope exactly, and an immediate retry wrote 0 snapshots and 0
+  reviews. Daily ingestion may stage new or changed records, but it must never
+  approve attribution automatically or overwrite reviewer-owned fields.
+  The pending v3 workflow additionally reads OpportunityFieldHistory and
+  runtime RecordType references through native Salesforce nodes. The
+  repository planner is the only movement authority: raw regressions remain
+  append-only while later reporting promotion derives a reversible
+  current-qualified HPP / Opportunity / Pursuit path.
 
 #### Outreach
 
@@ -265,9 +282,10 @@ lifecycle-history, and attribution semantics. Summary:
 - Stage counts are non-additive memberships: never sum stages into a
   total-person or total-opportunity count. Unique totals come from unique
   people (`leadId`) and unique deals (`deal_id`).
-- Leads belong to the acquisition cohort of their original Lead date; deals
-  to the cohort of their HPP entry. Later transitions update the original
-  cohort. Every cohort calculation takes an explicit `asOf` date.
+- The Data Entry grid is stage activity: Lead stays in its membership period;
+  MQL, HPP, Opp, and Pursuit belong to their own effective stage periods.
+  The adjacent Conversion panel is separate cohort reporting: selected-period
+  Leads and HPPs are followed forward rather than dividing activity totals.
 - Lifecycle is a repeatable event history (Lead > MQL > Lead > MQL). First
   valid conversion drives cohort MQLs; later ones are requalifications.
   Dates carry provenance (`salesforce_confirmed`, `n8n_observed`,
@@ -278,9 +296,10 @@ lifecycle-history, and attribution semantics. Summary:
 - Efficiency comparisons across cohorts of different maturity are suppressed
   until a maturity-alignment rule is selected.
 
-Pure implementation: `src/lib/funnelCohorts.ts` and
-`src/lib/campaignAttribution.ts` (not yet wired into any dashboard;
-`computeGrid` unchanged). The contract doc also records the current nightly
+Pure foundations remain in `src/lib/funnelCohorts.ts` and
+`src/lib/campaignAttribution.ts`; the live cohort conversion calculation is
+`src/lib/funnelConversionCohorts.ts` and `computeGrid` now renders stage
+activity. The contract doc also records the current nightly
 SFDC CampaignMember workflow's verified gaps and the open Salesforce
 field-name questions.
 
@@ -336,12 +355,12 @@ created in the configured cohort year (2026 first run); Service and
 unknown types are excluded from the queue but still staged; linked deals
 sync without reapproval (Service moves preserve links and derive funnel
 unavailability; returns restore without review); decided reviews are never
-reopened. A PENDING restricted SECURITY DEFINER apply function
-(`2026-07-27_opportunity_ingestion_apply_fn.sql`, unapplied) provides
-atomic batch writes with watermarks only on full success. The apply path
-does not exist yet: the planner's server-side execution environment is a
-documented open infrastructure decision, and the workflow shell fails
-closed. Staging never affects visible reporting.
+reopened. The applied restricted SECURITY DEFINER function from
+`2026-07-27_opportunity_ingestion_apply_fn.sql` provides atomic batch writes
+with watermarks only on full success. The 2026-08-12 v2 contract and state
+reader are also applied. The generated daily workflow remains disabled and
+closed to apply until its manual dry run reconciles. Staging never affects
+visible reporting.
 
 `docs/salesforce-lifecycle-history-mapping.md` extends this with the
 Salesforce field-history ingestion foundation:
@@ -758,8 +777,8 @@ Do not turn a focused task into one of these projects without approval:
   `lead`), queries no field history, writes through an unversioned RPC
   that continues on error, and logs person-level data to a Sheet with
   no failure alerting. It cannot maintain `lead_campaign_touches`, so
-  until the rebuild ships, new memberships reach reporting only
-  through the manual report import. The read-only discovery plan and
+  until the replacement is activated, new memberships reach reporting
+  only through the manual report import. The read-only discovery plan and
   its DISABLED manual workflow template are in
   `docs/lead-sync-discovery.md`; the pure summary module is
   `src/lib/leadSyncDiscovery.ts`. No rebuild, schedule, or write path
@@ -770,7 +789,18 @@ Do not turn a focused task into one of these projects without approval:
   repeated movement, and enabling tracking later backfills nothing. Bite
   4G2 must therefore build an append-only observation ledger going
   forward; current lifecycle values are snapshot evidence only and must
-  never be reported as transitions.
+  never be reported as transitions. The simpler acquisition-cohort
+  replacement is now generated at
+  `src/generated/salesforceCampaignMemberDaily.workflow.json` and documented
+  in `docs/salesforce-campaign-member-daily-sync.md`. It performs a complete
+  daily approved-campaign read, counts every membership as Lead, preserves
+  MQL evidence for the same membership, and writes leads plus
+  `lead_campaign_touches` through the applied restricted function in
+  `2026-08-11_sfdc_campaign_member_daily_apply.sql`. The first controlled
+  production apply and reconciliation completed on 2026-08-11. A pending v2
+  extension adds exact Salesforce Account identity and baseline-versus-
+  transition provenance; do not switch the active workflow to v2 before that
+  migration is applied and verified.
 - Real authentication and restrictive role-based RLS are not implemented.
 - `Channel.year` is used by the application and listed as applied in the
   migration ledger, but `SCHEMA.sql` lacks the column and the named
@@ -783,11 +813,10 @@ Do not turn a focused task into one of these projects without approval:
 - Leads-table virtualization is a separate performance project.
 - Content Syndication budget allocation may be revisited separately.
 - AWS migration is planning only. Production remains Vercel plus Supabase.
-- The funnel cohort/attribution contract (`docs/funnel-source-contract.md`)
-  is implemented as pure modules only. Wiring it into dashboards, migrating
-  single-entry `stage_history` data, fixing the nightly SFDC workflow's
-  lifecycle gaps, and confirming Salesforce date-field API names are all
-  future, separately approved work.
+- The funnel stage-activity and cohort-conversion split is wired into Data
+  Entry. Exact Account-ID completion, Opportunity history ingestion, reviewed
+  promotion into reporting, and the authenticated live review queue remain
+  separate gates; never present an unavailable cross-grain conversion as 0.
 - The Opportunity Queue Manager (Bite 5C2B1, `docs/opportunity-queue.md`)
   exists as domain logic (`src/lib/opportunityQueue.ts`), a typed repository
   boundary (`src/lib/opportunityQueueRepository.ts`), and an unrouted UI

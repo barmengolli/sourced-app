@@ -174,8 +174,9 @@ export const ALLOWED_BODY_KEYS: Record<string, ReadonlySet<string>> = {
 
 // Ordinary responses expose NO Salesforce Opportunity IDs, History IDs,
 // User IDs, database row internals, tokens, or credentials. Evidence is
-// reduced to presence flags plus the non-identifying Customer Expansion
-// label; a future administrative diagnostic contract may expose external
+// reduced to presence flags, the check-constrained normalized BDR suggestion,
+// plus the non-identifying Customer Expansion label; a future administrative
+// diagnostic contract may expose external
 // IDs behind a separate capability, but it does not exist yet.
 export interface QueueItemResponse {
   // The opaque internal review identity (sf_opportunity_reviews.id UUID).
@@ -187,6 +188,8 @@ export interface QueueItemResponse {
   isClosed: boolean;
   amount: number | null;
   amountCurrency: string | null;
+  saasRevenue: number | null;
+  saasRevenueUsd: number | null;
   createdAt: string | null;
   lastModifiedAt: string | null;
   owner: string | null;
@@ -198,6 +201,7 @@ export interface QueueItemResponse {
   evidence: {
     bdrEvidencePresent: boolean;
     creatorEvidencePresent: boolean;
+    suggestedBdrName: 'Dave Cummins' | 'Garrett McNally' | null;
     campaignEvidencePresent: boolean;
     customerExpansionRaw: string | null;
   };
@@ -229,6 +233,8 @@ export function toQueueItemResponse(
     isClosed: item.isClosed,
     amount: item.amount,
     amountCurrency: item.amountCurrency,
+    saasRevenue: item.saasRevenue,
+    saasRevenueUsd: item.saasRevenueUsd,
     createdAt: item.createdAt,
     lastModifiedAt: item.lastModifiedAt,
     owner: item.owner,
@@ -240,6 +246,7 @@ export function toQueueItemResponse(
     evidence: {
       bdrEvidencePresent: present(item.evidence.bdrUserId),
       creatorEvidencePresent: present(item.evidence.creatorUserId),
+      suggestedBdrName: item.evidence.suggestedBdrName,
       campaignEvidencePresent: present(item.evidence.primaryCampaignSource),
       customerExpansionRaw: item.evidence.customerExpansionRaw,
     },

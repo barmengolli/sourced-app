@@ -60,9 +60,9 @@ export interface SalesforceOpportunityRecord {
   Owner?: { Name?: string | null } | null;
   CampaignId?: string | null;
   Campaign?: { Name?: string | null } | null;
-  // Creator identity is used for DIAGNOSTIC classification only; no channel
-  // is ever inferred from it. CreatedBy.Name exists solely for the private
-  // n8n-only creator diagnostic and never enters the aggregate summary.
+  // Creator identity is review evidence only; no channel is ever inferred
+  // from it. The daily staging planner normalizes only the explicitly
+  // approved BDR names and preserves every other name as no suggestion.
   CreatedById?: string | null;
   CreatedBy?: { Name?: string | null } | null;
   // Custom fields (Commercial Region, milestone dates, BDR, GTM fields)
@@ -203,12 +203,13 @@ export const CUSTOMER_EXPANSION_VALUE_MAP: Record<
   string,
   'new_logo' | 'existing_customer_or_expansion'
 > = {
-  'New Logo': 'new_logo',
-  'New Business': 'new_logo',
-  'Existing Customer': 'existing_customer_or_expansion',
-  Expansion: 'existing_customer_or_expansion',
-  'Existing Customer or Expansion': 'existing_customer_or_expansion',
-  'Customer Expansion': 'existing_customer_or_expansion',
+  'New Project': 'new_logo',
+  'Upsell/Cross-sell': 'existing_customer_or_expansion',
+  Renewal: 'existing_customer_or_expansion',
+  Reactivation: 'existing_customer_or_expansion',
+  'New Division or Entity': 'existing_customer_or_expansion',
+  'Contract Renegotiation': 'existing_customer_or_expansion',
+  'Variable Revenue': 'existing_customer_or_expansion',
 };
 
 export function classifyCustomerExpansion(raw: string | null | undefined): CustomerExpansionCategory {

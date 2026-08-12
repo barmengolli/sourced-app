@@ -141,6 +141,7 @@ describe('approval rules', () => {
       evidence: {
         bdrUserId: null,
         creatorUserId: null,
+        suggestedBdrName: null,
         primaryCampaignSource: 'SYNTH-CAMPAIGN-EVIDENCE',
         customerExpansionRaw: null,
       },
@@ -158,6 +159,7 @@ describe('approval rules', () => {
       evidence: {
         bdrUserId: 'SYNTH-USER-BDR',
         creatorUserId: 'SYNTH-USER-CREATOR',
+        suggestedBdrName: 'Dave Cummins',
         primaryCampaignSource: null,
         customerExpansionRaw: null,
       },
@@ -475,6 +477,7 @@ describe('queue filters', () => {
       evidence: {
         bdrUserId: 'SYNTH-USER-BDR',
         creatorUserId: null,
+        suggestedBdrName: 'Garrett McNally',
         primaryCampaignSource: 'SYNTH-CAMPAIGN',
         customerExpansionRaw: null,
       },

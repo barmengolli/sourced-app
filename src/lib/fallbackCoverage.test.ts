@@ -72,14 +72,14 @@ describe('computeGrid — M3 manual fallback vs source coverage', () => {
     expect(gridLeadCell(grid.rows, 'c1')).toBe(30);
   });
 
-  it('suppresses a manual HPP fallback when a source attribution exists but is gated out by the cohort rule', () => {
+  it('uses cross-period stage activity and suppresses a manual fallback for the source-backed cell', () => {
     const c = channel({ id: 'c1' });
-    // An Opp attribution exists for the cell, but its deal has no in-period HPP,
-    // so the cohort gate removes it from the displayed count. Coverage should
-    // still see the source row and suppress a manual Opp actual.
+    // An Opp attribution exists in Q1 while its HPP was in the prior quarter.
+    // Stage activity counts the Q1 Opp and the manual fallback must not layer
+    // on top of it.
     const attrs = [
       attribution({ deal_id: 'd1', stage_key: 'opp', channel_id: 'c1', year: 2026, period_index: 1 }),
-      // deal d1's HPP is in a prior year, so the Opp is gated out of Q1 2026.
+      // deal d1's HPP is in the prior year; that does not hide Q1 Opp activity.
       attribution({ deal_id: 'd1', stage_key: 'hpp', channel_id: 'c1', year: 2025, period_index: 4 }),
     ];
     const grid = computeGrid({
@@ -94,9 +94,7 @@ describe('computeGrid — M3 manual fallback vs source coverage', () => {
       regions: undefined,
     });
     const oppCell = grid.rows.find((r) => r.channelId === 'c1')?.cells.opp.actual ?? null;
-    // Gated out by cohort, but source-covered, so no manual 5 layered on: the
-    // cell stays empty (null) rather than showing the backfill.
-    expect(oppCell).toBeNull();
+    expect(oppCell).toBe(1);
   });
 });
 

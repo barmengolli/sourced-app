@@ -1,8 +1,8 @@
 # Funnel cohort, lifecycle, and source-attribution contract
 
-Status: Foundation contract (Bite 4A). Calculation, validation, and
-documentation only. Nothing in this document changes visible dashboard
-behavior yet; the implementing modules are not wired into any page.
+Status: Evolved contract. The Data Entry grid now uses stage activity while
+the Conversion panel follows explicit cohorts; these two questions are never
+calculated by dividing the same visible totals.
 
 Implementing modules:
 
@@ -10,6 +10,8 @@ Implementing modules:
   deal uniqueness, HPP-anchored deal cohorts, cohort comparison.
 - `src/lib/campaignAttribution.ts`: touch dedupe, primary-source resolution,
   campaign influence.
+- `src/lib/funnelConversionCohorts.ts`: the live, explicitly followed cohorts
+  used by the Data Entry conversion panel.
 
 Both are pure: every calculation takes an explicit `asOf` date, nothing reads
 the clock, and results carry explicit states (`complete`, `incomplete`,
@@ -60,6 +62,12 @@ A surface must state which model it uses. A Q2 lead that becomes MQL in Q3 is
 a Q2-cohort MQL, a Q3-activity transition, and a snapshot MQL as of any date
 after the transition. All three statements are true at once; they answer
 different questions.
+
+The Data Entry table is the activity surface: it renders Lead in Q2 and MQL in
+Q3. Its Conversion panel is the cohort surface: Lead-to-MQL follows selected-
+period CampaignMember Leads forward, MQL-to-HPP dedupes exact Salesforce
+Account IDs, and HPP-to-later stages follows selected-period HPP opportunities
+through the reversible current-qualified projection.
 
 ## 3. Acquisition cohort progression
 
@@ -223,6 +231,30 @@ issues, never guessed.
   total: `summarizeDealStages` flags `missing_deal_id`, excludes the row from
   unique totals, and sets `uniqueTotalTrustworthy: false`.
 
+### Reversible current-qualified reporting projection
+
+`src/lib/opportunityReportingProjection.ts` is the pure boundary between the
+protected Salesforce staging ledger and Data Entry reporting. After a review
+is approved and exactly linked, it derives generated attribution rows from the
+authoritative current path:
+
+- current HPP -> HPP only;
+- current Opportunity -> HPP + Opportunity;
+- current Pursuit -> HPP + Opportunity + Pursuit.
+
+Each generated row uses that stage's active entry date and therefore its own
+month, quarter, and year. A regression to HPP removes generated Opportunity
+and Pursuit rows from reporting but never deletes append-only Salesforce
+movement events. Generated rows carry `source_system = 'salesforce'` and exact
+`sf_opportunity_id`; existing/manual rows remain `source_system = 'manual'`,
+so reconciliation cannot delete reviewer-created data.
+
+Reviewer-owned Commercial Region overrides the nightly Salesforce value. The
+effective value must be one of the application's four exact reporting-region
+keys; an unmapped source value blocks projection instead of silently becoming
+`Other`. A missing historical entry date remains unavailable and is never
+invented from the current snapshot.
+
 ## 7. Current Salesforce/n8n workflow findings
 
 Observed from the exported workflow definition and its append-only
@@ -338,11 +370,17 @@ retroactively applied to earlier events; a correction path is future work.
 - Migration of existing single-entry `stage_history` data onto the event
   contract (including date-source backfill semantics) is future work.
 
-## 10. Scope of this bite
+## 10. Current implementation boundary
 
-This bite adds pure calculation modules, tests, and this contract. It does not
-wire anything into a dashboard, does not modify `computeGrid` or any
-production calculation, and makes no schema, migration, workflow, Sheet, or
-production-data change. Current funnel pages continue to bucket MQLs by the
-quarter of the first MQL history entry; adopting the acquisition-cohort view
-on a page is a later, explicitly scoped change.
+The Data Entry grid and its Lead/MQL drilldown now use stage activity.
+`funnelConversionCohorts.ts` powers the adjacent cohort Conversion panel. The
+CampaignMember and Opportunity workflows have generated repository artifacts
+for exact Account identity and movement-history capture, backed by pending
+forward-only migrations.
+
+The Opportunity approval/promotion write path is intentionally not connected
+to the browser. The protected queue has RLS with zero browser policies, and
+`docs/opportunity-queue-api.md` requires a same-origin authenticated server
+API. Until IT provides the PingOne registration and approved Node.js hosting,
+the pure queue service and reporting projection can be tested but must not be
+replaced by a browser-held service-role credential or permissive RLS policy.
