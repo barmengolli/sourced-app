@@ -482,6 +482,86 @@ describe('fingerprints and stale protection (hardening)', () => {
     const payload = serializeApplyPayload(p);
     expect(payload.p_snapshots).toHaveLength(0);
   });
+
+  it('repairs only the proven legacy OwnerId-to-Owner.Name representation', () => {
+    const rec = opp({
+      Id: 'SYNTH-OPP-OWNER',
+      OwnerId: '005000000000001AAA',
+      Owner: { Name: 'Synthetic Owner Name' },
+      SystemModstamp: '2026-06-01T09:00:00.000+0000',
+    });
+    const incoming = buildSnapshotPayload(rec);
+    const { content_hash, ...incomingFields } = incoming;
+    void content_hash;
+    const legacyHash = snapshotFingerprint({
+      ...incomingFields,
+      opportunity_owner: rec.OwnerId!,
+    });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-OWNER': {
+          contentHash: legacyHash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-OWNER': { reviewState: 'pending', issueCodes: [], channelId: null },
+      },
+    };
+
+    const planned = plan([rec], [], existing);
+    const payload = serializeApplyPayload(planned);
+
+    expect(planned.diagnostics.ownerLabelRepairs).toBe(1);
+    expect(planned.diagnostics.snapshotConflicts).toBe(0);
+    expect(planned.diagnostics.snapshotsPlanned).toBe(0);
+    expect(payload.p_owner_repairs).toEqual([{
+      sf_opportunity_id: 'SYNTH-OPP-OWNER',
+      legacy_owner_user_id: '005000000000001AAA',
+      owner_name: 'Synthetic Owner Name',
+      sf_last_modified_at: '2026-06-01T09:00:00.000Z',
+      prior_content_hash: legacyHash,
+      content_hash: incoming.content_hash,
+    }]);
+  });
+
+  it('does not treat an arbitrary same-timestamp difference as an owner-label repair', () => {
+    const rec = opp({
+      Id: 'SYNTH-OPP-OWNER-CONFLICT',
+      OwnerId: '005000000000001AAA',
+      Owner: { Name: 'Synthetic Owner Name' },
+      StageName: '4) Discovery',
+      SystemModstamp: '2026-06-01T09:00:00.000+0000',
+    });
+    const oldRecord = { ...rec, StageName: '3) Qualification' };
+    const oldPayload = buildSnapshotPayload(oldRecord);
+    const { content_hash, ...oldFields } = oldPayload;
+    void content_hash;
+    const priorHash = snapshotFingerprint({
+      ...oldFields,
+      opportunity_owner: rec.OwnerId!,
+    });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-OWNER-CONFLICT': {
+          contentHash: priorHash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-OWNER-CONFLICT': { reviewState: 'pending', issueCodes: [], channelId: null },
+      },
+    };
+
+    const planned = plan([rec], [], existing);
+    expect(planned.diagnostics.ownerLabelRepairs).toBe(0);
+    expect(planned.diagnostics.snapshotConflicts).toBe(1);
+    expect(serializeApplyPayload(planned).p_owner_repairs).toHaveLength(0);
+  });
 });
 
 describe('review preservation (hardening)', () => {

@@ -1851,3 +1851,14 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- deal link, and generated reporting rows commit atomically. Only generated
 -- source_system='salesforce' attribution rows are reconciled; manual rows are
 -- never changed. See the migration for the executable function bodies.
+
+-- =============================================================
+-- Opportunity owner-label compatibility boundary
+-- migrations/2026-08-12_opportunity_owner_label_upgrade.sql
+-- STATUS: PENDING / NOT YET APPLIED.
+-- =============================================================
+-- public.sf_apply_opportunity_ingestion_v4(JSONB, JSONB, JSONB, JSONB, JSONB)
+-- delegates ordinary ingestion to v3, then permits only a proven legacy
+-- OwnerId-to-Owner.Name representation repair at the identical Salesforce
+-- timestamp. Opportunity id, old owner id, timestamp, and both content hashes
+-- are guarded; every unrelated same-timestamp content difference stays blocked.

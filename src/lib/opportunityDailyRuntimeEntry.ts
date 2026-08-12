@@ -111,6 +111,7 @@ export function planOpportunityDailyRun(input: OpportunityDailyRuntimeInput) {
       current_pipeline_by_record_type: currentPipeline,
       suggested_bdrs: suggestedBdrs,
       source_attribution_requires_human_review: true,
+      owner_label_repairs_planned: payload.p_owner_repairs.length,
       snapshots_planned: payload.p_snapshots.length,
       reviews_planned: payload.p_reviews.length,
       events_planned: payload.p_events.length,

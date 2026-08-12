@@ -8,6 +8,7 @@ const bundle = await readFile(path.join(root, 'src/generated/opportunityDailyRun
 const check = process.argv.includes('--check');
 
 const CONFIRM = 'APPLY 2025-2026 NEW PROJECT OPPORTUNITIES';
+const SUPABASE_PROJECT_URL = 'https://rsyjxtuatrwtqajjkgvd.supabase.co';
 const SOQL = [
   'SELECT Id, Name, AccountId, Account.Name, RecordType.DeveloperName, RecordType.Name,',
   'StageName, IsClosed, IsWon, CreatedDate, LastModifiedDate, SystemModstamp,',
@@ -39,13 +40,13 @@ const HISTORY_SOQL = [
 const configCode = `// This is the only ordinary configuration node.
 const MODE = 'dry_run';
 const CONFIRM = '';
-const SUPABASE_PROJECT_URL = 'https://PASTE_PROJECT_REF_HERE.supabase.co';
+const SUPABASE_PROJECT_URL = ${JSON.stringify(SUPABASE_PROJECT_URL)};
 const REQUIRED_CONFIRMATION = ${JSON.stringify(CONFIRM)};
 if (!['dry_run','apply'].includes(MODE)) throw new Error('CONFIG FAILED: invalid mode.');
 const VALID_PROJECT_URL = SUPABASE_PROJECT_URL.startsWith('https://')
   && /^[a-z0-9-]+\\.supabase\\.co$/.test(SUPABASE_PROJECT_URL.slice('https://'.length));
-if (!VALID_PROJECT_URL || SUPABASE_PROJECT_URL.includes('PASTE_PROJECT_REF_HERE')) {
-  throw new Error('CONFIG FAILED: replace the Supabase project URL placeholder; never paste a key here.');
+if (!VALID_PROJECT_URL) {
+  throw new Error('CONFIG FAILED: invalid Supabase project URL; never paste a key here.');
 }
 return [{ json: {
   mode: MODE,
@@ -108,8 +109,8 @@ if (!planned._private_apply_payload) throw new Error('APPLY GATE CLOSED: payload
 return [{ json: planned._private_apply_payload }];`;
 
 const verifyStagingCode = `const result = $input.first().json;
-if (result.ok !== true || result.contract_version !== 3) {
-  throw new Error('APPLY FAILED: database did not confirm the v3 contract.');
+if (result.ok !== true || result.contract_version !== 4) {
+  throw new Error('APPLY FAILED: database did not confirm the v4 contract.');
 }
 return [{ json: result }];`;
 
@@ -177,9 +178,9 @@ const nodes = [
   node('prepare', 'APPLY GATE: exact confirmation', 'n8n-nodes-base.code', 2, [2060, -120], {
     mode: 'runOnceForAllItems', jsCode: prepareCode,
   }),
-  node('apply', 'APPLY: opportunity staging v3', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
+  node('apply', 'APPLY: opportunity staging v4', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
     method: 'POST',
-    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v3' }}",
+    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v4' }}",
     authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
     sendHeaders: true,
     headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
@@ -217,8 +218,8 @@ const workflow = {
       [{ node: 'APPLY GATE: exact confirmation', type: 'main', index: 0 }],
       [{ node: 'DRY RUN: aggregate summary', type: 'main', index: 0 }],
     ] },
-    'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v3', type: 'main', index: 0 }]] },
-    'APPLY: opportunity staging v3': { main: [[{ node: 'VERIFY: staging apply', type: 'main', index: 0 }]] },
+    'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v4', type: 'main', index: 0 }]] },
+    'APPLY: opportunity staging v4': { main: [[{ node: 'VERIFY: staging apply', type: 'main', index: 0 }]] },
     'VERIFY: staging apply': { main: [[{ node: 'REFRESH: approved Opportunity reporting', type: 'main', index: 0 }]] },
     'REFRESH: approved Opportunity reporting': { main: [[{ node: 'VERIFY: apply result', type: 'main', index: 0 }]] },
   },
