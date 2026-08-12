@@ -100,6 +100,13 @@ applied and its restricted permissions were verified on 2026-08-12, so the
 generated workflow is ready for a controlled dry run before replacing the
 active v1 workflow.
 
+The first controlled 2,618-membership v2 apply was canceled by Supabase's
+statement timeout and rolled back atomically. The pending
+`2026-08-12_campaign_member_v2_set_based_hardening.sql` keeps the proven v1
+apply unchanged and replaces only the wrapper's per-membership Account and
+provenance queries with set-based statements. Do not retry v2 apply until that
+hardening migration is applied and verified.
+
 The generated workflow is disabled, has no credentials, has no pinned data,
 and starts in `dry_run` mode. The apply path requires both `MODE = 'apply'`
 and the exact confirmation phrase. Either one by itself is insufficient.

@@ -280,3 +280,44 @@ describe('account identity and lifecycle provenance migration', () => {
     }
   });
 });
+
+describe('CampaignMember v2 set-based timeout hardening', () => {
+  const sql = readFileSync(
+    resolve('migrations/2026-08-12_campaign_member_v2_set_based_hardening.sql'),
+    'utf8',
+  );
+  const functionBody = sql.slice(
+    sql.indexOf('CREATE OR REPLACE FUNCTION public.sourced_apply_sfdc_campaign_members_v2'),
+    sql.indexOf('REVOKE ALL ON FUNCTION public.sourced_apply_sfdc_campaign_members_v2'),
+  );
+
+  it('is pending and replaces only the v2 wrapper', () => {
+    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION public.sourced_apply_sfdc_campaign_members_v2');
+    expect(sql).not.toContain('CREATE OR REPLACE FUNCTION public.sourced_apply_sfdc_campaign_members(');
+    expect(sql).not.toMatch(/ALTER TABLE|INSERT INTO public\.(leads|lead_campaign_touches)/i);
+  });
+
+  it('keeps v1 authoritative and performs no per-membership PL/pgSQL loop', () => {
+    expect(functionBody).toContain('public.sourced_apply_sfdc_campaign_members(p_rows)');
+    expect(functionBody).toContain('DROP TABLE IF EXISTS pg_temp._sourced_cm_v2_people');
+    expect(functionBody).toContain('CREATE TEMP TABLE _sourced_cm_v2_people');
+    expect(functionBody).toContain('UPDATE public.leads AS l');
+    expect(functionBody).not.toMatch(/FOR\s+v_rec\s+IN/i);
+  });
+
+  it('preserves identity refusal and lifecycle provenance', () => {
+    expect(functionBody).toContain('one email carries conflicting Salesforce Account identities');
+    expect(functionBody).toContain('existing person carries a different Salesforce Account identity');
+    expect(functionBody).toContain("WHEN incoming.prior_state = 'lead' THEN 'transition'");
+    expect(functionBody).toContain("ELSE 'baseline'");
+    expect(functionBody).toContain("AT TIME ZONE 'America/Denver'");
+  });
+
+  it('remains service-role only', () => {
+    expect(sql).toContain('REVOKE ALL ON FUNCTION public.sourced_apply_sfdc_campaign_members_v2(JSONB) FROM PUBLIC');
+    expect(sql).toContain('REVOKE ALL ON FUNCTION public.sourced_apply_sfdc_campaign_members_v2(JSONB) FROM anon');
+    expect(sql).toContain('REVOKE ALL ON FUNCTION public.sourced_apply_sfdc_campaign_members_v2(JSONB) FROM authenticated');
+    expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.sourced_apply_sfdc_campaign_members_v2(JSONB) TO service_role');
+  });
+});
