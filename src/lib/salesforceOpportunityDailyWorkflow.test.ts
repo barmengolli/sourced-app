@@ -87,6 +87,20 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(config).toContain('[a-z0-9-]+\\.supabase\\.co$');
   });
 
+  it('emits executable configuration code and accepts a valid project URL', () => {
+    const config = String(byName('CONFIG: closed by default').parameters.jsCode);
+    expect(() => new Function('$now', config)).not.toThrow();
+
+    const runnable = config.replace(
+      'https://PASTE_PROJECT_REF_HERE.supabase.co',
+      'https://synthetic-project.supabase.co',
+    );
+    const result = new Function('$now', runnable)({
+      toISO: () => '2026-08-12T12:00:00.000Z',
+    }) as Array<{ json: { mode: string; apply_authorized: boolean } }>;
+    expect(result[0].json).toMatchObject({ mode: 'dry_run', apply_authorized: false });
+  });
+
   it('has no Google Sheet or browser-facing database node', () => {
     expect(workflow.nodes.some((node) => node.type.toLowerCase().includes('googlesheet'))).toBe(false);
     expect(workflow.nodes.some((node) => node.type.toLowerCase().includes('supabase'))).toBe(false);

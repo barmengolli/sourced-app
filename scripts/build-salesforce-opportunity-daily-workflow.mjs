@@ -27,8 +27,9 @@ const CONFIRM = '';
 const SUPABASE_PROJECT_URL = 'https://PASTE_PROJECT_REF_HERE.supabase.co';
 const REQUIRED_CONFIRMATION = ${JSON.stringify(CONFIRM)};
 if (!['dry_run','apply'].includes(MODE)) throw new Error('CONFIG FAILED: invalid mode.');
-if (!/^https:\/\/[a-z0-9-]+\\.supabase\\.co$/.test(SUPABASE_PROJECT_URL)
-    || SUPABASE_PROJECT_URL.includes('PASTE_PROJECT_REF_HERE')) {
+const VALID_PROJECT_URL = SUPABASE_PROJECT_URL.startsWith('https://')
+  && /^[a-z0-9-]+\\.supabase\\.co$/.test(SUPABASE_PROJECT_URL.slice('https://'.length));
+if (!VALID_PROJECT_URL || SUPABASE_PROJECT_URL.includes('PASTE_PROJECT_REF_HERE')) {
   throw new Error('CONFIG FAILED: replace the Supabase project URL placeholder; never paste a key here.');
 }
 return [{ json: {
