@@ -10,7 +10,9 @@
 --
 -- Forward-only and idempotent. No business row changes until the v5 RPC is
 -- explicitly invoked by the closed-by-default workflow.
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. Supabase reported
+-- success. Function only; this migration invoked no RPC and changed no
+-- Opportunity business row by itself.
 
 BEGIN;
 

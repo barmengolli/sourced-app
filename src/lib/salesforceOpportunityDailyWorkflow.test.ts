@@ -144,7 +144,7 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(sql).not.toContain('PENDING / NOT YET APPLIED');
   });
 
-  it('binds the pending v5 snapshot-shape repair and its account preconditions', () => {
+  it('binds the applied v5 snapshot-shape repair and its account preconditions', () => {
     const sql = readFileSync(
       resolve(process.cwd(), 'migrations/2026-08-12_opportunity_snapshot_shape_upgrade.sql'),
       'utf8',
@@ -156,6 +156,8 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(sql).toContain("content_hash = v_item->>'prior_content_hash'");
     expect(sql).toContain('TO service_role');
     expect(sql).toContain('FROM PUBLIC');
-    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
+    expect(sql).toContain('STATUS: Applied manually to production on 2026-08-12');
+    expect(sql).toContain('this migration invoked no RPC');
+    expect(sql).not.toContain('PENDING / NOT YET APPLIED');
   });
 });

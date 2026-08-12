@@ -1868,7 +1868,9 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- =============================================================
 -- Initial Opportunity snapshot-shape compatibility boundary
 -- migrations/2026-08-12_opportunity_snapshot_shape_upgrade.sql
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. Supabase reported
+-- success. Function only; this migration invoked no RPC and changed no
+-- Opportunity business row by itself.
 -- =============================================================
 -- public.sf_apply_opportunity_ingestion_v5(JSONB, JSONB, JSONB, JSONB, JSONB)
 -- delegates ordinary ingestion to v3, then permits only a fingerprint-proven
