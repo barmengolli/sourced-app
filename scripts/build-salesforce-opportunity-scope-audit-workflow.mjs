@@ -204,6 +204,8 @@ const stageByRecordType = {
 };
 const configuredYears = new Set(cfg.reporting_years);
 const seen = new Set();
+const businessTypeValueCounts = new Map();
+let blankBusinessTypeValues = 0;
 const excluded = {
   missing_new_logo_value: 0,
   existing_customer_or_expansion: 0,
@@ -237,6 +239,12 @@ let campaignEvidencePresent = 0;
 
 for (const item of sourceItems) {
   const row = item.json || {};
+  const businessType = clean(get(row, 'Existing_Customer_or_New_Business__c'));
+  if (businessType) {
+    businessTypeValueCounts.set(businessType, (businessTypeValueCounts.get(businessType) || 0) + 1);
+  } else {
+    blankBusinessTypeValues += 1;
+  }
   const id = clean(get(row, 'Id'));
   if (!sfid(id)) { excluded.invalid_source_row += 1; continue; }
   const canonicalOppId = canonicalId(id);
@@ -249,7 +257,6 @@ for (const item of sourceItems) {
   const stage = stageByRecordType[devName];
   if (!stage) { excluded.invalid_source_row += 1; continue; }
 
-  const businessType = clean(get(row, 'Existing_Customer_or_New_Business__c'));
   if (!businessType) { excluded.missing_new_logo_value += 1; continue; }
   if (['Existing Customer','Expansion','Existing Customer or Expansion','Customer Expansion'].includes(businessType)) {
     excluded.existing_customer_or_expansion += 1; continue;
@@ -293,6 +300,14 @@ for (const item of sourceItems) {
 }
 
 const skipped = Object.values(excluded).reduce((sum, value) => sum + value, 0);
+const businessTypeValues = [...businessTypeValueCounts.entries()]
+  .map(([value, count]) => ({ value, count }))
+  .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+const inventoriedBusinessTypes = blankBusinessTypeValues
+  + businessTypeValues.reduce((sum, entry) => sum + entry.count, 0);
+if (inventoriedBusinessTypes !== sourceItems.length) {
+  throw new Error('RECONCILIATION FAILED: business-type value inventory does not equal the Salesforce response.');
+}
 if (eligible + skipped !== sourceItems.length) {
   throw new Error('RECONCILIATION FAILED: eligible plus excluded does not equal the Salesforce response.');
 }
@@ -328,6 +343,12 @@ return [{ json: {
   eligible_new_logo_opportunities: eligible,
   excluded_opportunities: skipped,
   excluded_by_reason: excluded,
+  business_type_value_inventory: {
+    field_api_name: 'Existing_Customer_or_New_Business__c',
+    blank: blankBusinessTypeValues,
+    values: businessTypeValues,
+    total: inventoriedBusinessTypes
+  },
   current_pipeline: {
     open_opportunities: open,
     by_current_record_type: byOpenStage
@@ -371,6 +392,15 @@ if (summary.reconciliation_complete !== true) {
 }
 if (summary.review_queue.candidates_requiring_source_review !== summary.eligible_new_logo_opportunities) {
   throw new Error('GUARD FAILED: every eligible Opportunity must enter source review.');
+}
+const inventory = summary.business_type_value_inventory;
+const inventoryValueTotal = Array.isArray(inventory && inventory.values)
+  ? inventory.values.reduce((sum, entry) => sum + Number(entry.count || 0), 0)
+  : -1;
+if (!inventory || inventory.field_api_name !== 'Existing_Customer_or_New_Business__c'
+  || inventory.blank + inventoryValueTotal !== summary.source_opportunities
+  || inventory.total !== summary.source_opportunities) {
+  throw new Error('GUARD FAILED: business-type value inventory is missing or incomplete.');
 }
 const serialized = JSON.stringify(summary);
 if (/[A-Za-z0-9]{15}([A-Za-z0-9]{3})?/.test(serialized) || /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i.test(serialized)) {

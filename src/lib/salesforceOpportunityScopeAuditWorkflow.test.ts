@@ -231,6 +231,16 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
         existing_customer_or_expansion: 1,
         outside_configured_years: 1,
       },
+      business_type_value_inventory: {
+        field_api_name: 'Existing_Customer_or_New_Business__c',
+        blank: 1,
+        values: [
+          { value: 'New Logo', count: 3 },
+          { value: 'Existing Customer', count: 1 },
+          { value: 'New Business', count: 1 },
+        ],
+        total: 6,
+      },
       current_pipeline: {
         open_opportunities: 2,
         by_current_record_type: { hpp: 1, opp: 1, pursuit: 0 },
@@ -266,6 +276,30 @@ describe('Salesforce Opportunity scope-audit workflow', () => {
       },
       reporting_lens: 'current_pipeline_only',
       reconciliation_complete: true,
+    });
+  });
+
+  it('reports the actual business-type values and counts when configured labels do not match', () => {
+    const [result] = executeAggregate([
+      opportunity(1, { Existing_Customer_or_New_Business__c: 'New Customer' }),
+      opportunity(2, { Existing_Customer_or_New_Business__c: 'New Customer' }),
+      opportunity(3, { Existing_Customer_or_New_Business__c: 'Net New Business' }),
+      opportunity(4, { Existing_Customer_or_New_Business__c: '' }),
+    ]);
+
+    expect(result.json.eligible_new_logo_opportunities).toBe(0);
+    expect(result.json.excluded_by_reason).toMatchObject({
+      missing_new_logo_value: 1,
+      unrecognized_business_type: 3,
+    });
+    expect(result.json.business_type_value_inventory).toEqual({
+      field_api_name: 'Existing_Customer_or_New_Business__c',
+      blank: 1,
+      values: [
+        { value: 'New Customer', count: 2 },
+        { value: 'Net New Business', count: 1 },
+      ],
+      total: 4,
     });
   });
 

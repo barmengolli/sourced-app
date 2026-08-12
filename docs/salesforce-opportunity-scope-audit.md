@@ -21,7 +21,11 @@ The proposed initial Opportunity population is:
   `Marketing SDR` suggestion, but still requires human approval;
 - Primary Campaign Source is evidence only and never decides attribution;
 - missing or unrecognized New Logo/New Business values are excluded and
-  reported in aggregate QA.
+  reported in aggregate QA;
+- the aggregate terminal inventories every observed
+  `Existing_Customer_or_New_Business__c` value with its count (plus a blank
+  count), so the approved New Logo mapping can be based on evidence rather
+  than guessed labels.
 
 The audit intentionally excludes 2024. That year may be added later with its
 different NA BDR identity as a separate reviewed scope extension.
@@ -108,6 +112,9 @@ Review these result groups before authorizing any write workflow:
 - eligible and excluded Opportunities;
 - exclusions by missing, existing-customer, unrecognized, year, and invalid
   source row;
+- the value-and-count inventory for
+  `Existing_Customer_or_New_Business__c` (the inventory total must equal the
+  Salesforce source total);
 - 2025 versus 2026 counts;
 - current HPP/Opportunity/Pursuit and open/closed totals;
 - approved BDR versus other/missing creator;
