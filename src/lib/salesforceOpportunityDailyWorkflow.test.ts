@@ -139,6 +139,8 @@ describe('Salesforce Opportunity daily workflow', () => {
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.sf_apply_opportunity_ingestion_v4");
     expect(sql).toContain('TO service_role');
     expect(sql).toContain('FROM PUBLIC');
-    expect(sql).toContain('STATUS: PENDING / NOT YET APPLIED');
+    expect(sql).toContain('STATUS: Applied manually to production on 2026-08-12');
+    expect(sql).toContain('this migration invoked no RPC');
+    expect(sql).not.toContain('PENDING / NOT YET APPLIED');
   });
 });

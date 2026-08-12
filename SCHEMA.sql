@@ -1855,7 +1855,9 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- =============================================================
 -- Opportunity owner-label compatibility boundary
 -- migrations/2026-08-12_opportunity_owner_label_upgrade.sql
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. Supabase reported
+-- success. Function only; this migration invoked no RPC and changed no
+-- Opportunity business row by itself.
 -- =============================================================
 -- public.sf_apply_opportunity_ingestion_v4(JSONB, JSONB, JSONB, JSONB, JSONB)
 -- delegates ordinary ingestion to v3, then permits only a proven legacy
