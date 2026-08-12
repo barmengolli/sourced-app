@@ -11,7 +11,12 @@
 -- RPC for the server-side n8n planner. No data is imported or backfilled.
 --
 -- RUN ORDER: requires the applied 2026-07-24 and 2026-07-27 Opportunity
--- migrations. Apply manually in Supabase SQL Editor. PENDING / NOT APPLIED.
+-- migrations.
+-- STATUS: Applied manually to production on 2026-08-12. Supabase returned
+-- Success. No rows returned. Direct catalog verification confirmed both RPCs
+-- are SECURITY DEFINER with search_path=pg_catalog; PUBLIC, anon, and
+-- authenticated cannot execute them; service_role can. Structure/functions
+-- only; no Opportunity data was imported or backfilled by this migration.
 
 BEGIN;
 

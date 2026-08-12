@@ -1770,7 +1770,11 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- =============================================================
 -- Opportunity daily-ingestion v2 contract
 -- migrations/2026-08-12_opportunity_daily_ingestion_contract.sql
--- STATUS: PENDING / NOT APPLIED.
+-- STATUS: Applied manually to production on 2026-08-12. Supabase returned
+-- Success. No rows returned. Direct catalog verification confirmed both RPCs
+-- are SECURITY DEFINER with search_path=pg_catalog; PUBLIC, anon, and
+-- authenticated cannot execute them; service_role can. Structure/functions
+-- only; no Opportunity data was imported or backfilled by this migration.
 -- =============================================================
 --
 -- public.sf_apply_opportunity_ingestion_v2(JSONB, JSONB, JSONB, JSONB)

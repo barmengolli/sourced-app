@@ -1,7 +1,7 @@
 # Salesforce Opportunity daily ingestion
 
-Status: implementation prepared; migration **PENDING / NOT APPLIED**; generated
-n8n workflow **disabled**; no production ingestion has run.
+Status: migration **APPLIED on 2026-08-12** and permissions verified; generated
+n8n workflow **disabled**; no production Opportunity ingestion has run.
 
 ## Approved scope
 
@@ -64,17 +64,14 @@ unchanged until reviewed opportunities are explicitly linked or approved.
 
 ## Manual test order
 
-1. Review and manually apply
-   `migrations/2026-08-12_opportunity_daily_ingestion_contract.sql`.
-2. Verify the new columns and both RPC permissions in the live catalog.
-3. Import the generated workflow and confirm it is **Inactive**.
-4. In `CONFIG: closed by default`, replace only the Supabase project URL.
-5. Attach the Salesforce credential to the Salesforce read node and the
+1. Import the generated workflow and confirm it is **Inactive**.
+2. In `CONFIG: closed by default`, replace only the Supabase project URL.
+3. Attach the Salesforce credential to the Salesforce read node and the
    service-role Header Auth credential to the two Supabase HTTP nodes.
-6. Keep `MODE = 'dry_run'` and `CONFIRM = ''`; execute manually.
-7. Review only `DRY RUN: aggregate summary`. Do not enable apply until its
+4. Keep `MODE = 'dry_run'` and `CONFIRM = ''`; execute manually.
+5. Review only `DRY RUN: aggregate summary`. Do not enable apply until its
    counts reconcile with the accepted 71-record audit population or a newer
    deliberately re-run audit.
 
-The migration and workflow are safe to review but are not yet authorized for
-production application or activation.
+The migration is applied. The workflow remains unauthorized for production
+application or activation until the dry-run reconciliation is accepted.

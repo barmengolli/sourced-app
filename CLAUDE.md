@@ -139,8 +139,9 @@ alone is not proof of production state.
   `SaaS_Revenue_USD__c` is primary visible revenue while `Amount` and
   `SaaS_Revenue__c` remain stored. Source fields refresh nightly, separate
   reviewer overrides win, approved creator names become BDR suggestions only
-  (never automatic attribution), and the disabled workflow must stay in dry-run mode
-  until its pending migration is applied and the 71-record scope reconciles.
+  (never automatic attribution). The supporting migration was applied and
+  permission-verified on 2026-08-12; the disabled workflow must stay in
+  dry-run mode until the 71-record scope reconciles.
 
 #### Outreach
 
@@ -344,12 +345,12 @@ created in the configured cohort year (2026 first run); Service and
 unknown types are excluded from the queue but still staged; linked deals
 sync without reapproval (Service moves preserve links and derive funnel
 unavailability; returns restore without review); decided reviews are never
-reopened. A PENDING restricted SECURITY DEFINER apply function
-(`2026-07-27_opportunity_ingestion_apply_fn.sql`, unapplied) provides
-atomic batch writes with watermarks only on full success. The apply path
-does not exist yet: the planner's server-side execution environment is a
-documented open infrastructure decision, and the workflow shell fails
-closed. Staging never affects visible reporting.
+reopened. The applied restricted SECURITY DEFINER function from
+`2026-07-27_opportunity_ingestion_apply_fn.sql` provides atomic batch writes
+with watermarks only on full success. The 2026-08-12 v2 contract and state
+reader are also applied. The generated daily workflow remains disabled and
+closed to apply until its manual dry run reconciles. Staging never affects
+visible reporting.
 
 `docs/salesforce-lifecycle-history-mapping.md` extends this with the
 Salesforce field-history ingestion foundation:

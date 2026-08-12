@@ -1,6 +1,6 @@
 // Tests for the Bite 5C2A staging-ingestion planner. Synthetic records only;
 // no real Salesforce identifiers, names, or customer data. Also carries the
-// static safety assertions for the PENDING apply-function migration and the
+// static safety assertions for the applied apply-function migrations and the
 // staging workflow template.
 
 import { describe, it, expect } from 'vitest';
@@ -682,12 +682,17 @@ describe('approved BDR suggestion', () => {
   });
 });
 
-describe('daily-ingestion contract migration (pending)', () => {
+describe('daily-ingestion contract migration (applied)', () => {
   const MIGRATION = readFileSync(
     resolve(process.cwd(), 'migrations/2026-08-12_opportunity_daily_ingestion_contract.sql'),
     'utf8',
   );
   const SCHEMA = readFileSync(resolve(process.cwd(), 'SCHEMA.sql'), 'utf8');
+  const LEDGER = readFileSync(resolve(process.cwd(), 'migrations/README.md'), 'utf8');
+  const DOC = readFileSync(
+    resolve(process.cwd(), 'docs/salesforce-opportunity-daily-ingestion.md'),
+    'utf8',
+  );
 
   it('adds source Market, normalized BDR evidence, and reviewer-owned overrides', () => {
     expect(MIGRATION).toContain('ADD COLUMN IF NOT EXISTS market TEXT');
@@ -729,7 +734,24 @@ describe('daily-ingestion contract migration (pending)', () => {
       expect(MIGRATION).toMatch(new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${fn}[^;]* TO service_role`));
     }
     expect(MIGRATION.match(/SET search_path = pg_catalog/g)).toHaveLength(2);
-    expect(MIGRATION).toContain('PENDING / NOT APPLIED');
+  });
+
+  it('records the verified production application consistently', () => {
+    expect(MIGRATION).toContain('Applied manually to production on 2026-08-12');
+    expect(MIGRATION).not.toContain('PENDING / NOT APPLIED');
+
+    const schemaStatus = SCHEMA.slice(SCHEMA.indexOf('-- Opportunity daily-ingestion v2 contract'));
+    expect(schemaStatus).toContain('Applied manually to production on 2026-08-12');
+    expect(schemaStatus).not.toContain('PENDING / NOT APPLIED');
+
+    const ledgerRow = LEDGER.split('\n').find((line) =>
+      line.includes('2026-08-12_opportunity_daily_ingestion_contract.sql')) ?? '';
+    expect(ledgerRow).toContain('| APPLIED |');
+    expect(ledgerRow).toContain('service_role');
+    expect(ledgerRow).not.toContain('NOT APPLIED');
+
+    expect(DOC).toContain('migration **APPLIED on 2026-08-12**');
+    expect(DOC).not.toContain('migration **PENDING / NOT APPLIED**');
   });
 });
 
