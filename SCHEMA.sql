@@ -1878,3 +1878,19 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- the first 71-row baseline whose fingerprint omitted account_id entirely.
 -- Database preconditions bind Opportunity id, OwnerId, account_id shape,
 -- source timestamp, and both hashes; unrelated conflicts remain blocked.
+
+-- =============================================================
+-- Opportunity review context
+-- migrations/2026-08-13_opportunity_review_context.sql
+-- STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-13.
+-- Application confirmed by the operator; live catalog verification remains a
+-- separate post-apply check.
+-- =============================================================
+-- Replaces public.sf_list_opportunity_reviews(TEXT) to expose the exact
+-- Opportunity id only to the authenticated same-origin server, return an
+-- optional child-channel suggestion only for one unambiguous authoritative
+-- CampaignMember mapping, and include the currently linked Lead summary.
+-- Adds public.sf_find_lead_by_email(TEXT), an exact normalized-email lookup.
+-- Both are SECURITY DEFINER with search_path=pg_catalog, denied to
+-- PUBLIC/anon/authenticated, and executable only by service_role. Suggestions
+-- remain evidence; this migration performs no approval, link, or data write.

@@ -2,6 +2,7 @@ import type {
   ApprovalDecision,
   OpportunityQueueItem,
   QueueFilters,
+  QueueLeadMatch,
 } from './opportunityQueue';
 import { filterQueueItems } from './opportunityQueue';
 import type {
@@ -25,10 +26,12 @@ interface LiveQueueRow {
   createdAt: string | null;
   lastModifiedAt: string | null;
   owner: string | null;
+  salesforceUrl: string | null;
   reviewState: ReviewState;
   issueCodes: ReviewIssueCode[];
   channelId: string | null;
   leadId: string | null;
+  linkedLead: QueueLeadMatch | null;
   bdrName: string | null;
   sourceMarket: string | null;
   sourceCommercialRegion: string | null;
@@ -41,6 +44,8 @@ interface LiveQueueRow {
   pursuitEnteredAt: string | null;
   suggestedBdrName: 'Dave Cummins' | 'Garrett McNally' | null;
   primaryCampaignSource: string | null;
+  suggestedChannelId: string | null;
+  suggestedChannelName: string | null;
   customerExpansionRaw: string | null;
   linkStatus: OpportunityQueueItem['linkStatus'];
 }
@@ -69,13 +74,17 @@ function toItem(row: LiveQueueRow): OpportunityQueueItem {
     createdAt: row.createdAt,
     lastModifiedAt: row.lastModifiedAt,
     owner: row.owner,
+    salesforceUrl: row.salesforceUrl,
     evidence: {
       bdrUserId: row.suggestedBdrName ? 'present' : null,
       creatorUserId: null,
       suggestedBdrName: row.suggestedBdrName,
       primaryCampaignSource: row.primaryCampaignSource,
+      suggestedChannelId: row.suggestedChannelId,
+      suggestedChannelName: row.suggestedChannelName,
       customerExpansionRaw: row.customerExpansionRaw,
     },
+    linkedLead: row.linkedLead,
     review: {
       reviewState: row.reviewState,
       issueCodes: [...row.issueCodes],
@@ -172,6 +181,13 @@ export function createOpportunityQueueHttpRepository(
     async getQueueItem(reviewId) {
       const row = rows.get(reviewId);
       return row ? toItem(row) : null;
+    },
+    async findLeadByEmail(email) {
+      const result = await request<{ match: QueueLeadMatch | null }>({
+        operation: 'find_lead_by_email',
+        email,
+      });
+      return result.match;
     },
     approveReview: (reviewId, decision: ApprovalDecision) =>
       act(reviewId, 'approve', { ...decision }),

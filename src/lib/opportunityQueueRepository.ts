@@ -13,7 +13,12 @@
 // future server implementation must write that pair transactionally, exactly
 // as sf_apply_opportunity_ingestion does for ingestion writes.
 
-import type { ApprovalDecision, OpportunityQueueItem, QueueFilters } from './opportunityQueue';
+import type {
+  ApprovalDecision,
+  OpportunityQueueItem,
+  QueueFilters,
+  QueueLeadMatch,
+} from './opportunityQueue';
 import type { ReviewEventInsert } from './opportunityImportStorage';
 
 // The caller supplies actor identity and an explicit timestamp; repository
@@ -40,6 +45,9 @@ export interface OpportunityQueueRepository {
   // ID, opportunity name, or account name. The implementation resolves the
   // internal review to its staged opportunity server-side.
   getQueueItem(reviewId: string): Promise<OpportunityQueueItem | null>;
+  // Exact normalized-email lookup only. Implementations must never perform a
+  // fuzzy, substring, or name-based person match.
+  findLeadByEmail(email: string): Promise<QueueLeadMatch | null>;
   // Approval requires the reviewer's explicit channel; lead is optional.
   approveReview(
     reviewId: string,

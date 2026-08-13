@@ -11,13 +11,16 @@ live staging queue; it is not a separate application or navigation area.
 For one Opportunity at a time, Marketing Operations can:
 
 - approve it with an explicit source channel and Commercial Region;
-- confirm/edit Market, GTM Cube, BDR, optional lead link, and stage dates;
+- confirm/edit Market, GTM Cube, BDR, optional exact-email lead link, and stage dates;
 - mark it Not selected;
 - block it with a reason; or
 - reconsider a prior Not selected decision.
 
-Salesforce creator, BDR, and Primary Campaign Source remain evidence only. They
-never approve a source automatically.
+Salesforce creator, BDR, and Primary Campaign Source remain evidence only. An
+exact Primary Campaign Source match may preselect one child channel, but the
+reviewer must still confirm or change it before approval. Parent and ambiguous
+matches never preselect. Opportunity names open the trusted Salesforce record
+in a new tab. Lead lookup is exact normalized email only; no fuzzy matching.
 
 ## Reporting behavior
 
@@ -65,6 +68,6 @@ commits the decision, append-only audit, link, and reporting reconciliation in
 one transaction. The persistent request ledger scopes retries by actor, action,
 review, and idempotency key. Identical retries replay; conflicting reuse fails.
 
-Apply `migrations/2026-08-12_opportunity_review_queue_runtime.sql` and verify it
-before configuring the Vercel variables or importing the regenerated daily
-workflow.
+The runtime and review-context migrations are applied. The review-context
+migration was applied manually on 2026-08-13 per operator confirmation; verify
+its live catalog permissions as part of the preview smoke test.

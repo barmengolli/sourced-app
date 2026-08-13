@@ -103,6 +103,65 @@ describe('Opportunity queue live server boundary', () => {
     expect(JSON.stringify(res.body)).not.toContain('synthetic-service-key');
   });
 
+  it('turns the private Salesforce ID into the approved org URL without returning the raw ID field', async () => {
+    const { cookie } = await login();
+    rpc.mockResolvedValueOnce({
+      data: [{ sf_list_opportunity_reviews: {
+        reviewId: '44444444-4444-4444-8444-444444444444',
+        sfOpportunityId: '006PZ00000VXQczYAH',
+      } }],
+      error: null,
+    });
+    const res = response();
+    await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ ok: true, data: { items: [{
+      reviewId: '44444444-4444-4444-8444-444444444444',
+      salesforceUrl: 'https://eisgroup.lightning.force.com/lightning/r/Opportunity/006PZ00000VXQczYAH/view',
+    }] } });
+    expect(JSON.stringify(res.body)).not.toContain('sfOpportunityId');
+  });
+
+  it('normalizes an exact email lookup and refuses ambiguous matches', async () => {
+    const { cookie } = await login();
+    rpc.mockResolvedValueOnce({
+      data: [{ sf_find_lead_by_email: {
+        id: '44444444-4444-4444-8444-444444444445',
+        email: 'person@example.com', firstName: 'Synthetic', lastName: 'Person', account: 'Example',
+      } }],
+      error: null,
+    });
+    const exact = response();
+    await handler(request({ operation: 'find_lead_by_email', email: ' Person@Example.com ' }, { cookie }), exact);
+    expect(exact.statusCode).toBe(200);
+    expect(rpc).toHaveBeenCalledWith('sf_find_lead_by_email', { p_email: 'person@example.com' });
+
+    rpc.mockResolvedValueOnce({
+      data: [
+        { sf_find_lead_by_email: { id: 'one' } },
+        { sf_find_lead_by_email: { id: 'two' } },
+      ],
+      error: null,
+    });
+    const ambiguous = response();
+    await handler(request({ operation: 'find_lead_by_email', email: 'person@example.com' }, { cookie }), ambiguous);
+    expect(ambiguous.statusCode).toBe(409);
+    expect(ambiguous.body).toEqual({
+      ok: false,
+      error: { message: 'More than one exact lead match was found; nothing was selected' },
+    });
+  });
+
+  it('rejects malformed email before calling the database', async () => {
+    const { cookie } = await login();
+    rpc.mockClear();
+    const res = response();
+    await handler(request({ operation: 'find_lead_by_email', email: 'not-an-email' }, { cookie }), res);
+    expect(res.statusCode).toBe(422);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   it('normalizes a copied Supabase REST endpoint before creating the client', async () => {
     process.env.SUPABASE_URL = 'https://synthetic-project.supabase.co/rest/v1/';
     const { cookie } = await login();

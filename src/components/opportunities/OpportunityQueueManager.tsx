@@ -17,7 +17,7 @@ import {
   filterQueueItems,
   isApprovable,
 } from '../../lib/opportunityQueue';
-import type { OpportunityQueueItem, QueueFilters } from '../../lib/opportunityQueue';
+import type { OpportunityQueueItem, QueueFilters, QueueLeadMatch } from '../../lib/opportunityQueue';
 import type {
   OpportunityQueueRepository,
   QueueActionResult,
@@ -112,6 +112,10 @@ export default function OpportunityQueueManager({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [channelId, setChannelId] = useState('');
   const [leadId, setLeadId] = useState('');
+  const [leadEmail, setLeadEmail] = useState('');
+  const [leadMatch, setLeadMatch] = useState<QueueLeadMatch | null>(null);
+  const [leadLookupPending, setLeadLookupPending] = useState(false);
+  const [leadLookupMessage, setLeadLookupMessage] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [bdrName, setBdrName] = useState('');
   const [marketOverride, setMarketOverride] = useState('');
@@ -197,6 +201,9 @@ export default function OpportunityQueueManager({
           setSelectedId(null);
           setChannelId('');
           setLeadId('');
+          setLeadEmail('');
+          setLeadMatch(null);
+          setLeadLookupMessage(null);
           setNote('');
           setGeneration((g) => g + 1);
         } else {
@@ -210,9 +217,16 @@ export default function OpportunityQueueManager({
   );
 
   const selectItem = (item: OpportunityQueueItem) => {
+    const suggestedChannelId = item.evidence.suggestedChannelId ?? '';
+    const validSuggestedChannelId = channels.some((channel) => channel.id === suggestedChannelId)
+      ? suggestedChannelId
+      : '';
     setSelectedId(item.reviewId);
-    setChannelId(item.review?.channelId ?? '');
+    setChannelId(item.review?.channelId ?? validSuggestedChannelId);
     setLeadId(item.review?.leadId ?? '');
+    setLeadEmail(item.linkedLead?.email ?? '');
+    setLeadMatch(item.linkedLead ?? null);
+    setLeadLookupMessage(null);
     setBdrName(item.editable.bdrName ?? item.evidence.suggestedBdrName ?? '');
     setMarketOverride(item.editable.marketOverride ?? item.editable.sourceMarket ?? '');
     setCommercialRegionOverride(
@@ -224,6 +238,28 @@ export default function OpportunityQueueManager({
     setPursuitEnteredAt(item.editable.pursuitEnteredAt ?? '');
     setActionErrors([]);
     setActionMessage(null);
+  };
+
+  const findLead = async () => {
+    if (leadLookupPending) return;
+    setLeadLookupPending(true);
+    setLeadLookupMessage(null);
+    setLeadMatch(null);
+    setLeadId('');
+    try {
+      const match = await repository.findLeadByEmail(leadEmail);
+      if (!match) {
+        setLeadLookupMessage('No exact Sourced lead match was found. Nothing was selected.');
+        return;
+      }
+      setLeadMatch(match);
+      setLeadId(match.id);
+      setLeadLookupMessage('Exact email match selected.');
+    } catch (error) {
+      setLeadLookupMessage(error instanceof Error ? error.message : 'Lead lookup failed');
+    } finally {
+      setLeadLookupPending(false);
+    }
   };
 
   const set = (patch: Partial<QueueFilters>) => setFilters((f) => ({ ...f, ...patch }));
@@ -459,7 +495,20 @@ export default function OpportunityQueueManager({
                     (item.reviewId === selectedId ? 'bg-muted/60' : '')
                   }
                 >
-                  <td className="px-3 py-2 text-charcoal font-medium">{item.opportunityName}</td>
+                  <td className="px-3 py-2 text-charcoal font-medium">
+                    {live && item.salesforceUrl ? (
+                      <a
+                        href={item.salesforceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                        className="text-indigo underline decoration-indigo/30 underline-offset-2 hover:decoration-indigo"
+                        aria-label={`Open ${item.opportunityName} in Salesforce`}
+                      >
+                        {item.opportunityName}
+                      </a>
+                    ) : item.opportunityName}
+                  </td>
                   <td className="px-3 py-2">{item.accountName ?? 'n/a'}</td>
                   <td className="px-3 py-2 uppercase">{item.recordTypeState}</td>
                   <td className="px-3 py-2">
@@ -515,37 +564,84 @@ export default function OpportunityQueueManager({
           role="dialog"
           aria-modal="true"
           aria-labelledby="opportunity-review-title"
-          className="mx-auto max-w-4xl border border-border rounded bg-bg p-4 shadow-xl space-y-3"
+          className="mx-auto max-w-5xl rounded-xl border border-border bg-bg shadow-xl"
         >
-          <header className="flex items-start justify-between gap-3">
-            <div>
-              <h2 id="opportunity-review-title" className="text-sm font-semibold text-charcoal">
-                {selected.opportunityName}
-              </h2>
-              <p className="text-xs text-slate-muted">
-                {selected.accountName ?? 'No account'} · {selected.recordTypeState.toUpperCase()} ·{' '}
-                {REVIEW_STATE_LABELS[selected.review.reviewState]}
+          <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-4 sm:px-6">
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo">Opportunity review</p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <h2 id="opportunity-review-title" className="text-lg font-semibold text-charcoal">
+                  {selected.opportunityName}
+                </h2>
+                <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-slate-muted">
+                  {REVIEW_STATE_LABELS[selected.review.reviewState]}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-slate-muted">
+                Review the Salesforce evidence, select the Sourced attribution, then record one decision.
               </p>
             </div>
-            <button type="button" onClick={() => setSelectedId(null)} className={chipBase + chipOff}>
-              Close
-            </button>
+            <div className="flex items-center gap-2">
+              {selected.salesforceUrl && (
+                <a
+                  href={selected.salesforceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={chipBase + chipOff}
+                >
+                  Open in Salesforce ↗
+                </a>
+              )}
+              <button type="button" onClick={() => setSelectedId(null)} className={chipBase + chipOff}>
+                Close
+              </button>
+            </div>
           </header>
 
-          <div className="text-xs text-charcoal space-y-1">
-            <h3 className="font-medium">Evidence (informational only, never a decision)</h3>
-            <p>BDR evidence: {selected.evidence.bdrUserId ?? 'none'}</p>
-            <p>Creator evidence: {selected.evidence.creatorUserId ?? 'none'}</p>
-            <p>Suggested BDR: {selected.evidence.suggestedBdrName ?? 'none'}</p>
-            <p>Primary campaign source: {selected.evidence.primaryCampaignSource ?? 'none'}</p>
-            <p>Customer expansion (raw): {selected.evidence.customerExpansionRaw ?? 'none'}</p>
-            <p>Salesforce Market: {selected.editable.sourceMarket ?? 'none'}</p>
-            <p>Salesforce Commercial Region: {selected.editable.sourceCommercialRegion ?? 'none'}</p>
-            <p>Salesforce GTM Cube: {selected.editable.sourceGtmCube ?? 'none'}</p>
-          </div>
+          <div className="space-y-4 p-5 sm:p-6">
+          <section className="rounded-lg border border-border bg-muted/30 p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-muted">Opportunity summary</h3>
+            <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+              {[
+                ['Account', selected.accountName ?? 'Not available'],
+                ['Type', selected.recordTypeState.toUpperCase()],
+                ['Stage', selected.stageName ?? 'Not available'],
+                ['Status', selected.isClosed ? 'Closed' : 'Open'],
+                ['SaaS revenue USD', formatAmount(selected.saasRevenueUsd, 'USD')],
+                ['Owner', selected.owner ?? 'Not available'],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <dt className="text-slate-muted">{label}</dt>
+                  <dd className="mt-0.5 font-medium text-charcoal">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+
+          <section className="rounded-lg border border-border p-4">
+            <div>
+              <h3 className="text-sm font-semibold text-charcoal">Salesforce context</h3>
+              <p className="mt-0.5 text-xs text-slate-muted">Informational only, never a decision.</p>
+            </div>
+            <dl className="mt-3 grid gap-x-6 gap-y-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                ['Primary campaign source', selected.evidence.primaryCampaignSource ?? 'None'],
+                ['Suggested BDR', selected.evidence.suggestedBdrName ?? 'None'],
+                ['Market', selected.editable.sourceMarket ?? 'None'],
+                ['Commercial region', selected.editable.sourceCommercialRegion ?? 'None'],
+                ['GTM cube', selected.editable.sourceGtmCube ?? 'None'],
+                ['Customer expansion', selected.evidence.customerExpansionRaw ?? 'None'],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <dt className="text-slate-muted">{label}</dt>
+                  <dd className="mt-0.5 font-medium text-charcoal">{value}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
 
           {actionErrors.length > 0 && (
-            <ul role="alert" className="text-xs text-danger list-disc pl-4">
+            <ul role="alert" className="rounded-lg border border-danger/30 bg-danger/5 px-6 py-3 text-xs text-danger list-disc">
               {actionErrors.map((reason) => (
                 <li key={reason}>{reason}</li>
               ))}
@@ -554,7 +650,7 @@ export default function OpportunityQueueManager({
 
           {selected.review.reviewState === 'ignored' && (
             <form
-              className="text-xs space-y-2"
+              className="rounded-lg border border-border p-4 text-xs space-y-3"
               onSubmit={(e) => {
                 e.preventDefault();
                 void runAction('Reconsider', () =>
@@ -586,7 +682,7 @@ export default function OpportunityQueueManager({
           )}
 
           {selected.review.reviewState === 'blocked' && (
-            <div className="text-xs text-charcoal space-y-2">
+            <div className="rounded-lg border border-danger/30 bg-danger/5 p-4 text-xs text-charcoal space-y-2">
               <p className="text-danger">
                 This review is blocked. Resolve the blocker, then reopen it to pending.
               </p>
@@ -606,7 +702,7 @@ export default function OpportunityQueueManager({
           )}
 
           {selected.review.reviewState === 'pending' && !isApprovable(selected) && (
-            <p className="text-xs text-danger">
+            <p className="rounded-lg border border-danger/30 bg-danger/5 p-4 text-xs text-danger">
               This record cannot be approved until its blocking issues are resolved:{' '}
               {selected.review.issueCodes
                 .filter((c) => BLOCKING_ISSUE_CODES.has(c))
@@ -618,7 +714,7 @@ export default function OpportunityQueueManager({
 
           {selected.review.reviewState === 'pending' && isApprovable(selected) && (
             <form
-              className="text-xs space-y-2"
+              className="space-y-4 text-xs"
               onSubmit={(e) => {
                 e.preventDefault();
                 void runAction('Approval', () =>
@@ -640,23 +736,74 @@ export default function OpportunityQueueManager({
                 );
               }}
             >
-              <h3 className="font-medium text-charcoal">Approve into Sourced reporting</h3>
-              <label className="flex items-center gap-2 text-slate-muted">
-                Channel (required)
-                <select
-                  value={channelId}
-                  onChange={(e) => setChannelId(e.target.value)}
-                  className={selectClass}
-                >
-                  <option value="">Select a channel…</option>
-                  {channels.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              <section className="rounded-lg border border-border p-4">
+                <h3 className="text-sm font-semibold text-charcoal">Sourced attribution</h3>
+                <p className="mt-0.5 text-xs text-slate-muted">
+                  The campaign can suggest a channel, but approval always uses your selected value.
+                </p>
+                <div className="mt-3 grid gap-4 lg:grid-cols-2">
+                  <label className="space-y-1 text-slate-muted">
+                    <span className="block">Channel (required)</span>
+                    <select
+                      aria-label="Channel (required)"
+                      value={channelId}
+                      onChange={(e) => setChannelId(e.target.value)}
+                      className={selectClass + ' w-full'}
+                    >
+                      <option value="">Select a channel…</option>
+                      {channels.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                    {selected.evidence.suggestedChannelName && (
+                      <span className="block text-[11px] text-indigo">
+                        Suggested from exact Primary Campaign Source: {selected.evidence.suggestedChannelName}
+                      </span>
+                    )}
+                  </label>
+                  <div className="space-y-1 text-slate-muted">
+                    <label htmlFor="queue-lead-email" className="block">Lead email (optional)</label>
+                    <div className="flex gap-2">
+                      <input
+                        id="queue-lead-email"
+                        type="email"
+                        value={leadEmail}
+                        onChange={(e) => {
+                          setLeadEmail(e.target.value);
+                          setLeadId('');
+                          setLeadMatch(null);
+                          setLeadLookupMessage(null);
+                        }}
+                        placeholder="name@company.com"
+                        className={selectClass + ' min-w-0 flex-1'}
+                      />
+                      <button
+                        type="button"
+                        disabled={leadLookupPending || !leadEmail.trim()}
+                        onClick={() => void findLead()}
+                        className={chipBase + chipOff + ' whitespace-nowrap disabled:opacity-50'}
+                      >
+                        {leadLookupPending ? 'Finding…' : 'Find exact match'}
+                      </button>
+                    </div>
+                    {leadLookupMessage && (
+                      <p role="status" className={leadMatch ? 'text-success' : 'text-slate-muted'}>{leadLookupMessage}</p>
+                    )}
+                    {leadMatch && (
+                      <div className="rounded border border-success/30 bg-success/5 px-3 py-2 text-charcoal">
+                        <span className="font-medium">
+                          {[leadMatch.firstName, leadMatch.lastName].filter(Boolean).join(' ') || 'Matched lead'}
+                        </span>
+                        <span className="block text-slate-muted">{leadMatch.email}{leadMatch.account ? ` · ${leadMatch.account}` : ''}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+
+              <section className="rounded-lg border border-border p-4">
+                <h3 className="text-sm font-semibold text-charcoal">Funnel details</h3>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <label className="space-y-1 text-slate-muted">
                   <span className="block">Commercial Region (required)</span>
                   <select
@@ -693,7 +840,7 @@ export default function OpportunityQueueManager({
                     onChange={(e) => setGtmCubeOverride(e.target.value)} className={selectClass + ' w-full'} />
                 </label>
               </div>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="mt-3 grid gap-3 sm:grid-cols-3">
                 <label className="space-y-1 text-slate-muted">
                   <span className="block">HPP date (required)</span>
                   <input type="date" aria-label="HPP date (required)" value={hppEnteredAt}
@@ -718,25 +865,24 @@ export default function OpportunityQueueManager({
                 HPP defaults to the Salesforce creation date. Downstream dates stay blank until
                 Salesforce history or your review can prove them.
               </p>
-              <label className="flex items-center gap-2 text-slate-muted">
-                Lead (optional)
-                <input
-                  type="text"
-                  value={leadId}
-                  onChange={(e) => setLeadId(e.target.value)}
-                  placeholder="Sourced lead id"
-                  className={selectClass}
-                />
-              </label>
-              <button type="submit" disabled={actionPending}
-                className="text-xs px-3 py-1 rounded bg-indigo text-white hover:bg-indigo/90 disabled:opacity-50">
-                {actionPending ? 'Saving…' : 'Approve'}
-              </button>
+              </section>
+
+              <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-charcoal">Approve into Sourced reporting</h3>
+                  <p className="mt-0.5 text-xs text-slate-muted">One opportunity, one reviewed attribution decision.</p>
+                </div>
+                <button type="submit" disabled={actionPending}
+                  className="rounded bg-indigo px-4 py-2 text-xs font-medium text-white hover:bg-indigo/90 disabled:opacity-50">
+                  {actionPending ? 'Saving…' : 'Approve'}
+                </button>
+              </section>
             </form>
           )}
 
           {selected.review.reviewState === 'pending' && (
-            <div className="text-xs space-y-2 border-t border-border pt-2">
+            <section className="rounded-lg border border-border p-4 text-xs space-y-3">
+              <h3 className="text-sm font-semibold text-charcoal">Other decisions</h3>
               <label className="flex items-center gap-2 text-slate-muted">
                 Note
                 <input
@@ -773,14 +919,14 @@ export default function OpportunityQueueManager({
                   Block
                 </button>
               </div>
-            </div>
+            </section>
           )}
 
           <details className="text-xs text-slate-muted">
             <summary className="cursor-pointer">Diagnostics</summary>
-            <p className="mt-1">Salesforce opportunity id: {selected.diagnostics.sfOpportunityId}</p>
-            <p>Link status: {selected.linkStatus}</p>
+            <p className="mt-1">Link status: {selected.linkStatus}</p>
           </details>
+          </div>
         </section>
         </div>
       )}

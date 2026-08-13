@@ -52,7 +52,17 @@ export interface QueueEvidence {
   creatorUserId: string | null;
   suggestedBdrName: 'Dave Cummins' | 'Garrett McNally' | null;
   primaryCampaignSource: string | null;
+  suggestedChannelId?: string | null;
+  suggestedChannelName?: string | null;
   customerExpansionRaw: string | null;
+}
+
+export interface QueueLeadMatch {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  account: string | null;
 }
 
 // Raw identifiers live behind the diagnostics disclosure only; the main
@@ -84,7 +94,11 @@ export interface OpportunityQueueItem {
   createdAt: string | null;
   lastModifiedAt: string | null;
   owner: string | null;
+  // Server-constructed link to the configured Salesforce organization. The
+  // browser never constructs a Salesforce URL from user input.
+  salesforceUrl?: string | null;
   evidence: QueueEvidence;
+  linkedLead?: QueueLeadMatch | null;
   review: ReviewProjection | null;
   linkStatus: QueueLinkStatus;
   diagnostics: QueueDiagnostics;
