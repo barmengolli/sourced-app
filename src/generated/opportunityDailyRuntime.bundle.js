@@ -498,9 +498,13 @@ var OpportunityDailyRuntime = (function(exports) {
 	}
 	//#endregion
 	//#region src/lib/opportunityImportStorage.ts
+	function canonicalEventTimestamp(value) {
+		const millis = Date.parse(value);
+		return Number.isFinite(millis) ? new Date(millis).toISOString() : value;
+	}
 	function classifyIncomingEvent(stored, incoming) {
 		if (!stored) return "new";
-		return stored.sfOpportunityId === incoming.sfOpportunityId && stored.sourceField === incoming.sourceField && stored.oldValue === incoming.oldValue && stored.newValue === incoming.newValue && stored.changedAt === incoming.changedAt ? "exact_duplicate" : "conflict";
+		return stored.sfOpportunityId === incoming.sfOpportunityId && stored.sourceField === incoming.sourceField && stored.oldValue === incoming.oldValue && stored.newValue === incoming.newValue && canonicalEventTimestamp(stored.changedAt) === canonicalEventTimestamp(incoming.changedAt) ? "exact_duplicate" : "conflict";
 	}
 	function buildRecordTypeEventInsert(event, sourceField) {
 		return {
@@ -1053,7 +1057,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			event.to_record_type_state,
 			event.from_terminal_state,
 			event.to_terminal_state,
-			event.changed_at
+			canonicalEventTimestamp(event.changed_at)
 		]))}`;
 	}
 	function eventRowContentFingerprint(content) {
@@ -1062,7 +1066,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			content.sourceField,
 			content.oldValue,
 			content.newValue,
-			content.changedAt
+			canonicalEventTimestamp(content.changedAt)
 		]))}`;
 	}
 	var FUNNEL_STATES = new Set([

@@ -167,6 +167,16 @@ export interface EventRowContent {
 
 export type IncomingEventClass = 'new' | 'exact_duplicate' | 'conflict';
 
+// Salesforce and PostgreSQL serialize the same timestamptz instant in
+// different ISO forms (for example `.000+0000` versus `+00:00`). History Ids
+// are immutable, so representation-only differences must not become content
+// conflicts. Invalid values stay raw so malformed timestamps still fail
+// closed instead of being coerced into an invented instant.
+export function canonicalEventTimestamp(value: string): string {
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : value;
+}
+
 // Exact duplicates are informational (nothing can change); a same-ID row
 // with different content is a conflict that must never overwrite the stored
 // event; it belongs in review.
@@ -180,7 +190,7 @@ export function classifyIncomingEvent(
     stored.sourceField === incoming.sourceField &&
     stored.oldValue === incoming.oldValue &&
     stored.newValue === incoming.newValue &&
-    stored.changedAt === incoming.changedAt;
+    canonicalEventTimestamp(stored.changedAt) === canonicalEventTimestamp(incoming.changedAt);
   return same ? 'exact_duplicate' : 'conflict';
 }
 

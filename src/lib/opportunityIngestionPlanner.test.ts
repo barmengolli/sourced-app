@@ -11,6 +11,8 @@ import {
   classifyCandidateEligibility,
   buildSnapshotPayload,
   snapshotFingerprint,
+  eventContentFingerprint,
+  eventRowContentFingerprint,
   serializeApplyPayload,
   suggestedBdrName,
   summarizeDryRunPlan,
@@ -246,6 +248,36 @@ describe('linked opportunities', () => {
 });
 
 describe('idempotency and duplicates', () => {
+  it('fingerprints equivalent Salesforce and PostgreSQL timestamp forms identically', () => {
+    const row = {
+      sfOpportunityId: 'SYNTH-OPP-A',
+      sourceField: 'RecordType',
+      oldValue: 'Opportunity',
+      newValue: 'Pursuit',
+      changedAt: '2026-06-24T21:37:43+00:00',
+    };
+    expect(eventRowContentFingerprint(row)).toBe(
+      eventRowContentFingerprint({ ...row, changedAt: '2026-06-24T21:37:43.000+0000' }),
+    );
+
+    const event = {
+      sf_opportunity_id: 'SYNTH-OPP-A',
+      sf_history_id: 'SYNTH-HIST-X',
+      source_field: 'RecordType',
+      old_value: 'Opportunity',
+      new_value: 'Pursuit',
+      event_kind: 'record_type' as const,
+      from_record_type_state: 'opp',
+      to_record_type_state: 'pursuit',
+      from_terminal_state: null,
+      to_terminal_state: null,
+      changed_at: '2026-06-24T21:37:43+00:00',
+    };
+    expect(eventContentFingerprint(event)).toBe(
+      eventContentFingerprint({ ...event, changed_at: '2026-06-24T21:37:43.000+0000' }),
+    );
+  });
+
   it('rerunning identical input against the resulting state plans no duplicate work', () => {
     const records = [opp({ Id: 'SYNTH-OPP-A' })];
     const rows = [
@@ -311,6 +343,50 @@ describe('idempotency and duplicates', () => {
     const p = plan([opp({ Id: 'SYNTH-OPP-A' })], rows, existing);
     expect(p.diagnostics.exactDuplicateEvents).toBe(1);
     expect(p.diagnostics.eventsPlanned).toBe(0);
+  });
+
+  it('clears a false history conflict caused only by PostgreSQL and Salesforce timestamp formatting', () => {
+    const rows = [
+      hist({
+        OpportunityId: 'SYNTH-OPP-A',
+        Id: 'SYNTH-HIST-X',
+        OldValue: 'Opportunity',
+        NewValue: 'Pursuit',
+        CreatedDate: '2026-06-24T21:37:43.000+0000',
+      }),
+    ];
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      eventContentByHistoryId: {
+        'SYNTH-HIST-X': {
+          sfOpportunityId: 'SYNTH-OPP-A',
+          sourceField: 'RecordType',
+          oldValue: 'Opportunity',
+          newValue: 'Pursuit',
+          changedAt: '2026-06-24T21:37:43+00:00',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-A': {
+          reviewState: 'pending',
+          issueCodes: ['conflicting_history_id', 'incomplete_history', 'missing_channel'],
+          channelId: null,
+          leadId: null,
+        },
+      },
+    };
+
+    const p = plan([opp({ Id: 'SYNTH-OPP-A', RecordType: { DeveloperName: 'Licensing', Name: 'Pursuit' } })], rows, existing);
+
+    expect(p.diagnostics.exactDuplicateEvents).toBe(1);
+    expect(p.diagnostics.conflictingEvents).toBe(0);
+    const update = p.operations.find((operation) => operation.op === 'update_review_issues');
+    expect(update).toBeTruthy();
+    if (!update || update.op !== 'update_review_issues') throw new Error('unreachable');
+    expect(update.projection.issueCodes).not.toContain('conflicting_history_id');
+    expect(update.projection.issueCodes).toContain('incomplete_history');
+    expect(update.projection.issueCodes).toContain('missing_channel');
+    expect(update.auditEvents.every((event) => event.event_type !== 'conflict_observed')).toBe(true);
   });
 
   it('a conflicting duplicate History Id blocks and routes to review, choosing no version', () => {

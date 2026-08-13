@@ -225,6 +225,15 @@ describe('incoming event classification', () => {
     expect(classifyIncomingEvent(undefined, stored)).toBe('new');
   });
 
+  it('treats equivalent timestamp representations as the same immutable event', () => {
+    expect(
+      classifyIncomingEvent(
+        { ...stored, changedAt: '2026-06-24T21:37:43+00:00' },
+        { ...stored, changedAt: '2026-06-24T21:37:43.000+0000' },
+      ),
+    ).toBe('exact_duplicate');
+  });
+
   it('a same-ID row with different content is a conflict that cannot overwrite', () => {
     expect(classifyIncomingEvent(stored, { ...stored, newValue: 'Pursuit' })).toBe('conflict');
     expect(classifyIncomingEvent(stored, { ...stored, changedAt: '2026-02-02T09:00:00+00:00' })).toBe('conflict');
