@@ -104,6 +104,12 @@ export interface OpportunityQueueItem {
   // Server-constructed link to the configured Salesforce organization. The
   // browser never constructs a Salesforce URL from user input.
   salesforceUrl?: string | null;
+  // Server-proven, exact Salesforce-ID candidate. Only the protected API can
+  // populate this value; names and accounts never create an actionable link.
+  existingManualDeal?: (PossibleExistingDeal & {
+    attributionRows: number;
+    attributionTouches: number;
+  }) | null;
   evidence: QueueEvidence;
   linkedLead?: QueueLeadMatch | null;
   review: ReviewProjection | null;
@@ -129,6 +135,11 @@ export interface PossibleExistingDeal {
   account: string;
 }
 
+export type ExistingManualDealAssessment =
+  | { kind: 'none'; matches: [] }
+  | { kind: 'unique'; matches: [PossibleExistingDeal] }
+  | { kind: 'ambiguous'; matches: PossibleExistingDeal[] };
+
 const normalizeExactDealText = (value: string | null | undefined): string =>
   (value ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 
@@ -137,15 +148,16 @@ const normalizeExactDealText = (value: string | null | undefined): string =>
 // to pause approval, but never strong enough to merge records automatically.
 // The reviewer must resolve the legacy deal explicitly so touches and audit
 // history are not silently reassigned or deleted.
-export function findPossibleExistingManualDeal(
+export function assessPossibleExistingManualDeals(
   item: OpportunityQueueItem,
   attributions: Attribution[],
-): PossibleExistingDeal | null {
+): ExistingManualDealAssessment {
   const opportunityName = normalizeExactDealText(item.opportunityName);
   const accountName = normalizeExactDealText(item.accountName);
-  if (!opportunityName || !accountName) return null;
+  if (!opportunityName || !accountName) return { kind: 'none', matches: [] };
 
   const seenDeals = new Set<string>();
+  const matches: PossibleExistingDeal[] = [];
   for (const attribution of attributions) {
     if (attribution.source_system === 'salesforce') continue;
     const dealId = attribution.deal_id?.trim();
@@ -155,14 +167,27 @@ export function findPossibleExistingManualDeal(
       normalizeExactDealText(attribution.label) === opportunityName &&
       normalizeExactDealText(attribution.account) === accountName
     ) {
-      return {
+      matches.push({
         dealId,
         label: attribution.label?.trim() || item.opportunityName,
         account: attribution.account?.trim() || item.accountName || '',
-      };
+      });
     }
   }
-  return null;
+  if (matches.length === 0) return { kind: 'none', matches: [] };
+  if (matches.length === 1) return { kind: 'unique', matches: [matches[0]] };
+  return { kind: 'ambiguous', matches };
+}
+
+// Compatibility helper for callers that only need a proven unique match.
+// Ambiguous matches deliberately return null so no caller can accidentally
+// treat the first matching deal as authoritative.
+export function findPossibleExistingManualDeal(
+  item: OpportunityQueueItem,
+  attributions: Attribution[],
+): PossibleExistingDeal | null {
+  const assessment = assessPossibleExistingManualDeals(item, attributions);
+  return assessment.kind === 'unique' ? assessment.matches[0] : null;
 }
 
 // ---------------------------------------------------------------------------

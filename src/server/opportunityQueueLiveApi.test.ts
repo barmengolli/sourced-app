@@ -47,6 +47,12 @@ async function login() {
   return { res, cookie, csrf: body.data.csrf };
 }
 
+function mockQueueList(data: unknown, error: unknown = null, candidates: unknown[] = []) {
+  rpc
+    .mockResolvedValueOnce({ data, error })
+    .mockResolvedValueOnce({ data: candidates, error: null });
+}
+
 describe('Opportunity queue live server boundary', () => {
   beforeEach(() => {
     process.env.OPPORTUNITY_QUEUE_SESSION_SECRET = 'synthetic-session-secret-with-enough-entropy';
@@ -88,10 +94,9 @@ describe('Opportunity queue live server boundary', () => {
 
   it('keeps protected reads and the service key on the server', async () => {
     const { cookie } = await login();
-    rpc.mockResolvedValueOnce({
-      data: [{ sf_list_opportunity_reviews: { reviewId: '44444444-4444-4444-8444-444444444444' } }],
-      error: null,
-    });
+    mockQueueList([
+      { sf_list_opportunity_reviews: { reviewId: '44444444-4444-4444-8444-444444444444' } },
+    ]);
     const res = response();
     await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
 
@@ -100,24 +105,23 @@ describe('Opportunity queue live server boundary', () => {
       'https://synthetic-project.supabase.co', 'synthetic-service-key', expect.any(Object),
     );
     expect(rpc).toHaveBeenCalledWith('sf_list_opportunity_reviews', { p_view: 'attention' });
+    expect(rpc).toHaveBeenCalledWith('sf_list_opportunity_existing_deal_candidates');
     expect(JSON.stringify(res.body)).not.toContain('synthetic-service-key');
   });
 
   it('turns the private Salesforce ID into the approved org URL without returning the raw ID field', async () => {
     const { cookie } = await login();
-    rpc.mockResolvedValueOnce({
-      data: [{ sf_list_opportunity_reviews: {
+    mockQueueList([{ sf_list_opportunity_reviews: {
         reviewId: '44444444-4444-4444-8444-444444444444',
         sfOpportunityId: '006PZ00000VXQczYAH',
-      } }],
-      error: null,
-    });
+      } }]);
     const res = response();
     await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ ok: true, data: { items: [{
       reviewId: '44444444-4444-4444-8444-444444444444',
+      existingManualDeal: null,
       salesforceUrl: 'https://eisgroup.lightning.force.com/lightning/r/Opportunity/006PZ00000VXQczYAH/view',
     }] } });
     expect(JSON.stringify(res.body)).not.toContain('sfOpportunityId');
@@ -165,7 +169,7 @@ describe('Opportunity queue live server boundary', () => {
   it('normalizes a copied Supabase REST endpoint before creating the client', async () => {
     process.env.SUPABASE_URL = 'https://synthetic-project.supabase.co/rest/v1/';
     const { cookie } = await login();
-    rpc.mockResolvedValueOnce({ data: [], error: null });
+    mockQueueList([]);
     const res = response();
     await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
 
@@ -177,13 +181,10 @@ describe('Opportunity queue live server boundary', () => {
 
   it('returns a safe database error reference without leaking raw details', async () => {
     const { cookie } = await login();
-    rpc.mockResolvedValueOnce({
-      data: null,
-      error: {
+    mockQueueList(null, {
         code: '42501',
         message: 'permission denied for function sf_list_opportunity_reviews',
         details: 'sensitive source detail',
-      },
     });
     const res = response();
     await handler(request({ operation: 'list', view: 'attention' }, { cookie }), res);
@@ -226,5 +227,47 @@ describe('Opportunity queue live server boundary', () => {
       p_expected_version: 'v1',
     });
     expect(JSON.stringify(rpc.mock.calls[0])).not.toContain('006');
+  });
+
+  it('returns only server-proven exact candidates and adopts the selected legacy deal atomically', async () => {
+    const { cookie, csrf } = await login();
+    mockQueueList(
+      [{ sf_list_opportunity_reviews: {
+        reviewId: '44444444-4444-4444-8444-444444444444',
+        sfOpportunityId: '006PZ00000VXQczYAH',
+      } }],
+      null,
+      [{ sf_list_opportunity_existing_deal_candidates: {
+        reviewId: '44444444-4444-4444-8444-444444444444',
+        dealId: 'legacy-deal-1', label: 'Synthetic deal', account: 'Synthetic account',
+        attributionRows: 3, attributionTouches: 8,
+      } }],
+    );
+    const listed = response();
+    await handler(request({ operation: 'list', view: 'attention' }, { cookie }), listed);
+    expect(listed.statusCode).toBe(200);
+    expect(JSON.stringify(listed.body)).toContain('legacy-deal-1');
+    expect(JSON.stringify(listed.body)).not.toContain('sfOpportunityId');
+
+    rpc.mockResolvedValueOnce({
+      data: { status: 'adopted', reviewState: 'linked', dealId: 'legacy-deal-1' },
+      error: null,
+    });
+    const adopted = response();
+    await handler(request({
+      operation: 'action', action: 'adopt_existing',
+      reviewId: '44444444-4444-4444-8444-444444444444',
+      expectedVersion: 'v1', idempotencyKey: 'adopt-1',
+      decision: { dealId: 'legacy-deal-1' },
+    }, { cookie, 'x-sourced-csrf': csrf }), adopted);
+
+    expect(adopted.statusCode).toBe(200);
+    expect(rpc).toHaveBeenLastCalledWith('sf_adopt_existing_opportunity_deal', {
+      p_review_id: '44444444-4444-4444-8444-444444444444',
+      p_expected_deal_id: 'legacy-deal-1',
+      p_actor_id: 'synthetic-reviewer',
+      p_idempotency_key: 'adopt-1',
+      p_expected_version: 'v1',
+    });
   });
 });

@@ -1898,7 +1898,7 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- =============================================================
 -- Salesforce closed-opportunity reporting projection
 -- migrations/2026-08-13_opportunity_closed_outcome_projection.sql
--- STATUS: PENDING / NOT YET APPLIED.
+-- STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-13.
 -- =============================================================
 -- Replaces the protected review-list and reporting-refresh functions so a
 -- reviewed closed Salesforce Opportunity produces its prior HPP/Opp/Pursuit
@@ -1911,3 +1911,27 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- creation of a new active Salesforce link; it never merges or deletes data.
 -- Applying the migration changes function definitions only and approves no
 -- review.
+-- Direct catalog inspection verified the protected functions and duplicate
+-- guard trigger. sf_refresh_opportunity_reporting(UUID) is SECURITY DEFINER
+-- with search_path=pg_catalog, executable only by service_role and denied to
+-- PUBLIC/anon/authenticated.
+
+-- =============================================================
+-- Existing Sourced Opportunity deal adoption
+-- migrations/2026-08-13_opportunity_existing_deal_adoption.sql
+-- STATUS: APPLIED MANUALLY TO PRODUCTION ON 2026-08-13.
+-- =============================================================
+-- Adds the protected append-only sf_opportunity_deal_adoptions ledger and two
+-- service-role-only RPCs. The candidate RPC exposes only one exact Salesforce
+-- Opportunity-ID match whose legacy channel, Lead, region, BDR, label, and
+-- Account values are internally consistent. The adoption RPC revalidates those
+-- conditions under lock, preserves the existing deal and attribution row IDs,
+-- keeps all attribution touches, creates the exact Salesforce deal link, and
+-- converts the same reporting rows from manual to Salesforce ownership.
+-- Replaces sf_refresh_opportunity_reporting(UUID) with stable deal/stage
+-- upserts so later daily syncs update adopted rows in place. Name/Account-only,
+-- ambiguous, conflicting, unmatched, and already-active duplicate cases remain
+-- untouched. Applying the migration adopts no review by itself.
+-- Direct catalog inspection verified the protected functions, table RLS, and
+-- append-only trigger. The candidate function returned 50 actionable exact-ID
+-- records; the migration itself adopted zero.

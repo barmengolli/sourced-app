@@ -14,8 +14,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BLOCKING_ISSUE_CODES,
   REVIEW_STATE_LABELS,
+  assessPossibleExistingManualDeals,
   filterQueueItems,
-  findPossibleExistingManualDeal,
   isApprovable,
 } from '../../lib/opportunityQueue';
 import type { OpportunityQueueItem, QueueFilters, QueueLeadMatch } from '../../lib/opportunityQueue';
@@ -180,10 +180,15 @@ export default function OpportunityQueueManager({
   // Selection and every repository call key on the opaque internal review
   // identity, never the Salesforce Opportunity ID.
   const selected = visible.find((i) => i.reviewId === selectedId) ?? null;
-  const possibleExistingDeal = useMemo(
-    () => (selected ? findPossibleExistingManualDeal(selected, attributions) : null),
+  const existingDealAssessment = useMemo(
+    () => (selected
+      ? assessPossibleExistingManualDeals(selected, attributions)
+      : { kind: 'none' as const, matches: [] }),
     [selected, attributions],
   );
+  const exactExistingDeal = selected?.existingManualDeal ?? null;
+  const approvalPausedForExistingDeal = Boolean(exactExistingDeal)
+    || existingDealAssessment.kind !== 'none';
 
   const ctx = useCallback(
     (actionNote?: string) => ({
@@ -784,18 +789,58 @@ export default function OpportunityQueueManager({
                 );
               }}
             >
-              {possibleExistingDeal && (
+              {exactExistingDeal && (
                 <section
                   role="alert"
                   className="rounded-lg border border-warning/40 bg-warning/5 p-4 text-xs text-charcoal"
                 >
-                  <h3 className="font-semibold text-amber-800">Possible existing Sourced deal</h3>
+                  <h3 className="font-semibold text-amber-800">Existing Sourced deal verified</h3>
                   <p className="mt-1">
-                    Approval is paused because a legacy Sourced deal has the exact same Opportunity
-                    name and Account: <strong>{possibleExistingDeal.label}</strong> ·{' '}
-                    <strong>{possibleExistingDeal.account}</strong>. Resolve or link that legacy deal
-                    first so its history and touches are not duplicated.
+                    The stored Salesforce Opportunity ID identifies exactly one legacy deal:{' '}
+                    <strong>{exactExistingDeal.label}</strong> · <strong>{exactExistingDeal.account}</strong>.
+                    It has {exactExistingDeal.attributionRows} reporting row{exactExistingDeal.attributionRows === 1 ? '' : 's'}
+                    {' '}and {exactExistingDeal.attributionTouches} attribution touch{exactExistingDeal.attributionTouches === 1 ? '' : 'es'}.
                   </p>
+                  <p className="mt-1 text-slate-muted">
+                    Link it in place to preserve its deal identity, reporting history, and touches. No duplicate is created.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={actionPending}
+                    onClick={() => void runAction('Existing Sourced deal linked', () =>
+                      repository.linkExactDeal(
+                        selected.reviewId ?? '', exactExistingDeal.dealId, ctx(),
+                      ))}
+                    className="mt-3 rounded bg-indigo px-3 py-2 text-xs font-medium text-white hover:bg-indigo/90 disabled:opacity-50"
+                  >
+                    {actionPending ? 'Linking…' : 'Use existing Sourced deal'}
+                  </button>
+                </section>
+              )}
+              {!exactExistingDeal && existingDealAssessment.kind !== 'none' && (
+                <section
+                  role="alert"
+                  className="rounded-lg border border-warning/40 bg-warning/5 p-4 text-xs text-charcoal"
+                >
+                  <h3 className="font-semibold text-amber-800">
+                    {existingDealAssessment.kind === 'unique'
+                      ? 'Possible existing Sourced deal'
+                      : 'Multiple possible existing Sourced deals'}
+                  </h3>
+                  {existingDealAssessment.kind === 'unique' ? (
+                    <p className="mt-1">
+                      Approval is paused because a legacy Sourced deal has the exact same Opportunity
+                      name and Account: <strong>{existingDealAssessment.matches[0].label}</strong> ·{' '}
+                      <strong>{existingDealAssessment.matches[0].account}</strong>. Resolve or link that
+                      legacy deal first so its history and touches are not duplicated.
+                    </p>
+                  ) : (
+                    <p className="mt-1">
+                      Approval is paused because {existingDealAssessment.matches.length} legacy Sourced
+                      deals have this exact Opportunity name and Account. A reviewer must choose the
+                      correct deal before any link can be created.
+                    </p>
+                  )}
                   <p className="mt-1 text-slate-muted">
                     Nothing was merged, deleted, or changed automatically.
                   </p>
@@ -941,7 +986,7 @@ export default function OpportunityQueueManager({
                       : 'One opportunity, one reviewed attribution decision.'}
                   </p>
                 </div>
-                <button type="submit" disabled={actionPending || possibleExistingDeal !== null}
+                <button type="submit" disabled={actionPending || approvalPausedForExistingDeal}
                   className="rounded bg-indigo px-4 py-2 text-xs font-medium text-white hover:bg-indigo/90 disabled:opacity-50">
                   {actionPending
                     ? 'Saving…'

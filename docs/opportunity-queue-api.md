@@ -32,6 +32,36 @@ is a review safeguard, not an automatic merge: the reviewer must resolve or
 link the legacy deal explicitly, and legitimate same-name deals remain visible
 instead of being silently combined.
 
+Before enabling the explicit adoption flow, run
+`docs/opportunity-existing-deal-reconciliation.sql` in the Production Supabase
+SQL Editor. It is read-only and aggregate-only. It separates unique exact
+Salesforce-ID matches, unique exact normalized Opportunity-name plus
+Account-name matches, ambiguous matches, unmatched reviews, existing approved
+duplicates, and orphan Salesforce projections. Unique matches are also checked
+for conflicting legacy channel, lead, region, BDR, label, or Account values and
+for attribution touches that adoption must preserve.
+
+The 2026-08-13 production audit found 63 pending reviews without an active
+Salesforce link. It found 51 unique exact Salesforce-ID matches, one ambiguous
+exact-ID review, one name-and-Account-only match, one unique match with
+conflicting legacy fields, and ten unmatched reviews. Direct post-apply
+execution of the protected candidate function returned 50 fully qualified
+exact-ID records for the explicit **Use existing Sourced deal** action. The
+other 13 stay in review; name and Account similarity never enables adoption.
+
+Adoption is an in-place ownership change, not a copy. It keeps the existing
+deal ID and attribution row IDs, preserves their attribution touches, creates
+the exact active Salesforce link, and changes only those rows from `manual` to
+`salesforce`. The nightly Opportunity workflow can then refresh the amount,
+stage, Market, region, GTM Cube, owner, and Salesforce-derived dates on those
+same reporting rows. Reviewer-owned attribution choices remain authoritative.
+The action is record-level, version-checked, transactional, and idempotent.
+
+The same audit found six already-active Salesforce links with a possible
+legacy duplicate. They are deliberately outside this first adoption path and
+remain a separate cleanup set; this migration does not guess which already
+linked row should survive.
+
 - current HPP -> HPP row;
 - current Opportunity -> HPP + Opportunity rows;
 - current Pursuit -> HPP + Opportunity + Pursuit rows;
@@ -89,3 +119,13 @@ review, and idempotency key. Identical retries replay; conflicting reuse fails.
 The runtime and review-context migrations are applied. The review-context
 migration was applied manually on 2026-08-13 per operator confirmation; verify
 its live catalog permissions as part of the preview smoke test.
+
+`sf_adopt_existing_opportunity_deal` applies the same protections to a verified
+legacy deal. It independently re-runs exact-ID uniqueness and field-consistency
+checks under lock before changing anything. The browser-provided deal ID is an
+expected value, not authority; a changed or ambiguous candidate fails closed.
+The adoption migration was applied manually to production on 2026-08-13.
+Direct catalog inspection verified both functions as `SECURITY DEFINER` with
+`search_path=pg_catalog`, executable only by `service_role`; the adoption table
+has RLS and its append-only trigger enabled. The protected candidate function
+returned 50 records and the migration itself adopted zero.
