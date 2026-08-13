@@ -15,6 +15,7 @@ import {
   type SyncClock,
 } from '../lib/leadSync';
 import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
+import { assertUniquePagedIds } from '../lib/paginationIntegrity';
 
 // Re-export so existing callers importing SfdcSync from useLeads keep working.
 export type { SfdcSync } from '../lib/leadSync';
@@ -79,7 +80,10 @@ async function fetchAllLeads(): Promise<Lead[]> {
     const { data, error } = await supabase
       .from('leads')
       .select('*')
-      .order('updated_at', { ascending: false })
+      // `updated_at` is not unique: bulk syncs give thousands of rows the same
+      // timestamp. Offset pages must use an immutable unique key or page
+      // boundaries can duplicate some rows and omit others.
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data || data.length === 0) break;
@@ -87,6 +91,7 @@ async function fetchAllLeads(): Promise<Lead[]> {
     if (data.length < PAGE) break;
     from += PAGE;
   }
+  assertUniquePagedIds(all, 'Lead');
   return all;
 }
 
