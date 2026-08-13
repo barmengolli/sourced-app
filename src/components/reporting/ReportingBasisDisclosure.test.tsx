@@ -31,6 +31,22 @@ describe('ReportingBasisDisclosure', () => {
     expect(screen.getByTestId('reporting-basis-disclosure').textContent).toContain('as of July 31, 2026');
   });
 
+  it('can render the basis as an accent tag without its definition', () => {
+    render(
+      <ReportingBasisDisclosure
+        basis="cohort"
+        explanation="definition that should stay hidden"
+        showExplanation={false}
+        variant="accent"
+      />,
+    );
+    const disclosure = screen.getByTestId('reporting-basis-disclosure');
+    expect(disclosure.textContent).toBe('Cohort');
+    expect(screen.getByRole('note', { name: 'Reporting basis: Cohort' }).className).toContain(
+      'rounded-full',
+    );
+  });
+
   it('is informational, not interactive: no button, radio, or alert role', () => {
     render(<ReportingBasisDisclosure basis="cohort" explanation="based on first MQL date" />);
     expect(screen.queryByRole('button')).toBeNull();

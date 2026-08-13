@@ -18,8 +18,8 @@ function pageFiles(): string[] {
 // The audit names surfaces in prose, so we assert on the page's own name
 // stem appearing somewhere in the doc.
 const AUDIT_SUBJECTS: Record<string, string> = {
-  'FunnelDashboardPage.tsx': 'Leads & MQLs',
-  'FunnelDataEntryPage.tsx': 'Data Entry',
+  'FunnelDashboardPage.tsx': 'Marketing Funnel Overview',
+  'FunnelDataEntryPage.tsx': 'Operations grid',
   'FunnelEventsPage.tsx': 'Events page',
   'FunnelSpendPage.tsx': 'Spend page',
   'FunnelVelocityPage.tsx': 'Opportunities page',

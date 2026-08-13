@@ -68,7 +68,7 @@ export type PageKey =
 // they were last on.
 function initialPage(): PageKey {
   const funnel = SIDEBAR_SECTIONS.find((s) => s.id === 'funnel');
-  if (!funnel) return 'funnel-data';
+  if (!funnel) return 'funnel-dashboard';
   const last = readJson<PageKey | null>(funnel.lastTabStorageKey, null);
   if (last && funnel.children.some((c) => c.key === last)) return redirectRetiredPage(last);
   return funnel.defaultChild;
@@ -88,7 +88,7 @@ interface FunnelSubPageProps {
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
   // Compare-tab state. Lifted alongside year/filter so a user bouncing
-  // between Compare and Data Entry doesn't lose their month selection.
+  // between Compare and Operations doesn't lose their month selection.
   compareMonth: number;          // 1..12, calendar month
   onCompareMonthChange: (m: number) => void;
   compareView: CompareView;

@@ -122,8 +122,8 @@ describe('reporting page contract completeness', () => {
     }
   });
 
-  it('keeps Data Entry on its quarterly storage grain with no comparison', () => {
-    // Data Entry edits stored QUARTERLY values. A month control would imply an
+  it('keeps Operations on its quarterly storage grain with no comparison', () => {
+    // Operations edits stored QUARTERLY values. A month control would imply an
     // editable monthly cell that does not exist, and a comparison control
     // would promise a delta the page never computes.
     const de = reportingContractFor('funnel-data');
