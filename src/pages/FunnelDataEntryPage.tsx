@@ -27,6 +27,7 @@ import { readJson, writeJson } from '../lib/storage';
 import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
 import { reportingContractFor } from '../constants/reportingPages';
 import { computeFunnelConversionCohorts } from '../lib/funnelConversionCohorts';
+import OpportunityQueuePanel from '../components/opportunities/OpportunityQueuePanel';
 
 const EDITS_LOCKED_STORAGE_KEY = 'sourced.funnel.editsLocked';
 
@@ -209,6 +210,7 @@ export default function FunnelDataEntryPage({
   const [listQuery, setListQuery] = useState<ListModalQuery | null>(null);
   const [touchQuery, setTouchQuery] = useState<TouchDrilldownQuery | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
+  const [queueOpen, setQueueOpen] = useState(false);
 
   // Lock for the manual-actual columns (HPP/Opp/Pursuit/CloseWon on leaves).
   // Default-on so first-time visitors can't accidentally clobber actuals;
@@ -266,6 +268,14 @@ export default function FunnelDataEntryPage({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setQueueOpen((open) => !open)}
+            aria-expanded={queueOpen}
+            className="text-xs px-3 py-1.5 rounded border border-border bg-bg text-charcoal hover:bg-muted/40"
+          >
+            {queueOpen ? 'Hide Opportunity review' : 'Review Salesforce opportunities'}
+          </button>
           <button
             type="button"
             onClick={() => setActualsLocked((v) => !v)}
@@ -335,6 +345,12 @@ export default function FunnelDataEntryPage({
           />
         </div>
       </header>
+
+      {queueOpen && (
+        <section className="border border-border rounded bg-muted/20 overflow-hidden">
+          <OpportunityQueuePanel channels={channels.map(({ id, name }) => ({ id, name }))} />
+        </section>
+      )}
 
       {grid.unassignedLeadCount > 0 && (
         <div className="text-xs text-slate-muted">

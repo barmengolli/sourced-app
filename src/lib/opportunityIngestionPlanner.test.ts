@@ -415,6 +415,15 @@ describe('plan safety invariants', () => {
 });
 
 describe('fingerprints and stale protection (hardening)', () => {
+  it('stores the human-readable Salesforce owner name instead of the user id', () => {
+    const payload = buildSnapshotPayload(opp({
+      OwnerId: 'SYNTH-USER-OWNER-ID',
+      Owner: { Name: 'Synthetic Opportunity Owner' },
+    }));
+    expect(payload.opportunity_owner).toBe('Synthetic Opportunity Owner');
+    expect(payload.opportunity_owner).not.toContain('SYNTH-USER-OWNER-ID');
+  });
+
   it('SHA-256 fingerprint covers every staged field and ignores key order', () => {
     const a = buildSnapshotPayload(opp({ Id: 'SYNTH-OPP-F1' }));
     expect(a.content_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -472,6 +481,171 @@ describe('fingerprints and stale protection (hardening)', () => {
     // appliable; the database race-guard (SF002) covers apply-time races.
     const payload = serializeApplyPayload(p);
     expect(payload.p_snapshots).toHaveLength(0);
+  });
+
+  it('repairs only the proven legacy OwnerId-to-Owner.Name representation', () => {
+    const rec = opp({
+      Id: 'SYNTH-OPP-OWNER',
+      OwnerId: '005000000000001AAA',
+      Owner: { Name: 'Synthetic Owner Name' },
+      SystemModstamp: '2026-06-01T09:00:00.000+0000',
+    });
+    const incoming = buildSnapshotPayload(rec);
+    const { content_hash, ...incomingFields } = incoming;
+    void content_hash;
+    const legacyHash = snapshotFingerprint({
+      ...incomingFields,
+      opportunity_owner: rec.OwnerId!,
+    });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-OWNER': {
+          contentHash: legacyHash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-OWNER': { reviewState: 'pending', issueCodes: [], channelId: null },
+      },
+    };
+
+    const planned = plan([rec], [], existing);
+    const payload = serializeApplyPayload(planned);
+
+    expect(planned.diagnostics.ownerLabelRepairs).toBe(1);
+    expect(planned.diagnostics.snapshotConflicts).toBe(0);
+    expect(planned.diagnostics.snapshotsPlanned).toBe(0);
+    expect(payload.p_owner_repairs).toEqual([{
+      sf_opportunity_id: 'SYNTH-OPP-OWNER',
+      repair_kind: 'owner_label_only',
+      legacy_owner_user_id: '005000000000001AAA',
+      owner_name: 'Synthetic Owner Name',
+      account_id: 'SYNTH-ACC-1',
+      sf_last_modified_at: '2026-06-01T09:00:00.000Z',
+      prior_content_hash: legacyHash,
+      content_hash: incoming.content_hash,
+    }]);
+  });
+
+  it('repairs the exact initial-production shape that omitted account_id and stored OwnerId', () => {
+    const rec = opp({
+      Id: 'SYNTH-OPP-PRE-ACCOUNT',
+      AccountId: '001000000000001AAA',
+      OwnerId: '005000000000001AAA',
+      Owner: { Name: 'Synthetic Owner Name' },
+      SystemModstamp: '2026-06-01T09:00:00.000+0000',
+    });
+    const incoming = buildSnapshotPayload(rec);
+    const { content_hash, account_id, ...legacyFields } = incoming;
+    void content_hash;
+    void account_id;
+    const legacyHash = snapshotFingerprint({
+      ...legacyFields,
+      opportunity_owner: rec.OwnerId!,
+    });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-PRE-ACCOUNT': {
+          contentHash: legacyHash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-PRE-ACCOUNT': { reviewState: 'pending', issueCodes: [], channelId: null },
+      },
+    };
+
+    const planned = plan([rec], [], existing);
+    const payload = serializeApplyPayload(planned);
+
+    expect(planned.diagnostics.ownerLabelRepairs).toBe(1);
+    expect(planned.diagnostics.snapshotConflicts).toBe(0);
+    expect(payload.p_owner_repairs).toEqual([expect.objectContaining({
+      sf_opportunity_id: 'SYNTH-OPP-PRE-ACCOUNT',
+      repair_kind: 'owner_and_account_shape',
+      account_id: '001000000000001AAA',
+      prior_content_hash: legacyHash,
+      content_hash: incoming.content_hash,
+    })]);
+  });
+
+  it('does not treat an arbitrary same-timestamp difference as an owner-label repair', () => {
+    const rec = opp({
+      Id: 'SYNTH-OPP-OWNER-CONFLICT',
+      OwnerId: '005000000000001AAA',
+      Owner: { Name: 'Synthetic Owner Name' },
+      StageName: '4) Discovery',
+      SystemModstamp: '2026-06-01T09:00:00.000+0000',
+    });
+    const oldRecord = { ...rec, StageName: '3) Qualification' };
+    const oldPayload = buildSnapshotPayload(oldRecord);
+    const { content_hash, ...oldFields } = oldPayload;
+    void content_hash;
+    const priorHash = snapshotFingerprint({
+      ...oldFields,
+      opportunity_owner: rec.OwnerId!,
+    });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-OWNER-CONFLICT': {
+          contentHash: priorHash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-OWNER-CONFLICT': { reviewState: 'pending', issueCodes: [], channelId: null },
+      },
+    };
+
+    const planned = plan([rec], [], existing);
+    expect(planned.diagnostics.ownerLabelRepairs).toBe(0);
+    expect(planned.diagnostics.snapshotConflicts).toBe(1);
+    expect(serializeApplyPayload(planned).p_owner_repairs).toHaveLength(0);
+  });
+
+  it('does not hide a stage change inside the pre-account-id compatibility path', () => {
+    const rec = opp({
+      Id: 'SYNTH-OPP-PRE-ACCOUNT-CONFLICT',
+      AccountId: '001000000000001AAA',
+      OwnerId: '005000000000001AAA',
+      Owner: { Name: 'Synthetic Owner Name' },
+      StageName: '4) Discovery',
+      SystemModstamp: '2026-06-01T09:00:00.000+0000',
+    });
+    const oldPayload = buildSnapshotPayload({ ...rec, StageName: '3) Qualification' });
+    const { content_hash, account_id, ...legacyFields } = oldPayload;
+    void content_hash;
+    void account_id;
+    const priorHash = snapshotFingerprint({
+      ...legacyFields,
+      opportunity_owner: rec.OwnerId!,
+    });
+    const existing: ExistingStagingState = {
+      ...EMPTY,
+      snapshots: {
+        'SYNTH-OPP-PRE-ACCOUNT-CONFLICT': {
+          contentHash: priorHash,
+          recordTypeDeveloperName: 'High_Potential_Prospect',
+          sfLastModifiedAt: '2026-06-01T09:00:00.000Z',
+        },
+      },
+      reviews: {
+        'SYNTH-OPP-PRE-ACCOUNT-CONFLICT': {
+          reviewState: 'pending', issueCodes: [], channelId: null,
+        },
+      },
+    };
+
+    const planned = plan([rec], [], existing);
+    expect(planned.diagnostics.ownerLabelRepairs).toBe(0);
+    expect(planned.diagnostics.snapshotConflicts).toBe(1);
+    expect(serializeApplyPayload(planned).p_owner_repairs).toHaveLength(0);
   });
 });
 

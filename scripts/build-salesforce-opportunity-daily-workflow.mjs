@@ -8,10 +8,11 @@ const bundle = await readFile(path.join(root, 'src/generated/opportunityDailyRun
 const check = process.argv.includes('--check');
 
 const CONFIRM = 'APPLY 2025-2026 NEW PROJECT OPPORTUNITIES';
+const SUPABASE_PROJECT_URL = 'https://rsyjxtuatrwtqajjkgvd.supabase.co';
 const SOQL = [
   'SELECT Id, Name, AccountId, Account.Name, RecordType.DeveloperName, RecordType.Name,',
   'StageName, IsClosed, IsWon, CreatedDate, LastModifiedDate, SystemModstamp,',
-  'Amount, CurrencyIsoCode, CloseDate, OwnerId, CampaignId, CreatedById, CreatedBy.Name,',
+  'Amount, CurrencyIsoCode, CloseDate, OwnerId, Owner.Name, CampaignId, CreatedById, CreatedBy.Name,',
   'Market__c, Commercial_Region__c, GTM_Cube__c,',
   'Existing_Customer_or_New_Business__c, SaaS_Revenue__c, SaaS_Revenue_USD__c',
   'FROM Opportunity',
@@ -39,13 +40,13 @@ const HISTORY_SOQL = [
 const configCode = `// This is the only ordinary configuration node.
 const MODE = 'dry_run';
 const CONFIRM = '';
-const SUPABASE_PROJECT_URL = 'https://PASTE_PROJECT_REF_HERE.supabase.co';
+const SUPABASE_PROJECT_URL = ${JSON.stringify(SUPABASE_PROJECT_URL)};
 const REQUIRED_CONFIRMATION = ${JSON.stringify(CONFIRM)};
 if (!['dry_run','apply'].includes(MODE)) throw new Error('CONFIG FAILED: invalid mode.');
 const VALID_PROJECT_URL = SUPABASE_PROJECT_URL.startsWith('https://')
   && /^[a-z0-9-]+\\.supabase\\.co$/.test(SUPABASE_PROJECT_URL.slice('https://'.length));
-if (!VALID_PROJECT_URL || SUPABASE_PROJECT_URL.includes('PASTE_PROJECT_REF_HERE')) {
-  throw new Error('CONFIG FAILED: replace the Supabase project URL placeholder; never paste a key here.');
+if (!VALID_PROJECT_URL) {
+  throw new Error('CONFIG FAILED: invalid Supabase project URL; never paste a key here.');
 }
 return [{ json: {
   mode: MODE,
@@ -107,9 +108,16 @@ if (cfg.mode !== 'apply' || cfg.confirm !== cfg.required_confirmation
 if (!planned._private_apply_payload) throw new Error('APPLY GATE CLOSED: payload missing.');
 return [{ json: planned._private_apply_payload }];`;
 
-const verifyCode = `const result = $input.first().json;
-if (result.ok !== true || result.contract_version !== 3) {
-  throw new Error('APPLY FAILED: database did not confirm the v3 contract.');
+const verifyStagingCode = `const result = $input.first().json;
+if (result.ok !== true || result.contract_version !== 5) {
+  throw new Error('APPLY FAILED: database did not confirm the v5 contract.');
+}
+return [{ json: result }];`;
+
+const verifyCode = `const refresh = $input.first().json;
+const result = $('VERIFY: staging apply').first().json;
+if (refresh.status !== 'refreshed') {
+  throw new Error('REPORTING REFRESH FAILED: database did not confirm reconciliation.');
 }
 return [{ json: {
   status: 'APPLY_COMPLETE',
@@ -119,7 +127,11 @@ return [{ json: {
   snapshots_stale_skipped: result.snapshots_stale_skipped,
   reviews_created: result.reviews_created,
   reviews_reconciled: result.reviews_reconciled,
-  contract_version: result.contract_version
+  snapshot_repairs_applied: result.snapshot_repairs_applied,
+  snapshot_repairs_idempotent: result.snapshot_repairs_idempotent,
+  contract_version: result.contract_version,
+  approved_opportunities_refreshed: refresh.approved_opportunities,
+  generated_reporting_rows: refresh.generated_rows
 } }];`;
 
 const node = (id, name, type, typeVersion, position, parameters, extra = {}) => ({
@@ -168,15 +180,26 @@ const nodes = [
   node('prepare', 'APPLY GATE: exact confirmation', 'n8n-nodes-base.code', 2, [2060, -120], {
     mode: 'runOnceForAllItems', jsCode: prepareCode,
   }),
-  node('apply', 'APPLY: opportunity staging v3', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
+  node('apply', 'APPLY: opportunity staging v5', 'n8n-nodes-base.httpRequest', 4.4, [2320, -120], {
     method: 'POST',
-    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v3' }}",
+    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_apply_opportunity_ingestion_v5' }}",
     authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
     sendHeaders: true,
     headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
     sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify($json) }}', options: {},
   }),
-  node('verify', 'VERIFY: apply result', 'n8n-nodes-base.code', 2, [2580, -120], {
+  node('verify-staging', 'VERIFY: staging apply', 'n8n-nodes-base.code', 2, [2580, -120], {
+    mode: 'runOnceForAllItems', jsCode: verifyStagingCode,
+  }),
+  node('refresh-reporting', 'REFRESH: approved Opportunity reporting', 'n8n-nodes-base.httpRequest', 4.4, [2840, -120], {
+    method: 'POST',
+    url: "={{ $('CONFIG: closed by default').first().json.supabase_project_url + '/rest/v1/rpc/sf_refresh_all_approved_opportunity_reporting' }}",
+    authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
+    sendHeaders: true,
+    headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
+    sendBody: true, specifyBody: 'json', jsonBody: '={{ JSON.stringify({}) }}', options: {},
+  }),
+  node('verify', 'VERIFY: apply result', 'n8n-nodes-base.code', 2, [3100, -120], {
     mode: 'runOnceForAllItems', jsCode: verifyCode,
   }),
 ];
@@ -197,8 +220,10 @@ const workflow = {
       [{ node: 'APPLY GATE: exact confirmation', type: 'main', index: 0 }],
       [{ node: 'DRY RUN: aggregate summary', type: 'main', index: 0 }],
     ] },
-    'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v3', type: 'main', index: 0 }]] },
-    'APPLY: opportunity staging v3': { main: [[{ node: 'VERIFY: apply result', type: 'main', index: 0 }]] },
+    'APPLY GATE: exact confirmation': { main: [[{ node: 'APPLY: opportunity staging v5', type: 'main', index: 0 }]] },
+    'APPLY: opportunity staging v5': { main: [[{ node: 'VERIFY: staging apply', type: 'main', index: 0 }]] },
+    'VERIFY: staging apply': { main: [[{ node: 'REFRESH: approved Opportunity reporting', type: 'main', index: 0 }]] },
+    'REFRESH: approved Opportunity reporting': { main: [[{ node: 'VERIFY: apply result', type: 'main', index: 0 }]] },
   },
   pinData: {},
   active: false,

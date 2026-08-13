@@ -168,6 +168,17 @@ export interface SnapshotPayload {
   content_hash: string;
 }
 
+export interface OwnerLabelRepair {
+  sf_opportunity_id: string;
+  repair_kind: 'owner_label_only' | 'owner_and_account_shape';
+  legacy_owner_user_id: string;
+  owner_name: string;
+  account_id: string | null;
+  sf_last_modified_at: string;
+  prior_content_hash: string;
+  content_hash: string;
+}
+
 const str = (v: unknown): string | null => normalizeSourceValue(typeof v === 'string' ? v : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -228,7 +239,9 @@ export function buildSnapshotPayload(rec: SalesforceOpportunityRecord): Snapshot
     close_date: str(rec.CloseDate),
     market: str(rec.Market__c),
     commercial_region: str(rec.Commercial_Region__c),
-    opportunity_owner: str(rec.OwnerId),
+    // Human-facing review evidence uses the Salesforce owner name. OwnerId
+    // remains a transport concern and must not leak into the review UI.
+    opportunity_owner: str(rec.Owner?.Name),
     primary_campaign_source: str(rec.CampaignId),
     customer_expansion_raw: str(rec.Existing_Customer_or_New_Business__c),
     sales_development_rep_user_id: str(rec.Sales_Development_Rep__c),
@@ -255,7 +268,7 @@ const INDUSTRY_VERTICAL_CANDIDATES_FULL = [
 // Collision-resistant deterministic fingerprint: SHA-256 over an explicitly
 // ORDERED canonical [field, value] list covering every staged snapshot
 // field. Key order of the source object is irrelevant by construction.
-export function snapshotFingerprint(payload: Omit<SnapshotPayload, 'content_hash'>): string {
+export function snapshotFingerprint<T extends object>(payload: T): string {
   const orderedFields = Object.keys(payload).sort();
   const canonical = JSON.stringify(
     orderedFields.map((field) => [field, (payload as Record<string, unknown>)[field] ?? null]),
@@ -305,6 +318,12 @@ export type PlannedOperation =
       sfOpportunityId: string;
       payload: SnapshotPayload;
       changed: boolean; // false = brand new insert
+    }
+  | {
+      op: 'repair_owner_label';
+      table: 'sf_opportunities';
+      sfOpportunityId: string;
+      repair: OwnerLabelRepair;
     }
   | { op: 'noop_snapshot'; table: 'sf_opportunities'; sfOpportunityId: string }
   | { op: 'noop_stale_snapshot'; table: 'sf_opportunities'; sfOpportunityId: string }
@@ -365,6 +384,7 @@ export interface SyncRunDiagnostics {
   snapshotNoops: number;
   staleSnapshotsSkipped: number;
   snapshotConflicts: number;
+  ownerLabelRepairs: number;
   reviewsCreated: number;
   reviewIssueUpdates: number;
   eligibility: Record<EligibilityOutcome, number>;
@@ -494,6 +514,7 @@ export function planStagingIngestion(
   let snapshotNoops = 0;
   let staleSnapshotsSkipped = 0;
   let snapshotConflicts = 0;
+  let ownerLabelRepairs = 0;
 
   // Classify first: staging is restricted to eligible, reviewed, or linked
   // records. Excluded records appear only in the aggregate counters.
@@ -536,6 +557,57 @@ export function planStagingIngestion(
           operations.push({ op: 'noop_snapshot', table: 'sf_opportunities', sfOpportunityId: rec.Id });
           snapshotNoops += 1;
           continue;
+        }
+        // The first production workflow stored OwnerId in the human-facing
+        // opportunity_owner field. The corrected workflow carries both
+        // OwnerId and Owner.Name, so we can prove an exact representation-only
+        // upgrade by reconstructing the legacy fingerprint. No other
+        // same-timestamp difference is accepted.
+        const legacyOwnerId = str(rec.OwnerId);
+        const ownerName = str(rec.Owner?.Name);
+        if (legacyOwnerId !== null && ownerName !== null && legacyOwnerId !== ownerName) {
+          const { content_hash: incomingHash, ...incomingFields } = payload;
+          const ownerOnlyLegacyHash = snapshotFingerprint({
+            ...incomingFields,
+            opportunity_owner: legacyOwnerId,
+          });
+          // The first 71-row production baseline also predates account_id in
+          // the snapshot contract. Its fingerprint therefore omitted the key
+          // entirely; null would be a different canonical value. Reconstruct
+          // that exact older shape independently from the later owner-only
+          // shape so either upgrade is provable without accepting anything
+          // else at the same Salesforce timestamp.
+          const { account_id: incomingAccountId, ...preAccountFields } = incomingFields;
+          const ownerAndAccountLegacyHash = snapshotFingerprint({
+            ...preAccountFields,
+            opportunity_owner: legacyOwnerId,
+          });
+          const repairKind = prior.contentHash === ownerOnlyLegacyHash
+            ? 'owner_label_only'
+            : prior.contentHash === ownerAndAccountLegacyHash
+              ? 'owner_and_account_shape'
+              : null;
+          if (repairKind !== null) {
+            operations.push({
+              op: 'repair_owner_label',
+              table: 'sf_opportunities',
+              sfOpportunityId: rec.Id,
+              repair: {
+                sf_opportunity_id: rec.Id,
+                repair_kind: repairKind,
+                legacy_owner_user_id: legacyOwnerId,
+                owner_name: ownerName,
+                account_id: incomingAccountId,
+                sf_last_modified_at: payload.sf_last_modified_at,
+                prior_content_hash: repairKind === 'owner_label_only'
+                  ? ownerOnlyLegacyHash
+                  : ownerAndAccountLegacyHash,
+                content_hash: incomingHash,
+              },
+            });
+            ownerLabelRepairs += 1;
+            continue;
+          }
         }
         // Same source timestamp, different content: never silently choose.
         operations.push({ op: 'block_snapshot_conflict', table: 'sf_opportunities', sfOpportunityId: rec.Id });
@@ -772,6 +844,7 @@ export function planStagingIngestion(
     snapshotNoops,
     staleSnapshotsSkipped,
     snapshotConflicts,
+    ownerLabelRepairs,
     reviewsCreated,
     reviewIssueUpdates,
     eligibility,
@@ -789,6 +862,7 @@ export function planStagingIngestion(
 // ---------------------------------------------------------------------------
 
 export interface ApplyPayload {
+  p_owner_repairs: OwnerLabelRepair[];
   p_snapshots: SnapshotPayload[];
   p_events: Array<EventInsert & { content_hash: string }>;
   // Reviews carry their audit events INSIDE the item so the SQL function
@@ -816,6 +890,7 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
   // the conflict evidence. A database-level race that surfaces an
   // unexpected conflict during apply fails the atomic batch instead.
   const payload: ApplyPayload = {
+    p_owner_repairs: [],
     p_snapshots: [],
     p_events: [],
     p_reviews: [],
@@ -829,6 +904,9 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
   };
   for (const operation of plan.operations) {
     switch (operation.op) {
+      case 'repair_owner_label':
+        payload.p_owner_repairs.push(operation.repair);
+        break;
       case 'upsert_snapshot':
         payload.p_snapshots.push(operation.payload);
         break;
@@ -879,6 +957,7 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
   // Deterministic ordering so two concurrent invocations lock rows in the
   // same order (deadlock avoidance at the database boundary).
   payload.p_snapshots.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
+  payload.p_owner_repairs.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
   payload.p_events.sort((a, b) => a.sf_history_id.localeCompare(b.sf_history_id));
   payload.p_reviews.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
   return payload;
@@ -888,13 +967,20 @@ export function serializeApplyPayload(plan: IngestionPlan): ApplyPayload {
 export function summarizeDryRunPlan(plan: IngestionPlan): {
   dry_run: true;
   writes_attempted: 0;
-  wouldApply: { snapshots: number; events: number; reviewCreates: number; reviewIssueUpdates: number };
+  wouldApply: {
+    ownerLabelRepairs: number;
+    snapshots: number;
+    events: number;
+    reviewCreates: number;
+    reviewIssueUpdates: number;
+  };
   diagnostics: SyncRunDiagnostics;
 } {
   return {
     dry_run: true,
     writes_attempted: 0,
     wouldApply: {
+      ownerLabelRepairs: plan.diagnostics.ownerLabelRepairs,
       snapshots: plan.diagnostics.snapshotsPlanned,
       events: plan.diagnostics.eventsPlanned,
       reviewCreates: plan.diagnostics.reviewsCreated,

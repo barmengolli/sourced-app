@@ -1,20 +1,19 @@
-// opportunityQueueRepository.ts: the Bite 5C2B1 data-access boundary for the
-// Opportunity Queue Manager.
+// opportunityQueueRepository.ts: the data-access boundary for the Opportunity
+// Queue Manager.
 //
 // This is an INTERFACE ONLY. The six sf_opportunity_* tables have RLS enabled
 // with zero browser policies and only service_role may execute the ingestion
 // function, so the browser can not and must not query them directly: no
-// implementation in this repository imports the Supabase client, and none may
-// until an authenticated server-side review API exists (the open Bite 5C2
-// infrastructure decision). The UI consumes this interface; tests use a
-// synthetic in-memory adapter (src/test/opportunityQueueMemoryAdapter.ts).
+// browser implementation imports the Supabase client. Production uses a
+// same-origin authenticated API adapter; tests use a synthetic in-memory
+// adapter (src/test/opportunityQueueMemoryAdapter.ts).
 //
 // Every action is single-item and returns the coupled projection + audit
 // result produced by the pure domain functions in opportunityQueue.ts. A
 // future server implementation must write that pair transactionally, exactly
 // as sf_apply_opportunity_ingestion does for ingestion writes.
 
-import type { OpportunityQueueItem, QueueFilters } from './opportunityQueue';
+import type { ApprovalDecision, OpportunityQueueItem, QueueFilters } from './opportunityQueue';
 import type { ReviewEventInsert } from './opportunityImportStorage';
 
 // The caller supplies actor identity and an explicit timestamp; repository
@@ -44,7 +43,7 @@ export interface OpportunityQueueRepository {
   // Approval requires the reviewer's explicit channel; lead is optional.
   approveReview(
     reviewId: string,
-    decision: { channelId: string; leadId?: string | null },
+    decision: ApprovalDecision,
     ctx: QueueActionContext,
   ): Promise<QueueActionResult>;
   // Optional non-sensitive note on ctx.note.

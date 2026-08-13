@@ -1017,7 +1017,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			close_date: str(rec.CloseDate),
 			market: str(rec.Market__c),
 			commercial_region: str(rec.Commercial_Region__c),
-			opportunity_owner: str(rec.OwnerId),
+			opportunity_owner: str(rec.Owner?.Name),
 			primary_campaign_source: str(rec.CampaignId),
 			customer_expansion_raw: str(rec.Existing_Customer_or_New_Business__c),
 			sales_development_rep_user_id: str(rec.Sales_Development_Rep__c),
@@ -1132,6 +1132,7 @@ var OpportunityDailyRuntime = (function(exports) {
 		let snapshotNoops = 0;
 		let staleSnapshotsSkipped = 0;
 		let snapshotConflicts = 0;
+		let ownerLabelRepairs = 0;
 		const outcomes = /* @__PURE__ */ new Map();
 		const stagedRecords = [];
 		for (const rec of records) {
@@ -1169,6 +1170,40 @@ var OpportunityDailyRuntime = (function(exports) {
 						});
 						snapshotNoops += 1;
 						continue;
+					}
+					const legacyOwnerId = str(rec.OwnerId);
+					const ownerName = str(rec.Owner?.Name);
+					if (legacyOwnerId !== null && ownerName !== null && legacyOwnerId !== ownerName) {
+						const { content_hash: incomingHash, ...incomingFields } = payload;
+						const ownerOnlyLegacyHash = snapshotFingerprint({
+							...incomingFields,
+							opportunity_owner: legacyOwnerId
+						});
+						const { account_id: incomingAccountId, ...preAccountFields } = incomingFields;
+						const ownerAndAccountLegacyHash = snapshotFingerprint({
+							...preAccountFields,
+							opportunity_owner: legacyOwnerId
+						});
+						const repairKind = prior.contentHash === ownerOnlyLegacyHash ? "owner_label_only" : prior.contentHash === ownerAndAccountLegacyHash ? "owner_and_account_shape" : null;
+						if (repairKind !== null) {
+							operations.push({
+								op: "repair_owner_label",
+								table: "sf_opportunities",
+								sfOpportunityId: rec.Id,
+								repair: {
+									sf_opportunity_id: rec.Id,
+									repair_kind: repairKind,
+									legacy_owner_user_id: legacyOwnerId,
+									owner_name: ownerName,
+									account_id: incomingAccountId,
+									sf_last_modified_at: payload.sf_last_modified_at,
+									prior_content_hash: repairKind === "owner_label_only" ? ownerOnlyLegacyHash : ownerAndAccountLegacyHash,
+									content_hash: incomingHash
+								}
+							});
+							ownerLabelRepairs += 1;
+							continue;
+						}
 					}
 					operations.push({
 						op: "block_snapshot_conflict",
@@ -1364,6 +1399,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			snapshotNoops,
 			staleSnapshotsSkipped,
 			snapshotConflicts,
+			ownerLabelRepairs,
 			reviewsCreated,
 			reviewIssueUpdates,
 			eligibility,
@@ -1382,6 +1418,7 @@ var OpportunityDailyRuntime = (function(exports) {
 	}
 	function serializeApplyPayload(plan) {
 		const payload = {
+			p_owner_repairs: [],
 			p_snapshots: [],
 			p_events: [],
 			p_reviews: [],
@@ -1394,6 +1431,9 @@ var OpportunityDailyRuntime = (function(exports) {
 			}
 		};
 		for (const operation of plan.operations) switch (operation.op) {
+			case "repair_owner_label":
+				payload.p_owner_repairs.push(operation.repair);
+				break;
 			case "upsert_snapshot":
 				payload.p_snapshots.push(operation.payload);
 				break;
@@ -1436,6 +1476,7 @@ var OpportunityDailyRuntime = (function(exports) {
 			default: throw new Error(`serialize: unknown operation kind ${JSON.stringify(operation)}`);
 		}
 		payload.p_snapshots.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
+		payload.p_owner_repairs.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
 		payload.p_events.sort((a, b) => a.sf_history_id.localeCompare(b.sf_history_id));
 		payload.p_reviews.sort((a, b) => a.sf_opportunity_id.localeCompare(b.sf_opportunity_id));
 		return payload;
@@ -1512,6 +1553,7 @@ var OpportunityDailyRuntime = (function(exports) {
 				current_pipeline_by_record_type: currentPipeline,
 				suggested_bdrs: suggestedBdrs,
 				source_attribution_requires_human_review: true,
+				owner_label_repairs_planned: payload.p_owner_repairs.length,
 				snapshots_planned: payload.p_snapshots.length,
 				reviews_planned: payload.p_reviews.length,
 				events_planned: payload.p_events.length,

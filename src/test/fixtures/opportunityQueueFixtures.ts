@@ -43,6 +43,18 @@ export function queueItem(over: Partial<OpportunityQueueItem> = {}): Opportunity
     },
     linkStatus: 'none',
     diagnostics: { sfOpportunityId: `SYNTH-OPP-${seq}` },
+    editable: {
+      sourceMarket: 'Synthetic Market',
+      sourceCommercialRegion: 'NA',
+      sourceGtmCube: 'Synthetic Cube',
+      marketOverride: null,
+      commercialRegionOverride: null,
+      gtmCubeOverride: null,
+      bdrName: null,
+      hppEnteredAt: '2026-02-01',
+      oppEnteredAt: null,
+      pursuitEnteredAt: null,
+    },
     ...over,
     review,
   };

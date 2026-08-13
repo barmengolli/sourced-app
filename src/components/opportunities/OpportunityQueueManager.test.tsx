@@ -103,7 +103,8 @@ describe('queue table and disclosures', () => {
       ]),
     );
     await waitFor(() => screen.getByText('Synthetic Evidence Deal'));
-    await user.click(screen.getByText('Synthetic Evidence Deal'));
+    await user.click(screen.getByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByRole('dialog', { name: 'Synthetic Evidence Deal' })).toBeTruthy();
     expect(screen.getByText(/informational only, never a decision/i)).toBeTruthy();
     expect(screen.getByText(/SYNTH-USER-BDR/)).toBeTruthy();
     expect(screen.getByText(/Suggested BDR: Dave Cummins/)).toBeTruthy();

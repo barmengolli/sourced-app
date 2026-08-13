@@ -323,8 +323,8 @@ UPDATE/DELETE blocked by trigger), 1:1-while-active deal links keyed only by
 exact Salesforce Opportunity ID, a review inbox (channel mandatory before
 approval, lead optional, constrained issue codes), and sync runs with
 SystemModstamp/history-CreatedDate watermarks. RLS is enabled with no
-policies (no anon access; service-role ingestion and a future authenticated
-review API are the writers). `src/lib/opportunityImportStorage.ts` holds the
+policies (no anon access; service-role ingestion and the same-origin,
+server-authenticated review API are the writers). `src/lib/opportunityImportStorage.ts` holds the
 pure state-machine/approval/link/duplicate validation. Derived milestones
 are never persisted; Bite 5A remains the only calculation path. Nothing is
 activated: no ingestion, no live deal creation or linking, no dashboard
@@ -814,20 +814,20 @@ Do not turn a focused task into one of these projects without approval:
 - Content Syndication budget allocation may be revisited separately.
 - AWS migration is planning only. Production remains Vercel plus Supabase.
 - The funnel stage-activity and cohort-conversion split is wired into Data
-  Entry. Exact Account-ID completion, Opportunity history ingestion, reviewed
-  promotion into reporting, and the authenticated live review queue remain
-  separate gates; never present an unavailable cross-grain conversion as 0.
-- The Opportunity Queue Manager (Bite 5C2B1, `docs/opportunity-queue.md`)
-  exists as domain logic (`src/lib/opportunityQueue.ts`), a typed repository
-  boundary (`src/lib/opportunityQueueRepository.ts`), and an unrouted UI
-  (`src/components/opportunities/OpportunityQueueManager.tsx`), including
-  the "Not selected" recovery view (stored review state `ignored`;
-  reconsider requires a reason and reuses the `reopened` audit event). It
-  runs only against a synthetic in-memory adapter in tests. Live wiring
-  requires the authenticated server-side review API; the browser must never
-  query the protected `sf_opportunity_*` tables directly. The portable API
-  contract, capability authorization, and framework-neutral service layer
-  for that API exist under `src/server/` (Bite 5C2B2A,
-  `docs/opportunity-queue-api.md`): no runtime, framework, PingOne login,
-  or database connection yet, and server code never imports React, Vite
-  env, browser storage, Supabase, or test principals.
+  Entry. Exact Account-ID completion and Opportunity history ingestion remain
+  prerequisites for trustworthy cross-grain conversion reporting; never
+  present an unavailable conversion as 0.
+- The live Opportunity queue is embedded in Data Entry behind **Review
+  Salesforce opportunities**. The browser uses the same-origin
+  `/api/opportunity-queue` boundary and never receives the Supabase
+  service-role key or direct access to the protected `sf_opportunity_*`
+  tables. The interim single-reviewer control uses a server-validated
+  password, an eight-hour HttpOnly/SameSite session, origin checks, and CSRF;
+  PingOne can replace that session later without changing the queue domain.
+  Approval requires an explicit channel and Commercial Region, preserves
+  reviewer overrides, writes the review + audit + exact link + generated
+  reporting rows atomically, and never mutates manual attributions. The
+  migration `2026-08-12_opportunity_review_queue_runtime.sql` was applied
+  manually to production on 2026-08-12. The queue still stays closed until
+  its server-only Vercel environment values are configured and the controlled
+  live review test passes. See `docs/opportunity-queue-api.md`.
