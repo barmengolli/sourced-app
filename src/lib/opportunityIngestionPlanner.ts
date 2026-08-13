@@ -33,6 +33,7 @@ import {
   createReviewMutation,
   recordIngestionConflict,
   classifyIncomingEvent,
+  canonicalEventTimestamp,
   buildRecordTypeEventInsert,
   buildTerminalEventInsert,
 } from './opportunityImportStorage';
@@ -289,7 +290,7 @@ export function eventContentFingerprint(event: EventInsert): string {
     event.to_record_type_state,
     event.from_terminal_state,
     event.to_terminal_state,
-    event.changed_at,
+    canonicalEventTimestamp(event.changed_at),
   ]);
   return `sha256:${sha256Hex(canonical)}`;
 }
@@ -302,7 +303,7 @@ export function eventRowContentFingerprint(content: EventRowContent): string {
     content.sourceField,
     content.oldValue,
     content.newValue,
-    content.changedAt,
+    canonicalEventTimestamp(content.changedAt),
   ]);
   return `sha256:${sha256Hex(canonical)}`;
 }
