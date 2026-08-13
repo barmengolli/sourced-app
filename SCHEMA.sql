@@ -1894,3 +1894,20 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- Both are SECURITY DEFINER with search_path=pg_catalog, denied to
 -- PUBLIC/anon/authenticated, and executable only by service_role. Suggestions
 -- remain evidence; this migration performs no approval, link, or data write.
+
+-- =============================================================
+-- Salesforce closed-opportunity reporting projection
+-- migrations/2026-08-13_opportunity_closed_outcome_projection.sql
+-- STATUS: PENDING / NOT YET APPLIED.
+-- =============================================================
+-- Replaces the protected review-list and reporting-refresh functions so a
+-- reviewed closed Salesforce Opportunity produces its prior HPP/Opp/Pursuit
+-- rows plus one source-backed closeWon or closeLost row dated by CloseDate.
+-- Known Salesforce terminal stages provide the normalized loss reason;
+-- unfamiliar reasons remain NULL rather than being guessed. The protected
+-- review list and reporting refresh share one ordered Salesforce-history
+-- replay for HPP/Opp/Pursuit dates, including backward-stage clearing.
+-- An exact normalized legacy/manual deal-name plus account-name match blocks
+-- creation of a new active Salesforce link; it never merges or deletes data.
+-- Applying the migration changes function definitions only and approves no
+-- review.

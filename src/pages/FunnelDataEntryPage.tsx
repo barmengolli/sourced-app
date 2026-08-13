@@ -451,7 +451,10 @@ export default function FunnelDataEntryPage({
         </div>
         {queueOpen && (
           <div id="opportunity-review-queue" className="border-t border-border">
-            <OpportunityQueuePanel channels={channels.map(({ id, name }) => ({ id, name }))} />
+            <OpportunityQueuePanel
+              channels={channels.map(({ id, name }) => ({ id, name }))}
+              attributions={attributionsHook.attributions}
+            />
           </div>
         )}
       </section>

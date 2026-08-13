@@ -26,18 +26,36 @@ in a new tab. Lead lookup is exact normalized email only; no fuzzy matching.
 
 Approval creates a stable exact Salesforce deal link and only
 `source_system='salesforce'` attribution rows. Manual rows are never changed.
+Before approval, the UI and database independently stop an exact normalized
+Opportunity-name plus Account-name match against an unlinked manual deal. This
+is a review safeguard, not an automatic merge: the reviewer must resolve or
+link the legacy deal explicitly, and legitimate same-name deals remain visible
+instead of being silently combined.
 
 - current HPP -> HPP row;
 - current Opportunity -> HPP + Opportunity rows;
 - current Pursuit -> HPP + Opportunity + Pursuit rows;
-- closed, deleted, or Service -> no current-pipeline rows.
+- closed won -> prior funnel rows + one source-backed Closed Won row;
+- closed lost -> prior funnel rows + one source-backed Closed Lost row; or
+- deleted or Service -> no generated reporting rows.
+
+For a closed Opportunity, Salesforce remains authoritative for `IsWon`,
+`CloseDate`, and the terminal Stage. The review dialog shows the outcome and
+close date before approval. Known terminal Stage values map to the reporting
+loss reasons `Closed-Lost to Competitor`, `Closed-Lost In-House`, or
+`Closed-Disqualified`; an unfamiliar value is never guessed. If Salesforce is
+correct, the reviewer only confirms attribution. If it is wrong, Salesforce
+must be corrected and the next daily sync reconciles the generated Sourced row.
 
 HPP defaults to the Salesforce Opportunity CreatedDate. Opportunity and Pursuit
-dates must come from Salesforce history or explicit review; the system does not
-invent them. The daily 11:50 PM America/Denver staging workflow now refreshes
-all approved projections after its atomic staging apply. A regression removes
-only the generated higher-stage rows while retaining append-only movement and
-review history.
+dates come from ordered Salesforce Record Type history when exact events exist;
+the queue and reporting projection use the same replay. A backward movement to
+HPP or Opportunity clears later dates, matching the current active path.
+Reviewers can still correct the proposed dates before approval, but the system
+does not invent missing history. The daily 11:50 PM America/Denver staging
+workflow now refreshes all approved projections after its atomic staging apply.
+A regression removes only the generated higher-stage rows while retaining
+append-only movement and review history.
 
 ## Security boundary
 

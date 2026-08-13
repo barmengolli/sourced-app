@@ -265,6 +265,7 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
       const safe = error.message.includes('review changed')
         ? 'This review changed. Reload the queue and try again.'
         : error.message.includes('required') || error.message.includes('cannot') || error.message.includes('not reportable')
+            || error.message.includes('possible existing Sourced deal')
           ? error.message
           : 'The review action could not be saved';
       return json(res, error.message.includes('review changed') ? 409 : 422, { ok: false, error: { message: safe } });

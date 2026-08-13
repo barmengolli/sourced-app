@@ -11,6 +11,8 @@ import OpportunityQueueManager from './OpportunityQueueManager';
 import { createMemoryQueueRepository } from '../../test/opportunityQueueMemoryAdapter';
 import { queueItem, FIXED_NOW } from '../../test/fixtures/opportunityQueueFixtures';
 import type { OpportunityQueueRepository } from '../../lib/opportunityQueueRepository';
+import { attribution } from '../../test/fixtures/factories';
+import type { Attribution } from '../../types/db';
 
 afterEach(cleanup);
 
@@ -19,11 +21,16 @@ const CHANNELS = [
   { id: 'SYNTH-CHANNEL-2', name: 'Synthetic Events' },
 ];
 
-function renderQueue(repository: OpportunityQueueRepository, live = false) {
+function renderQueue(
+  repository: OpportunityQueueRepository,
+  live = false,
+  attributions: Attribution[] = [],
+) {
   return render(
     <OpportunityQueueManager
       repository={repository}
       channels={CHANNELS}
+      attributions={attributions}
       actorId="SYNTH-REVIEWER"
       getNow={() => FIXED_NOW}
       live={live}
@@ -134,6 +141,69 @@ describe('queue table and disclosures', () => {
 });
 
 describe('approval form', () => {
+  it('pauses approval when an exact legacy Sourced deal already exists', async () => {
+    const user = userEvent.setup();
+    const item = queueItem({
+      opportunityName: 'Synthetic Existing Deal',
+      accountName: 'Synthetic Existing Account',
+    });
+    const repo = createMemoryQueueRepository([item]);
+    renderQueue(
+      repo,
+      true,
+      [
+        attribution({
+          deal_id: 'SYNTH-LEGACY-DEAL',
+          label: item.opportunityName,
+          account: item.accountName,
+        }),
+      ],
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByRole('alert').textContent).toContain('Possible existing Sourced deal');
+    expect(screen.getByText(/nothing was merged, deleted, or changed automatically/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(repo.auditLog).toHaveLength(0);
+  });
+
+  it('shows the Salesforce closed outcome and records it through approval', async () => {
+    const user = userEvent.setup();
+    renderQueue(
+      createMemoryQueueRepository([
+        queueItem({
+          opportunityName: 'Synthetic Closed Deal',
+          recordTypeState: 'pursuit',
+          stageName: 'Closed-Lost-Competitor',
+          isClosed: true,
+          isWon: false,
+          closeDate: '2026-07-31',
+          sourceLostReason: 'Closed-Lost to Competitor',
+          editable: {
+            sourceMarket: 'Synthetic Market',
+            sourceCommercialRegion: 'NA',
+            sourceGtmCube: 'Synthetic Cube',
+            marketOverride: null,
+            commercialRegionOverride: null,
+            gtmCubeOverride: null,
+            bdrName: null,
+            hppEnteredAt: '2026-05-01',
+            oppEnteredAt: '2026-06-01',
+            pursuitEnteredAt: '2026-07-01',
+          },
+        }),
+      ]),
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByText('Closed outcome')).toBeTruthy();
+    expect(screen.getAllByText('Closed lost').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('2026-07-31')).toBeTruthy();
+    expect(screen.getByText('Closed-Lost to Competitor')).toBeTruthy();
+    expect(screen.getByText(/update the Opportunity in Salesforce/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Approve & record Closed Lost' })).toBeTruthy();
+  });
+
   it('missing channel selection blocks approval with a visible validation reason', async () => {
     const user = userEvent.setup();
     renderQueue(createMemoryQueueRepository([queueItem({ opportunityName: 'Synthetic Pending Deal' })]));
