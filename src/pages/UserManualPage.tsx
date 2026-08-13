@@ -22,7 +22,7 @@ export default function UserManualPage() {
 
       <Section title="Two views of the data">
         <p>
-          <Strong>Data Entry uses cohort math.</Strong> Lead and deal cohorts
+          <Strong>Operations uses cohort math.</Strong> Lead and deal cohorts
           stay anchored to the period they entered the funnel and are followed
           forward. If a campaign generates 20 Leads and 10 later reach MQL,
           the cohort shows Leads 20 and MQLs 10. Reaching MQL never subtracts
@@ -50,10 +50,10 @@ export default function UserManualPage() {
       <Section title="Where to find what">
         <ul className="text-sm text-charcoal space-y-1">
           <Row label="Conversion rates and the funnel grid">
-            Marketing Funnel → Data Entry
+            Marketing Funnel → Operations
           </Row>
           <Row label="Where MQLs come from over the year">
-            Marketing Funnel → Leads & MQLs
+            Marketing Funnel → Overview
           </Row>
           <Row label="Event attendance and activation">
             Marketing Funnel → Events
@@ -74,12 +74,12 @@ export default function UserManualPage() {
       </Section>
 
       <Section title="Marketing Funnel sub-tabs">
-        <SubSection title="Data Entry">
+        <SubSection title="Operations">
           The funnel grid. Each row is a channel, each column is a stage
           (Lead, MQL, HPP, Opp, Pursuit, Closed Won, Closed Lost). Click
           any actual count cell to see the underlying deals.
         </SubSection>
-        <SubSection title="Leads & MQLs">
+        <SubSection title="Overview">
           Read-only charts of how leads and MQLs are distributed across
           the year. Per-month totals and per-month breakdowns by channel.
         </SubSection>
@@ -126,7 +126,7 @@ export default function UserManualPage() {
 
       <Section title="Common tasks">
         <SubSection title="View deals in a funnel cell">
-          Click any actual count cell on Data Entry. A modal opens listing
+          Click any actual count cell in Operations. A modal opens listing
           every deal behind that count with Edit, Promote, Close Lost, and
           Delete buttons.
         </SubSection>
@@ -139,10 +139,10 @@ export default function UserManualPage() {
           Region chips at the top of each sub-tab toggle which regions
           appear. "Clear" turns all five regions on at once.
         </SubSection>
-        <SubSection title="Create a new HPP manually">
-          Marketing Funnel → Data Entry → click "+ Create HPP". Fill in
-          the deal metadata, the first touch, and any downstream stage
-          dates you already have.
+        <SubSection title="Review imported Salesforce opportunities">
+          Marketing Funnel → Operations → scroll to Opportunity review.
+          Open the queue to verify each imported opportunity and approve its
+          reporting channel.
         </SubSection>
         <SubSection title="Edit a deal from the Opportunities tab">
           Find the deal in the Active Deals table, click the pencil icon

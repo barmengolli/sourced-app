@@ -20,7 +20,6 @@ import FunnelTable, {
 import ConversionsPanel from '../components/funnel/ConversionsPanel';
 import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
 import TouchDrilldownPanel from '../components/funnel/TouchDrilldownPanel';
-import CreateHPPModal from '../components/attribution/CreateHPPModal';
 import OpportunitiesListModal from '../components/attribution/OpportunitiesListModal';
 import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
 import { readJson, writeJson } from '../lib/storage';
@@ -28,6 +27,7 @@ import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisc
 import { reportingContractFor } from '../constants/reportingPages';
 import { computeFunnelConversionCohorts } from '../lib/funnelConversionCohorts';
 import OpportunityQueuePanel from '../components/opportunities/OpportunityQueuePanel';
+import FunnelStageSummary from '../components/funnel/FunnelStageSummary';
 
 const EDITS_LOCKED_STORAGE_KEY = 'sourced.funnel.editsLocked';
 
@@ -206,7 +206,6 @@ export default function FunnelDataEntryPage({
     return m;
   }, [attributionsHook.attributions, year, filter, parentByChild, regions]);
 
-  const [createOpen, setCreateOpen] = useState(false);
   const [listQuery, setListQuery] = useState<ListModalQuery | null>(null);
   const [touchQuery, setTouchQuery] = useState<TouchDrilldownQuery | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
@@ -250,32 +249,32 @@ export default function FunnelDataEntryPage({
   );
 
   return (
-    <div className="p-8 space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-charcoal">
-            Marketing Funnel: Data entry
-          </h1>
-          <ReportingBasisDisclosure
-            basis={REPORTING_BASIS.basis}
-            explanation={REPORTING_BASIS.anchor}
-          />
-          <p className="mt-1 text-sm text-slate-muted">
-            Edit projections inline. Click attribution cells with deals to
-            view, edit, promote, or delete them. Lead actuals count campaign
-            memberships in the selected cohort; MQL actuals are the members
-            of that same cohort who have reached MQL.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setQueueOpen((open) => !open)}
-            aria-expanded={queueOpen}
-            className="text-xs px-3 py-1.5 rounded border border-border bg-bg text-charcoal hover:bg-muted/40"
-          >
-            {queueOpen ? 'Hide Opportunity review' : 'Review Salesforce opportunities'}
-          </button>
+    <div className="min-h-full bg-gradient-to-b from-muted/80 via-bg to-bg p-4 sm:p-6 xl:p-8">
+      <div className="mx-auto max-w-[1800px] space-y-5">
+      <header className="relative overflow-hidden rounded-2xl border border-border bg-bg shadow-sm">
+        <div aria-hidden="true" className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo via-teal to-success" />
+        <div className="flex flex-col gap-5 p-5 sm:p-6 xl:flex-row xl:items-start xl:justify-between">
+          <div className="max-w-3xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-indigo/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo">
+                Revenue operations
+              </span>
+              <ReportingBasisDisclosure
+                basis={REPORTING_BASIS.basis}
+                showExplanation={false}
+                variant="accent"
+              />
+            </div>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-charcoal">
+              Marketing Funnel: Operations
+            </h1>
+            <p className="mt-2 text-sm leading-6 text-slate-muted">
+              View source-backed funnel results and manage projections and approved opportunities
+              in one place.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 xl:justify-end">
           <button
             type="button"
             onClick={() => setActualsLocked((v) => !v)}
@@ -286,7 +285,7 @@ export default function FunnelDataEntryPage({
                 : 'Edits are unlocked. Click to lock.'
             }
             className={
-              'inline-flex items-center justify-center w-8 h-8 rounded border ' +
+              'inline-flex h-9 w-9 items-center justify-center rounded-lg border shadow-sm transition hover:-translate-y-0.5 ' +
               (editsLocked
                 ? 'border-danger/40 bg-danger/5 text-danger hover:bg-danger/10'
                 : 'border-success/40 bg-success/5 text-success hover:bg-success/10')
@@ -326,13 +325,20 @@ export default function FunnelDataEntryPage({
               </svg>
             )}
           </button>
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            className="text-xs px-3 py-1.5 rounded bg-indigo text-white hover:opacity-90"
-          >
-            + Create HPP
-          </button>
+          </div>
+        </div>
+        <div className="border-t border-border bg-muted/25 p-4 sm:px-6 sm:py-5">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo">Reporting scope</p>
+              <h2 id="reporting-scope-title" className="mt-1 text-base font-semibold text-charcoal">
+                Choose the period and commercial region
+              </h2>
+            </div>
+            <span className="rounded-full border border-border bg-muted/60 px-3 py-1 text-[11px] text-slate-muted">
+              Filters apply to every value below
+            </span>
+          </div>
           <FunnelReportingFilters
             year={year}
             filter={filter}
@@ -346,22 +352,33 @@ export default function FunnelDataEntryPage({
         </div>
       </header>
 
-      {queueOpen && (
-        <section className="border border-border rounded bg-muted/20 overflow-hidden">
-          <OpportunityQueuePanel channels={channels.map(({ id, name }) => ({ id, name }))} />
-        </section>
-      )}
-
       {grid.unassignedLeadCount > 0 && (
-        <div className="text-xs text-slate-muted">
+        <div className="flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/5 px-4 py-3 text-xs text-charcoal">
+          <span aria-hidden="true" className="mt-0.5 h-2 w-2 flex-none rounded-full bg-warning" />
+          <span>
           {grid.unassignedLeadCount} lead
           {grid.unassignedLeadCount === 1 ? '' : 's'} in this period have no
           source channel and are not counted in any row. Assign a channel to
           surface them in the grid.
+          </span>
         </div>
       )}
 
-      <div className="flex flex-col xl:flex-row gap-4">
+      <FunnelStageSummary totals={grid.totals} />
+
+      <section aria-labelledby="funnel-detail-title" className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo">Source-backed detail</p>
+            <h2 id="funnel-detail-title" className="mt-1 text-lg font-semibold text-charcoal">
+              Channel performance and cohort conversion
+            </h2>
+          </div>
+          <p className="text-xs text-slate-muted">
+            Click actuals to inspect records · unlock only when editing stored values
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
         <FunnelTable
           grid={grid}
           channels={visibleChannels}
@@ -405,32 +422,39 @@ export default function FunnelDataEntryPage({
           editsLocked={editsLocked}
         />
         <ConversionsPanel conversions={conversionCohorts} />
-      </div>
+        </div>
+      </section>
 
-      {createOpen && (
-        <CreateHPPModal
-          channels={channels}
-          defaultYear={year}
-          defaultPeriodIndex={periodIndex}
-          attributionsHook={attributionsHook}
-          touchesHook={touchesHook}
-          onClose={() => setCreateOpen(false)}
-          onOpenExisting={(dealId) => {
-            // The editor takes an attribution row id, not a deal id.
-            // Prefer the HPP row of the deal so the editor opens at
-            // the canonical entry point; fall back to any row that
-            // shares the deal_id if no HPP row exists.
-            const rows = attributionsHook.attributions.filter(
-              (a) => a.deal_id === dealId,
-            );
-            const target =
-              rows.find((r) => r.stage_key === 'hpp') ?? rows[0] ?? null;
-            if (!target) return;
-            setCreateOpen(false);
-            setEditId(target.id);
-          }}
-        />
-      )}
+      <section aria-labelledby="opportunity-review-title" className="overflow-hidden rounded-2xl border border-border bg-bg shadow-sm">
+        <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo">
+              Salesforce governance
+            </p>
+            <h2 id="opportunity-review-title" className="mt-1 text-lg font-semibold text-charcoal">
+              Opportunity review
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-slate-muted">
+              Review imported Salesforce opportunities and approve their reporting channel.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setQueueOpen((open) => !open)}
+            aria-expanded={queueOpen}
+            aria-controls="opportunity-review-queue"
+            className="inline-flex items-center justify-center gap-2 self-start rounded-lg border border-border bg-bg px-3.5 py-2 text-xs font-medium text-charcoal shadow-sm transition hover:-translate-y-0.5 hover:border-indigo/30 hover:shadow sm:self-auto"
+          >
+            <span aria-hidden="true" className="h-2 w-2 rounded-full bg-warning" />
+            {queueOpen ? 'Hide opportunity queue' : 'Review Salesforce opportunities'}
+          </button>
+        </div>
+        {queueOpen && (
+          <div id="opportunity-review-queue" className="border-t border-border">
+            <OpportunityQueuePanel channels={channels.map(({ id, name }) => ({ id, name }))} />
+          </div>
+        )}
+      </section>
 
       {touchQuery && (
         <TouchDrilldownPanel
@@ -476,6 +500,7 @@ export default function FunnelDataEntryPage({
           onClose={() => setEditId(null)}
         />
       )}
+      </div>
     </div>
   );
 }

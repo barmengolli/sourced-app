@@ -26,7 +26,7 @@ surfaces only. The hidden Funnel Flow Sankey and Funnel Compare page were
 NOT audited and are NOT approved; they remain classified as hidden legacy
 surfaces requiring a decision before restoration (see Follow-ups).
 
-## Marketing Funnel: Leads & MQLs
+## Marketing Funnel Overview
 
 | Surface | Basis | Action (Bite 4F) |
 |---|---|---|
@@ -42,8 +42,8 @@ surfaces requiring a decision before restoration (see Follow-ups).
 
 | Surface | Basis | Action (Bite 4F) |
 |---|---|---|
-| Data Entry grid (channel rows, totals) | Memberships | Switched in 4E; labeling verified (memberships subtitle + "Unique contacts" row present) |
-| Data Entry drilldown panel | Memberships | Added in 4E; lists one row per touch |
+| Operations grid (channel rows, totals) | Memberships | Switched in 4E; labeling verified (memberships subtitle + "Unique contacts" row present) |
+| Operations drilldown panel | Memberships | Added in 4E; lists one row per touch |
 | Events page (activation counts) | Primary source | Unchanged by design. `computeEventActivations` buckets each PERSON by their activation labels and primary channel; an event activation is a person-level fact, not a campaign membership. Basis subtitle added |
 | Spend page (CPL / CPMQL denominators) | Primary source | **Unchanged: locked by the program.** See "Recorded decision" below. Basis subtitle added |
 | Opportunities page (deal donuts, velocity) | Primary source (deal-side) | Unchanged by design: deals inherit one channel via primary-source resolution (program decision 1.4). Out of scope for membership counting |

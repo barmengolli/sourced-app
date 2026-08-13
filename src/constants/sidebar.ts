@@ -27,16 +27,16 @@ export const SIDEBAR_SECTIONS: SidebarSection[] = [
   {
     id: 'funnel',
     label: 'Marketing Funnel',
-    defaultChild: 'funnel-data',
+    defaultChild: 'funnel-dashboard',
     lastTabStorageKey: 'sourced.funnel.lastTab',
     expandedStorageKey: 'sourced.sidebar.expanded.funnel',
     children: [
-      { key: 'funnel-data', label: 'Data Entry' },
       // PageKey values stay as `funnel-dashboard` / `funnel-velocity` so
       // storage and routing identifiers don't move when these labels
       // change. The labels reflect the user-facing content split:
-      // lead/MQL-side analytics vs deal-side analytics.
-      { key: 'funnel-dashboard', label: 'Leads & MQLs' },
+      // leadership reporting vs operational review and planning.
+      { key: 'funnel-dashboard', label: 'Overview' },
+      { key: 'funnel-data', label: 'Operations' },
       { key: 'funnel-velocity', label: 'Opportunities' },
       { key: 'funnel-events', label: 'Events' },
       { key: 'funnel-spend', label: 'Spend' },

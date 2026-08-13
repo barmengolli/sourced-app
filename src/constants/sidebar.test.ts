@@ -9,7 +9,7 @@ const funnel = SIDEBAR_SECTIONS.find((s) => s.id === 'funnel')!;
 
 describe('resolveSectionTarget', () => {
   it('a stale stored funnel-compare falls back to the default child', () => {
-    expect(resolveSectionTarget(funnel, 'funnel-compare')).toBe('funnel-data');
+    expect(resolveSectionTarget(funnel, 'funnel-compare')).toBe('funnel-dashboard');
   });
 
   it('a valid stored child is honored', () => {
@@ -17,13 +17,13 @@ describe('resolveSectionTarget', () => {
   });
 
   it('no stored value lands on the default child', () => {
-    expect(resolveSectionTarget(funnel, null)).toBe('funnel-data');
+    expect(resolveSectionTarget(funnel, null)).toBe('funnel-dashboard');
   });
 
   it('the funnel section shows exactly the five visible tabs, Compare hidden', () => {
     expect(funnel.children.map((c) => c.key)).toEqual([
-      'funnel-data',
       'funnel-dashboard',
+      'funnel-data',
       'funnel-velocity',
       'funnel-events',
       'funnel-spend',

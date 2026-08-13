@@ -591,9 +591,9 @@ export default function FunnelTable({
   };
 
   return (
-    <div className="flex-1 min-w-0 border border-border rounded-lg bg-bg overflow-x-auto">
+    <div className="min-w-0 flex-1 overflow-x-auto rounded-xl border border-border bg-bg shadow-sm">
       {uniqueContacts && (
-        <p className="px-3 py-1.5 text-[11px] text-slate-muted border-b border-border">
+        <p className="border-b border-border bg-muted/35 px-4 py-2.5 text-[11px] leading-5 text-slate-muted">
           Lead and MQL channel counts are campaign memberships and intentionally
           overlap: a contact in several campaigns counts in each. Totals sum
           memberships; the unique contacts line below shows distinct people.
@@ -602,8 +602,8 @@ export default function FunnelTable({
       <table className="w-full text-xs border-collapse">
         <thead>
           {/* Stage spanner row */}
-          <tr className="bg-muted">
-            <th className="text-left px-3 py-2 text-xs font-medium text-slate-muted border-r border-border align-bottom">
+          <tr className="bg-muted/80">
+            <th className="text-left px-4 py-3 text-xs font-semibold text-charcoal border-r border-border align-bottom">
               Channel
             </th>
             {FUNNEL_STAGES.map((stage) => {
@@ -614,7 +614,7 @@ export default function FunnelTable({
                   key={stage}
                   colSpan={span}
                   className={
-                    'text-center px-2 py-1 text-xs font-semibold border-r border-border last:border-r-0 ' +
+                    'text-center px-2 py-2 text-xs font-semibold border-r border-border last:border-r-0 ' +
                     (isLost
                       ? 'text-danger bg-danger/10'
                       : 'text-charcoal')
@@ -626,7 +626,7 @@ export default function FunnelTable({
             })}
           </tr>
           {/* Sub-header row: PROJ / ACT / OT% / FE% */}
-          <tr className="bg-muted/60 text-slate-muted">
+          <tr className="bg-muted/50 text-slate-muted">
             <th className="border-r border-border" />
             {FUNNEL_STAGES.map((stage) => {
               const isLead = stage === 'lead';

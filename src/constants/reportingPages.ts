@@ -42,13 +42,13 @@ export interface ReportingPageContract {
 // Pages that MUST use the shared ReportingFilterBar and the shared selection.
 export const REPORTING_PAGES: ReadonlyArray<ReportingPageContract> = [
   {
-    // Data Entry is a reporting-CONTROL surface, not a reporting-output one.
+    // Operations is a reporting-CONTROL surface, not a reporting-output one.
     // It shares the Quarter, Year, and Region controls so a user moving from a
-    // dashboard to Data Entry keeps their place, but it offers no Month and no
+    // dashboard to Operations keeps their place, but it offers no Month and no
     // comparison: its editable storage IS quarterly, and a month control would
     // imply editable monthly cells that do not exist.
     key: 'funnel-data',
-    label: 'Data Entry',
+    label: 'Operations',
     basis: 'cohort',
     anchor:
       'Campaign memberships grouped by touch quarter; MQLs are the reached-MQL subset of the same Lead cohort',
@@ -60,7 +60,7 @@ export const REPORTING_PAGES: ReadonlyArray<ReportingPageContract> = [
   },
   {
     key: 'funnel-dashboard',
-    label: 'Leads & MQLs',
+    label: 'Overview',
     basis: 'cohort',
     anchor: 'Cohort based on marketing sourced date',
     supportedGrains: ['quarter', 'year'],

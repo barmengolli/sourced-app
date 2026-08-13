@@ -229,9 +229,11 @@ export default function OpportunityQueueManager({
   const set = (patch: Partial<QueueFilters>) => setFilters((f) => ({ ...f, ...patch }));
 
   return (
-    <div className="p-8 space-y-4">
-      <header>
-        <h1 className="text-2xl font-semibold text-charcoal">Opportunity queue</h1>
+    <div className="space-y-5 p-5 sm:p-6">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-5">
+        <div>
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo">Review workspace</p>
+        <h1 className="mt-1 text-xl font-semibold text-charcoal">Opportunity queue</h1>
         <p className="mt-1 text-sm text-slate-muted">
           Staged Salesforce opportunities awaiting a manual marketing decision. Approval always
           requires a channel selection; evidence never decides.
@@ -242,9 +244,13 @@ export default function OpportunityQueueManager({
             the authenticated review API.
           </p>
         )}
+        </div>
+        <span className="rounded-full border border-warning/30 bg-warning/5 px-3 py-1 text-[11px] font-medium text-amber-700">
+          Human approval required
+        </span>
       </header>
 
-      <div className="flex items-center gap-2" role="group" aria-label="Queue view">
+      <div className="flex items-center gap-2 rounded-lg bg-muted/60 p-1 w-fit" role="group" aria-label="Queue view">
         <button
           type="button"
           aria-pressed={view === 'active'}
@@ -425,10 +431,10 @@ export default function OpportunityQueueManager({
       )}
 
       {status === 'ready' && visible.length > 0 && (
-        <div className="border border-border rounded overflow-x-auto bg-bg">
+        <div className="overflow-x-auto rounded-xl border border-border bg-bg shadow-sm">
           <table className="w-full text-xs">
             <thead>
-              <tr className="text-left text-slate-muted border-b border-border">
+              <tr className="border-b border-border bg-muted/60 text-left text-slate-muted">
                 <th className="px-3 py-2 font-medium">Opportunity</th>
                 <th className="px-3 py-2 font-medium">Account</th>
                 <th className="px-3 py-2 font-medium">Type</th>
@@ -449,7 +455,7 @@ export default function OpportunityQueueManager({
                   onClick={() => selectItem(item)}
                   aria-selected={item.reviewId === selectedId}
                   className={
-                    'border-b border-border last:border-b-0 cursor-pointer hover:bg-muted/40 ' +
+                    'border-b border-border last:border-b-0 cursor-pointer transition-colors hover:bg-indigo/5 ' +
                     (item.reviewId === selectedId ? 'bg-muted/60' : '')
                   }
                 >
