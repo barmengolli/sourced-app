@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import OpportunityQueueManager, { type QueueChannelOption } from './OpportunityQueueManager';
 import { createOpportunityQueueHttpRepository } from '../../lib/opportunityQueueHttpRepository';
+import type { Attribution } from '../../types/db';
 
 type SessionState = 'checking' | 'locked' | 'ready' | 'unavailable';
 
-export default function OpportunityQueuePanel({ channels }: { channels: QueueChannelOption[] }) {
+export default function OpportunityQueuePanel({
+  channels,
+  attributions,
+}: {
+  channels: QueueChannelOption[];
+  attributions: Attribution[];
+}) {
   const [state, setState] = useState<SessionState>('checking');
   const [password, setPassword] = useState('');
   const [csrf, setCsrf] = useState('');
@@ -66,5 +73,12 @@ export default function OpportunityQueuePanel({ channels }: { channels: QueueCha
       </form>
     );
   }
-  return <OpportunityQueueManager repository={repository} channels={channels} live />;
+  return (
+    <OpportunityQueueManager
+      repository={repository}
+      channels={channels}
+      attributions={attributions}
+      live
+    />
+  );
 }

@@ -1904,5 +1904,10 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- reviewed closed Salesforce Opportunity produces its prior HPP/Opp/Pursuit
 -- rows plus one source-backed closeWon or closeLost row dated by CloseDate.
 -- Known Salesforce terminal stages provide the normalized loss reason;
--- unfamiliar reasons remain NULL rather than being guessed. Applying the
--- migration changes function definitions only and approves no review.
+-- unfamiliar reasons remain NULL rather than being guessed. The protected
+-- review list and reporting refresh share one ordered Salesforce-history
+-- replay for HPP/Opp/Pursuit dates, including backward-stage clearing.
+-- An exact normalized legacy/manual deal-name plus account-name match blocks
+-- creation of a new active Salesforce link; it never merges or deletes data.
+-- Applying the migration changes function definitions only and approves no
+-- review.

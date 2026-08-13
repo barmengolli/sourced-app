@@ -15,6 +15,7 @@ import {
   BLOCKING_ISSUE_CODES,
   REVIEW_STATE_LABELS,
   filterQueueItems,
+  findPossibleExistingManualDeal,
   isApprovable,
 } from '../../lib/opportunityQueue';
 import type { OpportunityQueueItem, QueueFilters, QueueLeadMatch } from '../../lib/opportunityQueue';
@@ -24,6 +25,7 @@ import type {
 } from '../../lib/opportunityQueueRepository';
 import type { ReviewState } from '../../lib/opportunityImportStorage';
 import { REGIONS } from '../../constants/regions';
+import type { Attribution } from '../../types/db';
 
 export interface QueueChannelOption {
   id: string;
@@ -34,6 +36,9 @@ export interface OpportunityQueueManagerProps {
   repository: OpportunityQueueRepository;
   // Sourced channels for the mandatory approval selection.
   channels: QueueChannelOption[];
+  // Existing Sourced reporting rows are read-only evidence for the duplicate
+  // guard. They are never modified or linked automatically by this component.
+  attributions?: Attribution[];
   actorId?: string | null;
   // Injected clock so tests stay deterministic.
   getNow?: () => string;
@@ -100,6 +105,7 @@ const ISSUE_LABELS: Record<string, string> = {
 export default function OpportunityQueueManager({
   repository,
   channels,
+  attributions = [],
   actorId = null,
   getNow = () => new Date().toISOString(),
   live = false,
@@ -174,6 +180,10 @@ export default function OpportunityQueueManager({
   // Selection and every repository call key on the opaque internal review
   // identity, never the Salesforce Opportunity ID.
   const selected = visible.find((i) => i.reviewId === selectedId) ?? null;
+  const possibleExistingDeal = useMemo(
+    () => (selected ? findPossibleExistingManualDeal(selected, attributions) : null),
+    [selected, attributions],
+  );
 
   const ctx = useCallback(
     (actionNote?: string) => ({
@@ -774,6 +784,23 @@ export default function OpportunityQueueManager({
                 );
               }}
             >
+              {possibleExistingDeal && (
+                <section
+                  role="alert"
+                  className="rounded-lg border border-warning/40 bg-warning/5 p-4 text-xs text-charcoal"
+                >
+                  <h3 className="font-semibold text-amber-800">Possible existing Sourced deal</h3>
+                  <p className="mt-1">
+                    Approval is paused because a legacy Sourced deal has the exact same Opportunity
+                    name and Account: <strong>{possibleExistingDeal.label}</strong> ·{' '}
+                    <strong>{possibleExistingDeal.account}</strong>. Resolve or link that legacy deal
+                    first so its history and touches are not duplicated.
+                  </p>
+                  <p className="mt-1 text-slate-muted">
+                    Nothing was merged, deleted, or changed automatically.
+                  </p>
+                </section>
+              )}
               <section className="rounded-lg border border-border p-4">
                 <h3 className="text-sm font-semibold text-charcoal">Sourced attribution</h3>
                 <p className="mt-0.5 text-xs text-slate-muted">
@@ -914,7 +941,7 @@ export default function OpportunityQueueManager({
                       : 'One opportunity, one reviewed attribution decision.'}
                   </p>
                 </div>
-                <button type="submit" disabled={actionPending}
+                <button type="submit" disabled={actionPending || possibleExistingDeal !== null}
                   className="rounded bg-indigo px-4 py-2 text-xs font-medium text-white hover:bg-indigo/90 disabled:opacity-50">
                   {actionPending
                     ? 'Saving…'

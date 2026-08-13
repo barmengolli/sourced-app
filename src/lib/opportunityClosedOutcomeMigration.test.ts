@@ -10,6 +10,8 @@ const SQL = readFileSync(
 describe('Salesforce closed Opportunity projection migration', () => {
   it('stays pending and changes function definitions without applying a review', () => {
     expect(SQL).toContain('STATUS: PENDING / NOT YET APPLIED');
+    expect(SQL).toContain('CREATE OR REPLACE FUNCTION public.sf_derive_opportunity_stage_dates');
+    expect(SQL).toContain('CREATE OR REPLACE FUNCTION public.sf_guard_opportunity_deal_link_duplicate');
     expect(SQL).toContain('CREATE OR REPLACE FUNCTION public.sf_refresh_opportunity_reporting');
     expect(SQL).toContain('CREATE OR REPLACE FUNCTION public.sf_list_opportunity_reviews');
     expect(SQL).not.toContain(
@@ -36,9 +38,40 @@ describe('Salesforce closed Opportunity projection migration', () => {
     expect(SQL).toContain("'sourceLostReason', CASE");
   });
 
+  it('uses one ordered Salesforce-history replay for reporting and review dates', () => {
+    expect(SQL).toContain(
+      'FROM public.sf_derive_opportunity_stage_dates(p_sf_opportunity_uuid) d;',
+    );
+    expect(SQL).toContain(
+      'LEFT JOIN LATERAL public.sf_derive_opportunity_stage_dates(o.id) dates ON TRUE',
+    );
+    expect(SQL).toContain("'hppEnteredAt', dates.hpp_entered_at");
+    expect(SQL).toContain("'oppEnteredAt', dates.opp_entered_at");
+    expect(SQL).toContain("'pursuitEnteredAt', dates.pursuit_entered_at");
+    expect(SQL).toContain('ORDER BY changed_at, sf_history_id');
+    expect(SQL).toContain('opp_entered_at := NULL;');
+    expect(SQL).toContain('pursuit_entered_at := NULL;');
+  });
+
+  it('blocks an exact legacy manual deal collision without merging or deleting it', () => {
+    expect(SQL).toContain('CREATE TRIGGER trg_sf_guard_opportunity_deal_link_duplicate');
+    expect(SQL).toContain("(a.source_system IS NULL OR a.source_system = 'manual')");
+    expect(SQL).toContain("a.source_system = 'manual'");
+    expect(SQL).toContain('pg_catalog.regexp_replace(pg_catalog.btrim(a.label)');
+    expect(SQL).toContain('pg_catalog.regexp_replace(pg_catalog.btrim(a.account)');
+    expect(SQL).toContain('possible existing Sourced deal with the same Opportunity name and Account');
+    expect(SQL).not.toMatch(/DELETE FROM public\.attributions[\s\S]*source_system\s*(?:IS NULL|= 'manual')/i);
+  });
+
   it('keeps protected functions service-role-only', () => {
-    expect(SQL.match(/SECURITY DEFINER/g)).toHaveLength(2);
-    expect(SQL.match(/SET search_path = pg_catalog/g)).toHaveLength(2);
+    expect(SQL.match(/SECURITY DEFINER/g)).toHaveLength(4);
+    expect(SQL.match(/SET search_path = pg_catalog/g)).toHaveLength(4);
+    expect(SQL).toContain(
+      'REVOKE ALL ON FUNCTION public.sf_derive_opportunity_stage_dates(UUID) FROM PUBLIC, anon, authenticated, service_role;',
+    );
+    expect(SQL).toContain(
+      'REVOKE ALL ON FUNCTION public.sf_guard_opportunity_deal_link_duplicate() FROM PUBLIC, anon, authenticated, service_role;',
+    );
     expect(SQL).toContain(
       'REVOKE ALL ON FUNCTION public.sf_list_opportunity_reviews(TEXT) FROM PUBLIC, anon, authenticated;',
     );

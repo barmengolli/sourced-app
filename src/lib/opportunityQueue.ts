@@ -37,6 +37,7 @@ import type {
   ReviewProjection,
   ReviewState,
 } from './opportunityImportStorage';
+import type { Attribution } from '../types/db';
 
 // ---------------------------------------------------------------------------
 // Queue item shape
@@ -120,6 +121,48 @@ export interface OpportunityQueueItem {
     oppEnteredAt: string | null;
     pursuitEnteredAt: string | null;
   };
+}
+
+export interface PossibleExistingDeal {
+  dealId: string;
+  label: string;
+  account: string;
+}
+
+const normalizeExactDealText = (value: string | null | undefined): string =>
+  (value ?? '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+
+// Legacy/manual attributions predate the Salesforce Opportunity identity.
+// An exact normalized Opportunity-name AND Account-name match is strong enough
+// to pause approval, but never strong enough to merge records automatically.
+// The reviewer must resolve the legacy deal explicitly so touches and audit
+// history are not silently reassigned or deleted.
+export function findPossibleExistingManualDeal(
+  item: OpportunityQueueItem,
+  attributions: Attribution[],
+): PossibleExistingDeal | null {
+  const opportunityName = normalizeExactDealText(item.opportunityName);
+  const accountName = normalizeExactDealText(item.accountName);
+  if (!opportunityName || !accountName) return null;
+
+  const seenDeals = new Set<string>();
+  for (const attribution of attributions) {
+    if (attribution.source_system === 'salesforce') continue;
+    const dealId = attribution.deal_id?.trim();
+    if (!dealId || seenDeals.has(dealId)) continue;
+    seenDeals.add(dealId);
+    if (
+      normalizeExactDealText(attribution.label) === opportunityName &&
+      normalizeExactDealText(attribution.account) === accountName
+    ) {
+      return {
+        dealId,
+        label: attribution.label?.trim() || item.opportunityName,
+        account: attribution.account?.trim() || item.accountName || '',
+      };
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

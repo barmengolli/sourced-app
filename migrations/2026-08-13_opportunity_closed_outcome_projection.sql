@@ -7,13 +7,137 @@
 -- reviewer could approve its attribution but could not record Closed Won or
 -- Closed Lost in Sourced. This migration keeps Salesforce authoritative for
 -- the terminal outcome and close date while preserving the human-selected
--- channel, region, optional Lead link, BDR, and stage-entry dates.
+-- channel, region, optional Lead link, BDR, and stage-entry dates. The review
+-- queue now derives those dates through the same ordered Salesforce-history
+-- replay used by reporting, so reviewers do not have to retype known dates.
 --
 -- No review is approved and no reporting row is written by applying this
 -- migration. Existing approved records are reconciled by the nightly refresh
 -- or an explicit call to sf_refresh_all_approved_opportunity_reporting().
 
 BEGIN;
+
+CREATE OR REPLACE FUNCTION public.sf_derive_opportunity_stage_dates(
+  p_sf_opportunity_uuid UUID
+) RETURNS TABLE (
+  hpp_entered_at DATE,
+  opp_entered_at DATE,
+  pursuit_entered_at DATE
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_opp public.sf_opportunities%ROWTYPE;
+  v_review public.sf_opportunity_reviews%ROWTYPE;
+  v_event RECORD;
+BEGIN
+  SELECT * INTO v_opp
+  FROM public.sf_opportunities
+  WHERE id = p_sf_opportunity_uuid;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_review
+  FROM public.sf_opportunity_reviews
+  WHERE sf_opportunity_uuid = p_sf_opportunity_uuid;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  hpp_entered_at := v_review.hpp_entered_at_override;
+  opp_entered_at := v_review.opp_entered_at_override;
+  pursuit_entered_at := v_review.pursuit_entered_at_override;
+
+  IF hpp_entered_at IS NULL AND v_opp.sf_created_at IS NOT NULL THEN
+    hpp_entered_at := v_opp.sf_created_at::DATE;
+  END IF;
+
+  -- Exact same ordered replay used by reporting. Backward movement clears
+  -- downstream dates so the queue never presents a stage as current evidence
+  -- after Salesforce moved the Opportunity back.
+  FOR v_event IN
+    SELECT to_record_type_state, changed_at
+    FROM public.sf_opportunity_events
+    WHERE sf_opportunity_uuid = p_sf_opportunity_uuid
+      AND event_kind = 'record_type'
+    ORDER BY changed_at, sf_history_id
+  LOOP
+    CASE v_event.to_record_type_state
+      WHEN 'hpp' THEN
+        hpp_entered_at := v_event.changed_at::DATE;
+        opp_entered_at := NULL;
+        pursuit_entered_at := NULL;
+      WHEN 'opp' THEN
+        opp_entered_at := v_event.changed_at::DATE;
+        pursuit_entered_at := NULL;
+      WHEN 'pursuit' THEN
+        pursuit_entered_at := v_event.changed_at::DATE;
+      WHEN 'out_of_scope' THEN
+        hpp_entered_at := NULL;
+        opp_entered_at := NULL;
+        pursuit_entered_at := NULL;
+      ELSE
+        NULL;
+    END CASE;
+  END LOOP;
+
+  RETURN NEXT;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sf_guard_opportunity_deal_link_duplicate()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_opportunity_name TEXT;
+  v_account_name TEXT;
+BEGIN
+  IF NEW.link_state IS DISTINCT FROM 'active' THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT opportunity_name, account_name
+  INTO v_opportunity_name, v_account_name
+  FROM public.sf_opportunities
+  WHERE id = NEW.sf_opportunity_uuid;
+
+  IF NULLIF(pg_catalog.btrim(v_opportunity_name), '') IS NULL
+     OR NULLIF(pg_catalog.btrim(v_account_name), '') IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.attributions a
+    WHERE (a.source_system IS NULL OR a.source_system = 'manual')
+      AND NULLIF(pg_catalog.btrim(a.deal_id), '') IS NOT NULL
+      AND pg_catalog.lower(pg_catalog.regexp_replace(pg_catalog.btrim(a.label), '\s+', ' ', 'g'))
+        = pg_catalog.lower(pg_catalog.regexp_replace(pg_catalog.btrim(v_opportunity_name), '\s+', ' ', 'g'))
+      AND pg_catalog.lower(pg_catalog.regexp_replace(pg_catalog.btrim(a.account), '\s+', ' ', 'g'))
+        = pg_catalog.lower(pg_catalog.regexp_replace(pg_catalog.btrim(v_account_name), '\s+', ' ', 'g'))
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23505',
+      MESSAGE = 'possible existing Sourced deal with the same Opportunity name and Account; resolve or link the legacy deal before approval';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sf_guard_opportunity_deal_link_duplicate
+  ON public.sf_opportunity_deal_links;
+CREATE TRIGGER trg_sf_guard_opportunity_deal_link_duplicate
+BEFORE INSERT OR UPDATE OF sf_opportunity_uuid, deal_id, link_state
+ON public.sf_opportunity_deal_links
+FOR EACH ROW EXECUTE FUNCTION public.sf_guard_opportunity_deal_link_duplicate();
 
 CREATE OR REPLACE FUNCTION public.sf_refresh_opportunity_reporting(
   p_sf_opportunity_uuid UUID
@@ -26,7 +150,6 @@ DECLARE
   v_opp public.sf_opportunities%ROWTYPE;
   v_review public.sf_opportunity_reviews%ROWTYPE;
   v_link public.sf_opportunity_deal_links%ROWTYPE;
-  v_event RECORD;
   v_hpp_date DATE;
   v_opp_date DATE;
   v_pursuit_date DATE;
@@ -59,39 +182,9 @@ BEGIN
     RETURN 0;
   END IF;
 
-  v_hpp_date := v_review.hpp_entered_at_override;
-  v_opp_date := v_review.opp_entered_at_override;
-  v_pursuit_date := v_review.pursuit_entered_at_override;
-
-  IF v_hpp_date IS NULL AND v_opp.sf_created_at IS NOT NULL THEN
-    v_hpp_date := v_opp.sf_created_at::DATE;
-  END IF;
-
-  FOR v_event IN
-    SELECT to_record_type_state, changed_at
-    FROM public.sf_opportunity_events
-    WHERE sf_opportunity_uuid = p_sf_opportunity_uuid
-      AND event_kind = 'record_type'
-    ORDER BY changed_at, sf_history_id
-  LOOP
-    CASE v_event.to_record_type_state
-      WHEN 'hpp' THEN
-        v_hpp_date := v_event.changed_at::DATE;
-        v_opp_date := NULL;
-        v_pursuit_date := NULL;
-      WHEN 'opp' THEN
-        v_opp_date := v_event.changed_at::DATE;
-        v_pursuit_date := NULL;
-      WHEN 'pursuit' THEN
-        v_pursuit_date := v_event.changed_at::DATE;
-      WHEN 'out_of_scope' THEN
-        v_hpp_date := NULL;
-        v_opp_date := NULL;
-        v_pursuit_date := NULL;
-      ELSE
-        NULL;
-    END CASE;
-  END LOOP;
+  SELECT d.hpp_entered_at, d.opp_entered_at, d.pursuit_entered_at
+  INTO v_hpp_date, v_opp_date, v_pursuit_date
+  FROM public.sf_derive_opportunity_stage_dates(p_sf_opportunity_uuid) d;
 
   IF v_opp.source_deleted
      OR v_opp.normalized_record_type_state NOT IN ('hpp', 'opp', 'pursuit') THEN
@@ -249,9 +342,9 @@ AS $$
     'marketOverride', r.market_override,
     'commercialRegionOverride', r.commercial_region_override,
     'gtmCubeOverride', r.gtm_cube_override,
-    'hppEnteredAt', COALESCE(r.hpp_entered_at_override, o.sf_created_at::DATE),
-    'oppEnteredAt', r.opp_entered_at_override,
-    'pursuitEnteredAt', r.pursuit_entered_at_override,
+    'hppEnteredAt', dates.hpp_entered_at,
+    'oppEnteredAt', dates.opp_entered_at,
+    'pursuitEnteredAt', dates.pursuit_entered_at,
     'suggestedBdrName', o.suggested_bdr_name,
     'primaryCampaignSource', CASE
       WHEN suggested.channel_name IS NOT NULL THEN suggested.channel_name
@@ -269,6 +362,7 @@ AS $$
   LEFT JOIN public.sf_opportunity_deal_links l
     ON l.sf_opportunity_uuid = o.id AND l.link_state = 'active'
   LEFT JOIN public.leads linked_lead ON linked_lead.id = r.lead_id
+  LEFT JOIN LATERAL public.sf_derive_opportunity_stage_dates(o.id) dates ON TRUE
   LEFT JOIN LATERAL (
     SELECT pg_catalog.min(c.id::TEXT)::UUID AS channel_id,
            pg_catalog.min(c.name) AS channel_name
@@ -289,6 +383,8 @@ AS $$
   ORDER BY o.sf_created_at DESC NULLS LAST, r.id;
 $$;
 
+REVOKE ALL ON FUNCTION public.sf_derive_opportunity_stage_dates(UUID) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.sf_guard_opportunity_deal_link_duplicate() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.sf_refresh_opportunity_reporting(UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.sf_list_opportunity_reviews(TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sf_list_opportunity_reviews(TEXT) TO service_role;

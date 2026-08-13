@@ -11,6 +11,8 @@ import OpportunityQueueManager from './OpportunityQueueManager';
 import { createMemoryQueueRepository } from '../../test/opportunityQueueMemoryAdapter';
 import { queueItem, FIXED_NOW } from '../../test/fixtures/opportunityQueueFixtures';
 import type { OpportunityQueueRepository } from '../../lib/opportunityQueueRepository';
+import { attribution } from '../../test/fixtures/factories';
+import type { Attribution } from '../../types/db';
 
 afterEach(cleanup);
 
@@ -19,11 +21,16 @@ const CHANNELS = [
   { id: 'SYNTH-CHANNEL-2', name: 'Synthetic Events' },
 ];
 
-function renderQueue(repository: OpportunityQueueRepository, live = false) {
+function renderQueue(
+  repository: OpportunityQueueRepository,
+  live = false,
+  attributions: Attribution[] = [],
+) {
   return render(
     <OpportunityQueueManager
       repository={repository}
       channels={CHANNELS}
+      attributions={attributions}
       actorId="SYNTH-REVIEWER"
       getNow={() => FIXED_NOW}
       live={live}
@@ -134,6 +141,32 @@ describe('queue table and disclosures', () => {
 });
 
 describe('approval form', () => {
+  it('pauses approval when an exact legacy Sourced deal already exists', async () => {
+    const user = userEvent.setup();
+    const item = queueItem({
+      opportunityName: 'Synthetic Existing Deal',
+      accountName: 'Synthetic Existing Account',
+    });
+    const repo = createMemoryQueueRepository([item]);
+    renderQueue(
+      repo,
+      true,
+      [
+        attribution({
+          deal_id: 'SYNTH-LEGACY-DEAL',
+          label: item.opportunityName,
+          account: item.accountName,
+        }),
+      ],
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByRole('alert').textContent).toContain('Possible existing Sourced deal');
+    expect(screen.getByText(/nothing was merged, deleted, or changed automatically/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(repo.auditLog).toHaveLength(0);
+  });
+
   it('shows the Salesforce closed outcome and records it through approval', async () => {
     const user = userEvent.setup();
     renderQueue(

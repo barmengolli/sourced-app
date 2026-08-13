@@ -14,6 +14,7 @@ import {
   assessSimilaritySuggestion,
   classifyQueueMembership,
   filterQueueItems,
+  findPossibleExistingManualDeal,
   isApprovable,
   proposeApproval,
   proposeBlock,
@@ -27,12 +28,50 @@ import * as queueModule from './opportunityQueue';
 import type { ReviewActionContext, ReviewState } from './opportunityImportStorage';
 import { queueItem } from '../test/fixtures/opportunityQueueFixtures';
 import { createMemoryQueueRepository } from '../test/opportunityQueueMemoryAdapter';
+import { attribution } from '../test/fixtures/factories';
 
 const CTX: ReviewActionContext = {
   actorType: 'reviewer',
   actorId: 'SYNTH-REVIEWER',
   occurredAt: '2026-07-28T12:00:00.000Z',
 };
+
+describe('legacy duplicate guard', () => {
+  const candidate = queueItem({
+    opportunityName: 'Synthetic Renewal Program',
+    accountName: 'Synthetic Account',
+  });
+
+  it('pauses only on an exact normalized manual deal name and account', () => {
+    const match = findPossibleExistingManualDeal(candidate, [
+      attribution({
+        deal_id: 'SYNTH-LEGACY-DEAL',
+        label: '  synthetic   renewal program ',
+        account: 'SYNTHETIC ACCOUNT',
+      }),
+    ]);
+    expect(match).toEqual({
+      dealId: 'SYNTH-LEGACY-DEAL',
+      label: 'synthetic   renewal program',
+      account: 'SYNTHETIC ACCOUNT',
+    });
+  });
+
+  it('never treats name-only, account-only, or Salesforce-managed rows as a legacy match', () => {
+    expect(
+      findPossibleExistingManualDeal(candidate, [
+        attribution({ label: candidate.opportunityName, account: 'Different Account' }),
+        attribution({ label: 'Different Deal', account: candidate.accountName }),
+        attribution({
+          source_system: 'salesforce',
+          sf_opportunity_id: 'SYNTH-SF-OPP',
+          label: candidate.opportunityName,
+          account: candidate.accountName,
+        }),
+      ]),
+    ).toBeNull();
+  });
+});
 
 describe('queue eligibility', () => {
   it('shows only reviews requiring human attention (pending and blocked)', () => {
