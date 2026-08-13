@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import type { LeadCampaignTouchRow } from '../types/db';
+import { assertUniquePagedIds } from '../lib/paginationIntegrity';
 
 const PAGE = 1000;
 
@@ -25,7 +26,10 @@ async function fetchAllLeadCampaignTouches(): Promise<LeadCampaignTouchRow[]> {
     const { data, error } = await supabase
       .from('lead_campaign_touches')
       .select('*')
-      .order('created_at', { ascending: true })
+      // `created_at` is not unique because batch ingestion creates many rows
+      // at once. A unique stable order prevents duplicates and omissions where
+      // offset pages cross a shared-timestamp boundary.
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data || data.length === 0) break;
@@ -33,6 +37,7 @@ async function fetchAllLeadCampaignTouches(): Promise<LeadCampaignTouchRow[]> {
     if (data.length < PAGE) break;
     from += PAGE;
   }
+  assertUniquePagedIds(all, 'Campaign membership');
   return all;
 }
 
