@@ -29,6 +29,7 @@ export interface MemoryAdapterOptions {
   // Synthetic Sourced deals for exact-link tests: dealId -> the Salesforce
   // link evidence stored on that deal. The adapter compares SERVER-SIDE.
   deals?: Record<string, { sfOpportunityId: string | null }>;
+  leadsByEmail?: Record<string, { id: string; email: string; firstName: string | null; lastName: string | null; account: string | null }>;
 }
 
 function toReviewCtx(ctx: QueueActionContext): ReviewActionContext {
@@ -84,6 +85,9 @@ export function createMemoryQueueRepository(
     },
     async getQueueItem(reviewId: string) {
       return find(reviewId) ?? null;
+    },
+    async findLeadByEmail(email: string) {
+      return options.leadsByEmail?.[email.trim().toLowerCase()] ?? null;
     },
     async approveReview(reviewId, decision, ctx) {
       const item = find(reviewId);

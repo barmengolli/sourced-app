@@ -15,6 +15,8 @@ interface ResponseLike {
 const COOKIE = 'sourced_opportunity_queue';
 const SESSION_SECONDS = 8 * 60 * 60;
 const attempts = new Map<string, { count: number; resetAt: number }>();
+const SALESFORCE_ORIGIN = 'https://eisgroup.lightning.force.com';
+const SALESFORCE_ID = /^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/;
 
 const header = (req: RequestLike, name: string): string => {
   const value = req.headers[name] ?? req.headers[name.toLowerCase()];
@@ -133,6 +135,13 @@ function queueReadFailure(error: { code?: string; message?: string }): string {
   return `The review queue could not be loaded. Reference: ${code}`;
 }
 
+function normalizeEmail(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.normalize('NFKC').trim().toLowerCase();
+  if (normalized.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return null;
+  return normalized;
+}
+
 export default async function handler(req: RequestLike, res: ResponseLike) {
   if (req.method !== 'POST') return json(res, 405, { ok: false, error: { message: 'Method not allowed' } });
 
@@ -188,11 +197,46 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     }
     const items = (Array.isArray(data) ? data : []).map((row) => {
       if (row && typeof row === 'object' && 'sf_list_opportunity_reviews' in row) {
-        return (row as { sf_list_opportunity_reviews: unknown }).sf_list_opportunity_reviews;
+        row = (row as { sf_list_opportunity_reviews: unknown }).sf_list_opportunity_reviews;
       }
-      return row;
+      if (!row || typeof row !== 'object') return row;
+      const source = row as Record<string, unknown>;
+      const sfOpportunityId = typeof source.sfOpportunityId === 'string' && SALESFORCE_ID.test(source.sfOpportunityId)
+        ? source.sfOpportunityId
+        : null;
+      const safe = { ...source };
+      delete safe.sfOpportunityId;
+      return {
+        ...safe,
+        salesforceUrl: sfOpportunityId
+          ? `${SALESFORCE_ORIGIN}/lightning/r/Opportunity/${encodeURIComponent(sfOpportunityId)}/view`
+          : null,
+      };
     });
     return json(res, 200, { ok: true, data: { items } });
+  }
+
+  if (operation === 'find_lead_by_email') {
+    if (!sameOrigin(req)) {
+      return json(res, 403, { ok: false, error: { message: 'Origin check failed' } });
+    }
+    const email = normalizeEmail(body.email);
+    if (!email) {
+      return json(res, 422, { ok: false, error: { message: 'Enter a valid email address' } });
+    }
+    const { data, error } = await supabase.rpc('sf_find_lead_by_email', { p_email: email });
+    if (error) {
+      return json(res, 500, { ok: false, error: { message: 'The lead lookup could not be completed' } });
+    }
+    const matches = (Array.isArray(data) ? data : [])
+      .map((row) => row && typeof row === 'object' && 'sf_find_lead_by_email' in row
+        ? (row as { sf_find_lead_by_email: unknown }).sf_find_lead_by_email
+        : row)
+      .filter((row): row is Record<string, unknown> => Boolean(row && typeof row === 'object'));
+    if (matches.length > 1) {
+      return json(res, 409, { ok: false, error: { message: 'More than one exact lead match was found; nothing was selected' } });
+    }
+    return json(res, 200, { ok: true, data: { match: matches[0] ?? null } });
   }
 
   if (operation === 'action') {

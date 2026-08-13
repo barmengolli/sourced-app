@@ -19,13 +19,14 @@ const CHANNELS = [
   { id: 'SYNTH-CHANNEL-2', name: 'Synthetic Events' },
 ];
 
-function renderQueue(repository: OpportunityQueueRepository) {
+function renderQueue(repository: OpportunityQueueRepository, live = false) {
   return render(
     <OpportunityQueueManager
       repository={repository}
       channels={CHANNELS}
       actorId="SYNTH-REVIEWER"
       getNow={() => FIXED_NOW}
+      live={live}
     />,
   );
 }
@@ -106,12 +107,29 @@ describe('queue table and disclosures', () => {
     await user.click(screen.getByRole('button', { name: 'Review / edit' }));
     expect(screen.getByRole('dialog', { name: 'Synthetic Evidence Deal' })).toBeTruthy();
     expect(screen.getByText(/informational only, never a decision/i)).toBeTruthy();
-    expect(screen.getByText(/SYNTH-USER-BDR/)).toBeTruthy();
-    expect(screen.getByText(/Suggested BDR: Dave Cummins/)).toBeTruthy();
-    expect(screen.getByText(/SYNTH-CAMPAIGN-EV/)).toBeTruthy();
-    // The raw Salesforce ID lives only inside the diagnostics disclosure.
+    expect(screen.getAllByText('Dave Cummins').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('SYNTH-CAMPAIGN-EV')).toBeTruthy();
+    // Raw Salesforce and user IDs never render in the reviewer UI.
+    expect(screen.queryByText(/SYNTH-USER-BDR/)).toBeNull();
+    expect(screen.queryByText(/SYNTH-OPP-DIAG/)).toBeNull();
     expect(screen.getByText('Diagnostics')).toBeTruthy();
-    expect(screen.getByText(/SYNTH-OPP-DIAG/)).toBeTruthy();
+  });
+
+  it('links live opportunity names to the exact Salesforce record in a new tab', async () => {
+    renderQueue(
+      createMemoryQueueRepository([
+        queueItem({
+          opportunityName: 'Synthetic Salesforce Deal',
+          salesforceUrl: 'https://eisgroup.lightning.force.com/lightning/r/Opportunity/006PZ00000VXQczYAH/view',
+        }),
+      ]),
+      true,
+    );
+    const link = await screen.findByRole('link', { name: /open synthetic salesforce deal in salesforce/i });
+    expect(link.getAttribute('href')).toBe(
+      'https://eisgroup.lightning.force.com/lightning/r/Opportunity/006PZ00000VXQczYAH/view',
+    );
+    expect(link.getAttribute('target')).toBe('_blank');
   });
 });
 
@@ -140,6 +158,57 @@ describe('approval form', () => {
     });
     expect(screen.getByText(/no opportunities currently require review/i)).toBeTruthy();
     expect(repo.auditLog).toHaveLength(1);
+  });
+
+  it('preselects only a valid exact campaign-channel suggestion and remains editable', async () => {
+    const user = userEvent.setup();
+    renderQueue(
+      createMemoryQueueRepository([
+        queueItem({
+          opportunityName: 'Synthetic Suggested Deal',
+          evidence: {
+            bdrUserId: null,
+            creatorUserId: null,
+            suggestedBdrName: null,
+            primaryCampaignSource: 'Synthetic Events campaign',
+            customerExpansionRaw: null,
+            suggestedChannelId: 'SYNTH-CHANNEL-2',
+            suggestedChannelName: 'Synthetic Events',
+          },
+        }),
+      ]),
+    );
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    const channel = screen.getByLabelText(/channel \(required\)/i) as HTMLSelectElement;
+    expect(channel.value).toBe('SYNTH-CHANNEL-2');
+    await user.selectOptions(channel, 'SYNTH-CHANNEL-1');
+    expect(channel.value).toBe('SYNTH-CHANNEL-1');
+    expect(screen.getByText(/suggested from exact primary campaign source/i)).toBeTruthy();
+  });
+
+  it('selects a Sourced lead only after an exact email match', async () => {
+    const user = userEvent.setup();
+    const repo = createMemoryQueueRepository(
+      [queueItem({ opportunityName: 'Synthetic Lead Match Deal' })],
+      {
+        leadsByEmail: {
+          'person@example.com': {
+            id: 'SYNTH-LEAD-1', email: 'person@example.com',
+            firstName: 'Synthetic', lastName: 'Person', account: 'Synthetic Account',
+          },
+        },
+      },
+    );
+    renderQueue(repo);
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    await user.type(screen.getByLabelText(/lead email/i), ' Person@Example.com ');
+    await user.click(screen.getByRole('button', { name: /find exact match/i }));
+    await waitFor(() => expect(screen.getByText(/exact email match selected/i)).toBeTruthy());
+    expect(screen.getByText('Synthetic Person')).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText(/channel \(required\)/i), 'SYNTH-CHANNEL-1');
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(repo.auditLog).toHaveLength(1));
+    expect(repo.allItems()[0].review?.leadId).toBe('SYNTH-LEAD-1');
   });
 
   it('non-approvable blocking issues hide the approval form and explain why', async () => {
@@ -248,9 +317,9 @@ describe('not selected recovery view', () => {
     await waitFor(() => screen.getByText('Synthetic Ignored Evidence Deal'));
     await user2.click(screen.getByText('Synthetic Ignored Evidence Deal'));
     expect(screen.getByText(/informational only, never a decision/i)).toBeTruthy();
-    expect(screen.getByText(/SYNTH-USER-BDR-NS/)).toBeTruthy();
+    expect(screen.queryByText(/SYNTH-USER-BDR-NS/)).toBeNull();
     expect(screen.getByText('Diagnostics')).toBeTruthy();
-    expect(screen.getByText(/SYNTH-OPP-NS-UI2/)).toBeTruthy();
+    expect(screen.queryByText(/SYNTH-OPP-NS-UI2/)).toBeNull();
   });
 
   it('reconsider requires a reason and shows the domain error', async () => {

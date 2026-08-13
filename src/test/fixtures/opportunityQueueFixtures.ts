@@ -34,13 +34,17 @@ export function queueItem(over: Partial<OpportunityQueueItem> = {}): Opportunity
     createdAt: '2026-02-01T09:00:00.000Z',
     lastModifiedAt: '2026-06-01T09:00:00.000Z',
     owner: 'Synthetic Owner',
+    salesforceUrl: 'https://synthetic.example.test/lightning/r/Opportunity/SYNTH/view',
     evidence: {
       bdrUserId: null,
       creatorUserId: 'SYNTH-USER-CREATOR',
       suggestedBdrName: null,
       primaryCampaignSource: null,
+      suggestedChannelId: null,
+      suggestedChannelName: null,
       customerExpansionRaw: null,
     },
+    linkedLead: null,
     linkStatus: 'none',
     diagnostics: { sfOpportunityId: `SYNTH-OPP-${seq}` },
     editable: {
