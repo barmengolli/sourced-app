@@ -141,6 +141,36 @@ describe('queue table and disclosures', () => {
 });
 
 describe('approval form', () => {
+  it('offers atomic in-place adoption only for a server-proven exact Salesforce ID match', async () => {
+    const user = userEvent.setup();
+    const item = queueItem({
+      opportunityName: 'Synthetic Existing Deal',
+      accountName: 'Synthetic Existing Account',
+      existingManualDeal: {
+        dealId: 'SYNTH-LEGACY-DEAL',
+        label: 'Synthetic Existing Deal',
+        account: 'Synthetic Existing Account',
+        attributionRows: 3,
+        attributionTouches: 8,
+      },
+    });
+    const repo = createMemoryQueueRepository([item], {
+      deals: { 'SYNTH-LEGACY-DEAL': { sfOpportunityId: item.diagnostics.sfOpportunityId } },
+    });
+    renderQueue(repo, true);
+
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByRole('alert').textContent).toContain('Existing Sourced deal verified');
+    expect(screen.getByRole('alert').textContent).toContain('3 reporting rows');
+    expect(screen.getByRole('alert').textContent).toContain('8 attribution touches');
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole('button', { name: 'Use existing Sourced deal' }));
+    expect((await screen.findByRole('status')).textContent).toContain('Existing Sourced deal linked saved');
+    expect(repo.allItems()[0].review?.reviewState).toBe('linked');
+    expect(repo.auditLog).toHaveLength(1);
+  });
+
   it('pauses approval when an exact legacy Sourced deal already exists', async () => {
     const user = userEvent.setup();
     const item = queueItem({
@@ -163,6 +193,25 @@ describe('approval form', () => {
     await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
     expect(screen.getByRole('alert').textContent).toContain('Possible existing Sourced deal');
     expect(screen.getByText(/nothing was merged, deleted, or changed automatically/i)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(repo.auditLog).toHaveLength(0);
+  });
+
+  it('pauses approval when more than one legacy deal has the same exact name and account', async () => {
+    const user = userEvent.setup();
+    const item = queueItem({
+      opportunityName: 'Synthetic Ambiguous Deal',
+      accountName: 'Synthetic Ambiguous Account',
+    });
+    const repo = createMemoryQueueRepository([item]);
+    renderQueue(repo, true, [
+      attribution({ deal_id: 'SYNTH-DEAL-A', label: item.opportunityName, account: item.accountName }),
+      attribution({ deal_id: 'SYNTH-DEAL-B', label: item.opportunityName, account: item.accountName }),
+    ]);
+
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByRole('alert').textContent).toContain('Multiple possible existing Sourced deals');
+    expect(screen.getByRole('alert').textContent).toContain('2 legacy Sourced deals');
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
     expect(repo.auditLog).toHaveLength(0);
   });

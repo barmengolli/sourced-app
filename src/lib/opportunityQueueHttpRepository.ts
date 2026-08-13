@@ -30,6 +30,7 @@ interface LiveQueueRow {
   lastModifiedAt: string | null;
   owner: string | null;
   salesforceUrl: string | null;
+  existingManualDeal: OpportunityQueueItem['existingManualDeal'];
   reviewState: ReviewState;
   issueCodes: ReviewIssueCode[];
   channelId: string | null;
@@ -81,6 +82,7 @@ function toItem(row: LiveQueueRow): OpportunityQueueItem {
     lastModifiedAt: row.lastModifiedAt,
     owner: row.owner,
     salesforceUrl: row.salesforceUrl,
+    existingManualDeal: row.existingManualDeal ?? null,
     evidence: {
       bdrUserId: row.suggestedBdrName ? 'present' : null,
       creatorUserId: null,
@@ -201,6 +203,6 @@ export function createOpportunityQueueHttpRepository(
     blockReview: (reviewId, ctx) => act(reviewId, 'block', { note: ctx.note ?? null }),
     reopenReview: (reviewId, ctx) => act(reviewId, 'reopen', { note: ctx.note ?? null }),
     reconsiderReview: (reviewId, ctx) => act(reviewId, 'reconsider', { note: ctx.note ?? null }),
-    linkExactDeal: async () => ({ ok: false, reasons: ['Exact linking is handled during approval.'] }),
+    linkExactDeal: (reviewId, dealId) => act(reviewId, 'adopt_existing', { dealId }),
   };
 }

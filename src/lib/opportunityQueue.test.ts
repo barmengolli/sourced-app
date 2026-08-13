@@ -10,6 +10,7 @@ import {
   BLOCKING_ISSUE_CODES,
   QUEUE_ATTENTION_STATES,
   REVIEW_STATE_LABELS,
+  assessPossibleExistingManualDeals,
   assessQueueApproval,
   assessSimilaritySuggestion,
   classifyQueueMembership,
@@ -70,6 +71,38 @@ describe('legacy duplicate guard', () => {
         }),
       ]),
     ).toBeNull();
+  });
+
+  it('reports every distinct matching deal as ambiguous instead of choosing the first one', () => {
+    const assessment = assessPossibleExistingManualDeals(candidate, [
+      attribution({
+        deal_id: 'SYNTH-LEGACY-DEAL-1',
+        label: candidate.opportunityName,
+        account: candidate.accountName,
+      }),
+      attribution({
+        deal_id: 'SYNTH-LEGACY-DEAL-1',
+        stage_key: 'opp',
+        label: candidate.opportunityName,
+        account: candidate.accountName,
+      }),
+      attribution({
+        deal_id: 'SYNTH-LEGACY-DEAL-2',
+        label: ` ${candidate.opportunityName} `,
+        account: ` ${candidate.accountName} `,
+      }),
+    ]);
+
+    expect(assessment.kind).toBe('ambiguous');
+    expect(assessment.matches.map((match) => match.dealId)).toEqual([
+      'SYNTH-LEGACY-DEAL-1',
+      'SYNTH-LEGACY-DEAL-2',
+    ]);
+    expect(findPossibleExistingManualDeal(candidate, assessment.matches.map((match) => attribution({
+      deal_id: match.dealId,
+      label: match.label,
+      account: match.account,
+    })))).toBeNull();
   });
 });
 

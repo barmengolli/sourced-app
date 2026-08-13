@@ -189,11 +189,30 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
 
   if (operation === 'list') {
     const view = body.view === 'not_selected' ? 'not_selected' : 'attention';
-    const { data, error } = await supabase.rpc('sf_list_opportunity_reviews', { p_view: view });
+    const [{ data, error }, { data: candidateData, error: candidateError }] = await Promise.all([
+      supabase.rpc('sf_list_opportunity_reviews', { p_view: view }),
+      view === 'attention'
+        ? supabase.rpc('sf_list_opportunity_existing_deal_candidates')
+        : Promise.resolve({ data: [], error: null }),
+    ]);
     if (error) {
       // Expose only a stable error category/code to the authenticated reviewer.
       // Raw database messages, details, and source values stay server-side.
       return json(res, 500, { ok: false, error: { message: queueReadFailure(error) } });
+    }
+    if (candidateError) {
+      return json(res, 500, { ok: false, error: { message: queueReadFailure(candidateError) } });
+    }
+    const candidates = new Map<string, Record<string, unknown>>();
+    for (let candidate of Array.isArray(candidateData) ? candidateData : []) {
+      if (candidate && typeof candidate === 'object'
+          && 'sf_list_opportunity_existing_deal_candidates' in candidate) {
+        candidate = (candidate as { sf_list_opportunity_existing_deal_candidates: unknown })
+          .sf_list_opportunity_existing_deal_candidates;
+      }
+      if (!candidate || typeof candidate !== 'object') continue;
+      const value = candidate as Record<string, unknown>;
+      if (typeof value.reviewId === 'string') candidates.set(value.reviewId, value);
     }
     const items = (Array.isArray(data) ? data : []).map((row) => {
       if (row && typeof row === 'object' && 'sf_list_opportunity_reviews' in row) {
@@ -208,6 +227,9 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
       delete safe.sfOpportunityId;
       return {
         ...safe,
+        existingManualDeal: typeof source.reviewId === 'string'
+          ? candidates.get(source.reviewId) ?? null
+          : null,
         salesforceUrl: sfOpportunityId
           ? `${SALESFORCE_ORIGIN}/lightning/r/Opportunity/${encodeURIComponent(sfOpportunityId)}/view`
           : null,
@@ -248,11 +270,37 @@ export default async function handler(req: RequestLike, res: ResponseLike) {
     const expectedVersion = typeof body.expectedVersion === 'string' ? body.expectedVersion : '';
     const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey : '';
     const decision = body.decision && typeof body.decision === 'object' ? body.decision : {};
-    if (!['approve', 'ignore', 'block', 'reopen', 'reconsider'].includes(action)
+    if (!['approve', 'ignore', 'block', 'reopen', 'reconsider', 'adopt_existing'].includes(action)
         || !reviewId || !expectedVersion || !idempotencyKey) {
       return json(res, 422, { ok: false, error: { message: 'The review request is incomplete' } });
     }
     const actor = process.env.OPPORTUNITY_QUEUE_ACTOR_ID?.trim() || session.sub;
+    if (action === 'adopt_existing') {
+      const dealId = typeof (decision as Record<string, unknown>).dealId === 'string'
+        ? String((decision as Record<string, unknown>).dealId).trim()
+        : '';
+      if (!dealId) {
+        return json(res, 422, { ok: false, error: { message: 'The existing deal selection is missing' } });
+      }
+      const { data, error } = await supabase.rpc('sf_adopt_existing_opportunity_deal', {
+        p_review_id: reviewId,
+        p_expected_deal_id: dealId,
+        p_actor_id: actor,
+        p_idempotency_key: idempotencyKey,
+        p_expected_version: expectedVersion,
+      });
+      if (error) {
+        const changed = error.message.includes('changed') || error.message.includes('reload');
+        const safe = changed
+          ? 'This review or its existing deal candidate changed. Reload the queue and try again.'
+          : error.message.includes('exact') || error.message.includes('consistent')
+            || error.message.includes('eligible') || error.message.includes('active deal link')
+            ? error.message
+            : 'The existing Sourced deal could not be linked';
+        return json(res, changed ? 409 : 422, { ok: false, error: { message: safe } });
+      }
+      return json(res, 200, { ok: true, data });
+    }
     const { data, error } = await supabase.rpc('sf_apply_opportunity_review_action', {
       p_review_id: reviewId,
       p_action: action,
