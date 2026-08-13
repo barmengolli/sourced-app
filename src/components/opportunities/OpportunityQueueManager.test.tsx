@@ -134,6 +134,43 @@ describe('queue table and disclosures', () => {
 });
 
 describe('approval form', () => {
+  it('shows the Salesforce closed outcome and records it through approval', async () => {
+    const user = userEvent.setup();
+    renderQueue(
+      createMemoryQueueRepository([
+        queueItem({
+          opportunityName: 'Synthetic Closed Deal',
+          recordTypeState: 'pursuit',
+          stageName: 'Closed-Lost-Competitor',
+          isClosed: true,
+          isWon: false,
+          closeDate: '2026-07-31',
+          sourceLostReason: 'Closed-Lost to Competitor',
+          editable: {
+            sourceMarket: 'Synthetic Market',
+            sourceCommercialRegion: 'NA',
+            sourceGtmCube: 'Synthetic Cube',
+            marketOverride: null,
+            commercialRegionOverride: null,
+            gtmCubeOverride: null,
+            bdrName: null,
+            hppEnteredAt: '2026-05-01',
+            oppEnteredAt: '2026-06-01',
+            pursuitEnteredAt: '2026-07-01',
+          },
+        }),
+      ]),
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Review / edit' }));
+    expect(screen.getByText('Closed outcome')).toBeTruthy();
+    expect(screen.getAllByText('Closed lost').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('2026-07-31')).toBeTruthy();
+    expect(screen.getByText('Closed-Lost to Competitor')).toBeTruthy();
+    expect(screen.getByText(/update the Opportunity in Salesforce/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Approve & record Closed Lost' })).toBeTruthy();
+  });
+
   it('missing channel selection blocks approval with a visible validation reason', async () => {
     const user = userEvent.setup();
     renderQueue(createMemoryQueueRepository([queueItem({ opportunityName: 'Synthetic Pending Deal' })]));

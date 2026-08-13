@@ -19,6 +19,9 @@ interface LiveQueueRow {
   recordType: OpportunityQueueItem['recordTypeState'];
   stageName: string | null;
   isClosed: boolean;
+  isWon: boolean;
+  closeDate: string | null;
+  sourceLostReason: string | null;
   amount: number | null;
   amountCurrency: string | null;
   saasRevenue: number | null;
@@ -67,6 +70,9 @@ function toItem(row: LiveQueueRow): OpportunityQueueItem {
     recordTypeState: row.recordType,
     stageName: row.stageName,
     isClosed: row.isClosed,
+    isWon: row.isWon,
+    closeDate: row.closeDate,
+    sourceLostReason: row.sourceLostReason,
     amount: row.amount,
     amountCurrency: row.amountCurrency,
     saasRevenue: row.saasRevenue,

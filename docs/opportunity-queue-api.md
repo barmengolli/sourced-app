@@ -30,7 +30,17 @@ Approval creates a stable exact Salesforce deal link and only
 - current HPP -> HPP row;
 - current Opportunity -> HPP + Opportunity rows;
 - current Pursuit -> HPP + Opportunity + Pursuit rows;
-- closed, deleted, or Service -> no current-pipeline rows.
+- closed won -> prior funnel rows + one source-backed Closed Won row;
+- closed lost -> prior funnel rows + one source-backed Closed Lost row; or
+- deleted or Service -> no generated reporting rows.
+
+For a closed Opportunity, Salesforce remains authoritative for `IsWon`,
+`CloseDate`, and the terminal Stage. The review dialog shows the outcome and
+close date before approval. Known terminal Stage values map to the reporting
+loss reasons `Closed-Lost to Competitor`, `Closed-Lost In-House`, or
+`Closed-Disqualified`; an unfamiliar value is never guessed. If Salesforce is
+correct, the reviewer only confirms attribution. If it is wrong, Salesforce
+must be corrected and the next daily sync reconciles the generated Sourced row.
 
 HPP defaults to the Salesforce Opportunity CreatedDate. Opportunity and Pursuit
 dates must come from Salesforce history or explicit review; the system does not

@@ -85,6 +85,12 @@ export interface OpportunityQueueItem {
   recordTypeState: QueueRecordTypeState;
   stageName: string | null;
   isClosed: boolean;
+  isWon: boolean;
+  closeDate: string | null;
+  // Normalized from the exact Salesforce terminal stage. Null means
+  // Salesforce supplied a closed outcome that has no approved reason mapping;
+  // the reviewer is never asked to guess one.
+  sourceLostReason: string | null;
   // Imported for future comparison, but not the primary queue value.
   amount: number | null;
   amountCurrency: string | null;
