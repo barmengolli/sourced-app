@@ -1935,3 +1935,22 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- Direct catalog inspection verified the protected functions, table RLS, and
 -- append-only trigger. The candidate function returned 50 actionable exact-ID
 -- records; the migration itself adopted zero.
+
+-- =============================================================
+-- Active Salesforce Opportunity duplicate reconciliation
+-- migrations/2026-08-14_opportunity_active_duplicate_reconciliation.sql
+-- STATUS: APPLIED manually to production on 2026-08-14.
+-- =============================================================
+-- Adds two service-role-only functions for the narrow already-active duplicate
+-- class deferred by the initial adoption work. The candidate function requires
+-- one exact Salesforce-ID legacy deal, identical stage sets, compatible funnel
+-- fields, and zero touches on the generated copy. The mutation preserves the
+-- legacy deal and attribution row IDs plus all of its touches, removes only the
+-- empty generated rows, redirects the active Salesforce link, refreshes the
+-- retained rows in place, and appends an active_duplicate adoption audit. The
+-- migration performs no automatic reconciliation. Three explicit guarded RPC
+-- calls then reconciled MAPFRE, Daiichi Life, and Physicians Mutual: four
+-- retained reporting rows and four attribution touches were preserved, four
+-- empty generated rows were removed, and zero touches were removed. Direct
+-- post-apply queries verified the retained exact Salesforce links and no
+-- duplicate rows remaining for those three Opportunities.
