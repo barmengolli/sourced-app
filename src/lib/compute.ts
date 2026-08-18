@@ -1515,6 +1515,8 @@ export interface DealVelocity {
   currentStageEnteredAt: string;       // ISO date
   daysInCurrentStage: number;
   hppEnteredAt: string | null;         // null if deal entered at a later stage manually
+  oppEnteredAt: string | null;
+  pursuitEnteredAt: string | null;
   daysSinceHpp: number | null;
   hppToOppDays: number | null;         // null if deal hasn't reached Opp
   oppToPursuitDays: number | null;     // null if deal hasn't reached Pursuit
@@ -1655,6 +1657,8 @@ export function computeDealVelocities(
       currentStageEnteredAt,
       daysInCurrentStage,
       hppEnteredAt,
+      oppEnteredAt: oppRow?.stage_entered_at ?? null,
+      pursuitEnteredAt: pursuitRow?.stage_entered_at ?? null,
       daysSinceHpp,
       hppToOppDays,
       oppToPursuitDays,
@@ -1677,31 +1681,66 @@ export interface StageVelocityStats {
   average: number | null;
   median: number | null;
   count: number;
+  // A negative duration means the source stage dates contradict their
+  // chronological order. It is reported for QA, but never allowed to distort
+  // an average or median shown to leadership.
+  invalidCount: number;
 }
 
 // One entry per transition key in VELOCITY_THRESHOLDS. Reads the per-
 // deal gap field that matches each transition key.
 export function computeStageVelocityStats(
   velocities: DealVelocity[],
+  period?: { year: number; filter: PeriodFilter },
 ): StageVelocityStats[] {
   const fieldFor = (key: string): keyof DealVelocity | null => {
     if (key === 'hpp->opp') return 'hppToOppDays';
     if (key === 'opp->pursuit') return 'oppToPursuitDays';
     return null;
   };
+  const targetDateFor = (deal: DealVelocity, key: string): string | null => {
+    if (key === 'hpp->opp') return deal.oppEnteredAt;
+    if (key === 'opp->pursuit') return deal.pursuitEnteredAt;
+    return null;
+  };
+  const periodBounds = period
+    ? periodBoundsFor(period.year, period.filter)
+    : null;
 
   const out: StageVelocityStats[] = [];
   for (const key of Object.keys(VELOCITY_THRESHOLDS)) {
     const field = fieldFor(key);
     const values: number[] = [];
+    let invalidCount = 0;
     if (field) {
       for (const v of velocities) {
+        if (periodBounds) {
+          const targetDate = targetDateFor(v, key);
+          if (
+            !targetDate ||
+            targetDate < periodBounds.start ||
+            targetDate > periodBounds.end
+          ) {
+            continue;
+          }
+        }
         const raw = v[field];
-        if (typeof raw === 'number') values.push(raw);
+        if (typeof raw !== 'number') continue;
+        if (raw < 0) {
+          invalidCount += 1;
+          continue;
+        }
+        values.push(raw);
       }
     }
     if (values.length === 0) {
-      out.push({ transitionKey: key, average: null, median: null, count: 0 });
+      out.push({
+        transitionKey: key,
+        average: null,
+        median: null,
+        count: 0,
+        invalidCount,
+      });
       continue;
     }
     const sum = values.reduce((a, b) => a + b, 0);
@@ -1717,6 +1756,7 @@ export function computeStageVelocityStats(
       average,
       median,
       count: values.length,
+      invalidCount,
     });
   }
   return out;

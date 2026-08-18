@@ -73,6 +73,10 @@ interface CampaignInfluenceViewProps {
   // When provided, each deal card shows an edit pencil that opens the deal
   // editor with the given attribution id. Omit to keep the view read-only.
   onEditDeal?: (attributionId: string) => void;
+  // A focused detail surface can select one opportunity and suppress the
+  // section-level controls. The full dashboard view keeps both defaults.
+  dealIdFilter?: string | null;
+  showFilters?: boolean;
 }
 
 // ---------- DataVis-shape adapter types ----------
@@ -475,6 +479,8 @@ export default function CampaignInfluenceView({
   statusFilter,
   allYearsSet,
   onEditDeal,
+  dealIdFilter = null,
+  showFilters = true,
 }: CampaignInfluenceViewProps) {
   const [showAll, setShowAll] = useState(false);
 
@@ -628,6 +634,7 @@ export default function CampaignInfluenceView({
       yearFilter.size > 0 && yearFilter.size < allYearsSet.size;
     const statusActive = statusFilter.size > 0 && statusFilter.size < 3;
     return allGroups.filter((g) => {
+      if (dealIdFilter && g.dealId !== dealIdFilter) return false;
       if (yearActive) {
         const yearOk = g.attributions.some((a) => yearFilter.has(a.year));
         if (!yearOk) return false;
@@ -654,7 +661,7 @@ export default function CampaignInfluenceView({
       }
       return true;
     });
-  }, [allGroups, yearFilter, statusFilter, allYearsSet]);
+  }, [allGroups, dealIdFilter, yearFilter, statusFilter, allYearsSet]);
 
   // Region chip counts: for each region R, how many tab-in-scope
   // deals have any attribution in R. Drives the chip's enabled/
@@ -877,7 +884,7 @@ export default function CampaignInfluenceView({
   if (displayedGroups.length === 0) {
     return (
       <div className="space-y-3">
-        {filterBar}
+        {showFilters && filterBar}
         <p className="text-xs text-slate-muted italic">
           No deals match the current filters.
         </p>
@@ -889,7 +896,7 @@ export default function CampaignInfluenceView({
 
   return (
     <div className="space-y-3">
-      {filterBar}
+      {showFilters && filterBar}
       {shown.map((deal, idx) => (
         <DealJourneySankeyCard
           key={deal.dealId}
@@ -900,7 +907,7 @@ export default function CampaignInfluenceView({
           onEditDeal={onEditDeal}
         />
       ))}
-      {displayedGroups.length > PAGE && (
+      {showFilters && displayedGroups.length > PAGE && (
         <button
           type="button"
           onClick={() => setShowAll((v) => !v)}

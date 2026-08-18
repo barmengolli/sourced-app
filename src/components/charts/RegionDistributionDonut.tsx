@@ -80,7 +80,7 @@ function DonutTooltip({ active, payload }: DonutTooltipProps) {
         Amount: {fmtUsdCompact(d.totalAmount ?? 0)}
       </div>
       <div className="text-charcoal tabular-nums">
-        Share: {(d.percentageOfCount ?? 0).toFixed(0)}%
+        Share: {(d.percentageOfCount ?? 0).toFixed(1)}%
       </div>
     </div>
   );
@@ -170,7 +170,7 @@ export default function RegionDistributionDonut({
               {fmtUsdCompact(r.totalAmount)}
             </span>
             <span className="text-slate-muted tabular-nums text-right">
-              {r.percentageOfCount.toFixed(0)}%
+              {r.percentageOfCount.toFixed(1)}%
             </span>
           </li>
         ))}

@@ -1,48 +1,34 @@
-// FunnelVelocityPage — Marketing Funnel: Velocity sub-tab.
-//
-// Surfaces two pieces of data:
-//   1. Summary cards: average + median days per boss-confirmed transition
-//      (HPP→Opp and Opp→Pursuit in v1). Color-coded against the per-
-//      transition thresholds in constants/velocityThresholds.ts.
-//   2. Active deals table: every non-terminal deal in the selected period
-//      and region, sortable by days-in-stage. Stale deals (above the
-//      threshold for the next transition) are flagged.
-//
-// Adding a new transition card later is a two-step change:
-//   - Add the transition to VELOCITY_THRESHOLDS.
-//   - Mount one more <VelocityCard> below.
-
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useAttributions } from '../hooks/useAttributions';
 import { useAttributionTouches } from '../hooks/useAttributionTouches';
 import { useChannels } from '../hooks/useChannels';
 import { useLeads } from '../hooks/useLeads';
 import {
-  computeChannelDistribution,
-  computeDealVelocities,
-  computeRegionDistribution,
   computeStageVelocityStats,
-  periodBoundsFor,
-  type DealVelocity,
   type PeriodFilter,
 } from '../lib/compute';
+import {
+  buildOpportunityDistributions,
+  buildOpportunityExplorerRows,
+  filterOpportunityExplorerRows,
+  scopeOpportunityDeals,
+  summarizeOpenPipeline,
+  type OpportunityStatusFilter,
+} from '../lib/opportunityPageReporting';
 import { quarterOfIsoDate } from '../lib/dates';
 import { formatCurrency } from '../lib/formatters';
 import FunnelReportingFilters from '../components/funnel/FunnelReportingFilters';
+import FilterChipGroup from '../components/reporting/FilterChipGroup';
 import ChartCard from '../components/charts/ChartCard';
-import CampaignInfluenceView, {
-  type InfluenceStatus,
-} from '../components/charts/CampaignInfluenceView';
+import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
 import ChannelDistributionDonut from '../components/charts/ChannelDistributionDonut';
 import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
-import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
 import {
   VELOCITY_THRESHOLDS,
   type VelocityThreshold,
 } from '../constants/velocityThresholds';
 import { FUNNEL_STAGE_LABELS } from '../constants/funnelStages';
-import type { AttributionStageKey } from '../types/db';
-import type { RegionKey } from '../constants/regions';
+import { REGIONS, type RegionKey } from '../constants/regions';
 import type { ComparisonMode } from '../types/reporting';
 import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
 import { reportingContractFor } from '../constants/reportingPages';
@@ -50,71 +36,42 @@ import { reportingContractFor } from '../constants/reportingPages';
 interface FunnelVelocityPageProps {
   year: number;
   filter: PeriodFilter;
-  onYearChange: (y: number) => void;
-  onFilterChange: (f: PeriodFilter) => void;
+  onYearChange: (year: number) => void;
+  onFilterChange: (filter: PeriodFilter) => void;
   regions: Set<RegionKey>;
   onRegionsChange: (next: Set<RegionKey>) => void;
-  // Comparison mode from the shared reporting selection.
   comparison: ComparisonMode;
-  onComparisonChange: (m: ComparisonMode) => void;
+  onComparisonChange: (mode: ComparisonMode) => void;
 }
 
-// Transitions surfaced on this page, in display order. Sourced from
-// VELOCITY_THRESHOLDS (single source of truth); changes to the threshold
-// map automatically reflow this list.
-const TRANSITIONS: { key: string; label: string }[] = [
-  { key: 'hpp->opp', label: 'HPP → Opp' },
-  { key: 'opp->pursuit', label: 'Opp → Pursuit' },
+type OpportunityView = 'current' | 'movement';
+
+const REPORTING_BASIS = reportingContractFor('funnel-velocity')!;
+const REGION_CHIPS = REGIONS.map((region) => ({ value: region, label: region }));
+const STATUS_OPTIONS: Array<{ value: OpportunityStatusFilter; label: string }> = [
+  { value: 'open', label: 'Open' },
+  { value: 'won', label: 'Won' },
+  { value: 'lost', label: 'Lost' },
+  { value: 'all', label: 'All' },
+];
+const TRANSITIONS = [
+  { key: 'hpp->opp', label: 'HPP to Opp' },
+  { key: 'opp->pursuit', label: 'Opp to Pursuit' },
 ];
 
-type SortColumn =
-  | 'label'
-  | 'account'
-  | 'region'
-  | 'currentStage'
-  | 'daysInCurrentStage'
-  | 'daysSinceHpp'
-  | 'amount';
-type SortDir = 'asc' | 'desc';
-
-function roundOne(n: number): string {
-  return (Math.round(n * 10) / 10).toString();
+function compactCurrency(value: number): string {
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `$${Math.round(value / 1_000)}K`;
+  return formatCurrency(value);
 }
 
-// True when a deal has at least one stage transition in the selected
-// period. Replaces the prior cohort filter (which only matched deals
-// whose HPP landed in the period); the new semantic includes a deal
-// that originated in a prior year but is still moving through stages
-// in the current view. Mirrors dealMatchesPeriod in compute.ts.
-function matchesPeriodForDeal(
-  d: DealVelocity,
-  year: number,
-  filter: PeriodFilter,
-): boolean {
-  if (d.stageEnteredAts.length === 0) return false;
-  const period = periodBoundsFor(year, filter);
-  for (const iso of d.stageEnteredAts) {
-    if (iso >= period.start && iso <= period.end) return true;
-  }
-  return false;
+function roundOne(value: number): string {
+  return (Math.round(value * 10) / 10).toString();
 }
 
-// Bucket avg into green / yellow / red against the threshold pair. When
-// typical == stale (boss-confirmed pattern in v1), the yellow zone has
-// zero width and the result collapses to binary green/red.
-function colorClass(
-  avg: number | null,
-  threshold: VelocityThreshold,
-): string {
-  if (avg === null) return 'text-charcoal';
-  if (avg <= threshold.typical) return 'text-success';
-  if (avg <= threshold.stale) return 'text-warning';
-  return 'text-danger';
+function periodLabel(year: number, filter: PeriodFilter): string {
+  return filter === 'year' ? String(year) : `${filter} ${year}`;
 }
-
-// Basis and anchor come from the single reporting-page registry, so the
-// visible disclosure and the declared contract cannot disagree.
-const REPORTING_BASIS = reportingContractFor('funnel-velocity')!;
 
 export default function FunnelVelocityPage({
   year,
@@ -123,567 +80,353 @@ export default function FunnelVelocityPage({
   onFilterChange,
   regions,
   onRegionsChange,
-  comparison,
-  onComparisonChange,
 }: FunnelVelocityPageProps) {
   const attributionsHook = useAttributions();
   const touchesHook = useAttributionTouches();
   const channels = useChannels();
-  // Pull leads only to derive yearOptions consistently with the other
-  // funnel sub-pages; the velocity compute itself doesn't read leads.
   const { leads } = useLeads();
+  const [view, setView] = useState<OpportunityView>('current');
+  const [status, setStatus] = useState<OpportunityStatusFilter>('open');
+  const [search, setSearch] = useState('');
+  const [channelId, setChannelId] = useState('');
+  const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
+  const [browseOpen, setBrowseOpen] = useState(false);
 
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
-    for (const l of leads) {
-      const sourced = quarterOfIsoDate(l.marketing_sourced_date);
+    for (const lead of leads) {
+      const sourced = quarterOfIsoDate(lead.marketing_sourced_date);
       if (sourced) years.add(sourced.year);
     }
-    for (const a of attributionsHook.attributions) {
-      years.add(a.year);
-    }
+    for (const attribution of attributionsHook.attributions) years.add(attribution.year);
     return [...years].sort((a, b) => a - b);
   }, [leads, attributionsHook.attributions]);
 
-  // All velocities, filtered only by region. Period filtering applies to
-  // the active deals table below but NOT to the summary cards: averages
-  // mean more across the full sample of measured transitions.
-  const velocities = useMemo(
-    () =>
-      computeDealVelocities({
-        attributions: attributionsHook.attributions,
-        regions,
-      }),
+  const allRegionDeals = useMemo(
+    () => scopeOpportunityDeals({ attributions: attributionsHook.attributions, regions }),
     [attributionsHook.attributions, regions],
   );
-
-  const stats = useMemo(
-    () => computeStageVelocityStats(velocities),
-    [velocities],
-  );
-  const statsByKey = useMemo(() => {
-    const m = new Map<string, (typeof stats)[number]>();
-    for (const s of stats) m.set(s.transitionKey, s);
-    return m;
-  }, [stats]);
-
-  // Region distribution for the "Deals by Region" donut card. The donut
-  // is a distribution view: it respects the period filter (so the user
-  // can see Q1 vs Q2 vs YTD) but intentionally ignores the region
-  // toggles. `regions` is therefore NOT in this useMemo's deps.
-  const regionDistribution = useMemo(
+  const movementDeals = useMemo(
     () =>
-      computeRegionDistribution({
+      scopeOpportunityDeals({
         attributions: attributionsHook.attributions,
-        year,
-        filter,
+        regions,
+        period: { year, filter },
       }),
-    [attributionsHook.attributions, year, filter],
+    [attributionsHook.attributions, regions, year, filter],
   );
-
-  // Channel distribution: same period-yes, region-no contract as the
-  // region donut. Uses the full channels list (not visibleChannels)
-  // so cross-year attribution references still resolve to real names
-  // instead of landing in Unknown — the donut's deal scope already
-  // spans cross-year cases, so name lookup needs the same breadth.
-  const channelDistribution = useMemo(
+  const currentOpenDeals = useMemo(
+    () => allRegionDeals.filter((deal) => !deal.isTerminal),
+    [allRegionDeals],
+  );
+  const movementOpenDeals = useMemo(
+    () => movementDeals.filter((deal) => !deal.isTerminal),
+    [movementDeals],
+  );
+  const pipelineSummary = useMemo(
+    () => summarizeOpenPipeline(currentOpenDeals),
+    [currentOpenDeals],
+  );
+  const chartDeals = view === 'current' ? currentOpenDeals : movementOpenDeals;
+  const distributions = useMemo(
     () =>
-      computeChannelDistribution({
+      buildOpportunityDistributions({
+        deals: chartDeals,
         attributions: attributionsHook.attributions,
         channels,
-        year,
-        filter,
       }),
-    [attributionsHook.attributions, channels, year, filter],
+    [chartDeals, attributionsHook.attributions, channels],
+  );
+  const velocityStats = useMemo(
+    () => computeStageVelocityStats(allRegionDeals, { year, filter }),
+    [allRegionDeals, year, filter],
+  );
+  const statsByKey = useMemo(
+    () => new Map(velocityStats.map((stat) => [stat.transitionKey, stat])),
+    [velocityStats],
   );
 
-  // Active deals table source: non-terminal, in the selected period.
-  const activeDeals = useMemo(() => {
-    return velocities.filter(
-      (v) => !v.isTerminal && matchesPeriodForDeal(v, year, filter),
-    );
-  }, [velocities, year, filter]);
-
-  // Opportunity Influence filters. Two independent multi-select axes
-  // above the existing Region/Channel rows owned by the view. Both
-  // default to "all on" (every available year, every status), which
-  // is equivalent to the old single-tab 'all' option. Empty set on
-  // either axis is treated as "no filter on that axis" (mirrors the
-  // empty-set semantics the Region row already uses).
-  const allYearsSet = useMemo(() => new Set<number>(yearOptions), [yearOptions]);
-  const [influenceYears, setInfluenceYears] = useState<Set<number>>(
-    () => new Set<number>(yearOptions),
+  const explorerBase = view === 'current' ? allRegionDeals : movementDeals;
+  const explorerRows = useMemo(
+    () =>
+      buildOpportunityExplorerRows({
+        deals: explorerBase,
+        attributions: attributionsHook.attributions,
+        channels,
+      }),
+    [explorerBase, attributionsHook.attributions, channels],
   );
-  // Re-anchor the year set to the available years whenever yearOptions
-  // changes (new data brings a new year into view). Keeps the
-  // "default = all on" contract without trapping the user on a stale
-  // selection.
-  useEffect(() => {
-    setInfluenceYears(new Set<number>(yearOptions));
-  }, [yearOptions]);
-  const [influenceStatuses, setInfluenceStatuses] = useState<
-    Set<InfluenceStatus>
-  >(() => new Set<InfluenceStatus>(['open', 'closeWon', 'closeLost']));
+  const channelOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const row of explorerRows) byId.set(row.channelId, row.channelName);
+    return [...byId.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [explorerRows]);
+  const visibleRows = useMemo(
+    () =>
+      filterOpportunityExplorerRows({
+        rows: explorerRows,
+        status,
+        search,
+        channelId: channelId || null,
+      }),
+    [explorerRows, status, search, channelId],
+  );
+  const requestedIndex = visibleRows.findIndex(
+    (row) => row.deal.dealId === selectedDealId,
+  );
+  const selectedIndex = requestedIndex >= 0 ? requestedIndex : 0;
+  const selectedRow = visibleRows[selectedIndex] ?? null;
+  const selectedDeal = selectedRow?.deal ?? null;
+  const allYears = useMemo(() => new Set(yearOptions), [yearOptions]);
 
-  const [sortCol, setSortCol] = useState<SortColumn>('daysInCurrentStage');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
-
-  // Active deals table's inline Edit button opens AttributionEditorModal
-  // against the deal's current-stage row. Auto-replace semantics: a
-  // second Edit click while the modal is open swaps to the new deal
-  // (the same single-modal pattern Data Entry uses).
-  const [editingAttributionId, setEditingAttributionId] = useState<
-    string | null
-  >(null);
-  const onEditDeal = (currentAttributionId: string) => {
-    setEditingAttributionId(currentAttributionId);
+  const toggleRegion = (region: RegionKey) => {
+    const next = new Set(regions);
+    if (next.has(region)) next.delete(region);
+    else next.add(region);
+    onRegionsChange(next);
   };
-
-  const sortedDeals = useMemo(() => {
-    const copy = activeDeals.slice();
-    const dir = sortDir === 'asc' ? 1 : -1;
-    copy.sort((a, b) => {
-      const cmp = compareDeals(a, b, sortCol);
-      return cmp * dir;
-    });
-    return copy;
-  }, [activeDeals, sortCol, sortDir]);
-
-  const onHeaderClick = (col: SortColumn) => {
-    if (sortCol === col) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortCol(col);
-      // Days columns default to descending (stalest first); text columns
-      // default to ascending.
-      setSortDir(
-        col === 'daysInCurrentStage' ||
-          col === 'daysSinceHpp' ||
-          col === 'amount'
-          ? 'desc'
-          : 'asc',
-      );
-    }
+  const selectAdjacentDeal = (offset: number) => {
+    if (visibleRows.length === 0) return;
+    const nextIndex =
+      (selectedIndex + offset + visibleRows.length) % visibleRows.length;
+    setSelectedDealId(visibleRows[nextIndex].deal.dealId);
   };
 
   return (
-    <div className="p-8 space-y-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-charcoal">
-            Marketing Funnel: Opportunities
-          </h1>
-          <ReportingBasisDisclosure
-            basis={REPORTING_BASIS.basis}
-            explanation={REPORTING_BASIS.anchor}
-          />
-          <p className="mt-1 text-sm text-slate-muted">
-            Per-transition velocity averages and per-deal time-in-stage.
-            Active deals are scoped to the selected period and region.
-          </p>
-        </div>
-        <FunnelReportingFilters
-          year={year}
-          filter={filter}
-          yearOptions={yearOptions}
-          onYearChange={onYearChange}
-          onFilterChange={onFilterChange}
-          regions={regions}
-          onRegionsChange={onRegionsChange}
-          comparison={comparison}
-          onComparisonChange={onComparisonChange}
-        />
-      </header>
-
-      {/* Summary section: two rows. Top row = velocity numbers, bottom
-          row = distribution donuts. Both rows go 1-col on mobile and
-          2-col on lg+ so the four cards form a 2x2 grid on desktop. */}
-      <section className="space-y-4">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {TRANSITIONS.map((t) => {
-            const s = statsByKey.get(t.key);
-            const threshold = VELOCITY_THRESHOLDS[t.key];
-            return (
-              <VelocityCard
-                key={t.key}
-                label={t.label}
-                average={s?.average ?? null}
-                median={s?.median ?? null}
-                count={s?.count ?? 0}
-                threshold={threshold}
-              />
-            );
-          })}
-        </div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <ChartCard
-            title="Open Opportunities by Region (HPP, OPP, Pursuit)"
-            subtitle="Open opportunities only (HPP, OPP, Pursuit). Excludes closed-won and closed-lost. Region filter does not apply."
-          >
-            <RegionDistributionDonut distribution={regionDistribution} />
-          </ChartCard>
-          <ChartCard
-            title="Open Opportunities by Channel (HPP, OPP, Pursuit)"
-            subtitle="Open opportunities only (HPP, OPP, Pursuit) for the selected period, grouped by top-level channel."
-          >
-            <ChannelDistributionDonut distribution={channelDistribution} />
-          </ChartCard>
-        </div>
-      </section>
-
-      {/* Opportunity Influence — one Sankey per deal, showing the
-          full touch flow into the deal's stage chain. This section
-          owns its own Region + Channel filters so the user can
-          narrow the influence view without disturbing the velocity
-          cards, donuts, or Active Deals table below (which still
-          read the page-level Region toggle). */}
-      <ChartCard
-        title="Opportunity Influence"
-        subtitle="Every deal's full touch flow. Use the filters below to narrow this section."
-      >
-        <div className="space-y-3">
-          <InfluenceYearStatusFilters
-            yearOptions={yearOptions}
-            years={influenceYears}
-            statuses={influenceStatuses}
-            allYearsSet={allYearsSet}
-            onYearsChange={setInfluenceYears}
-            onStatusesChange={setInfluenceStatuses}
-          />
-          <CampaignInfluenceView
-            attributions={attributionsHook.attributions}
-            attributionTouches={touchesHook.touches}
-            // Full channels list so cross-year attribution references
-            // (e.g. a 2026 HPP attributed to a 2025 channel) still
-            // resolve to a real name instead of "Unknown".
-            channels={channels}
-            yearFilter={influenceYears}
-            statusFilter={influenceStatuses}
-            allYearsSet={allYearsSet}
-            // Reuse the Active deals edit handler + the already-mounted
-            // AttributionEditorModal so close-lost deals can be opened and
-            // their lost reason set from here.
-            onEditDeal={onEditDeal}
-          />
-        </div>
-      </ChartCard>
-
-      {/* Active deals table */}
-      <section className="space-y-2">
-        <h2 className="text-sm font-medium text-charcoal">
-          Active deals ({sortedDeals.length})
-        </h2>
-        {sortedDeals.length === 0 ? (
-          <p className="text-sm text-slate-muted italic px-4 py-6 border border-border rounded bg-muted/40">
-            No active deals in the selected period. Create one from the
-            Data Entry tab.
-          </p>
-        ) : (
-          <div className="border border-border rounded overflow-x-auto bg-bg">
-            <table className="min-w-full text-sm">
-              <thead className="bg-muted text-xs text-slate-muted uppercase tracking-wide">
-                <tr>
-                  <Th col="label" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Deal
-                  </Th>
-                  <Th col="account" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Account
-                  </Th>
-                  <Th col="region" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Region
-                  </Th>
-                  <Th col="currentStage" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Current stage
-                  </Th>
-                  <Th col="daysInCurrentStage" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Days in current stage
-                  </Th>
-                  <Th col="daysSinceHpp" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Days since HPP
-                  </Th>
-                  <Th col="amount" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>
-                    Amount
-                  </Th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedDeals.map((d, i) => (
-                  <tr
-                    key={d.dealId}
-                    className={i % 2 === 0 ? 'bg-bg' : 'bg-muted/40'}
-                  >
-                    <td className="px-3 py-2 text-charcoal">
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onEditDeal(d.currentAttributionId)}
-                          title="Edit deal"
-                          aria-label="Edit deal"
-                          className="inline-flex items-center justify-center w-6 h-6 rounded text-slate-muted hover:bg-muted hover:text-charcoal flex-shrink-0"
-                        >
-                          <span className="text-sm">✎</span>
-                        </button>
-                        {d.sfLink ? (
-                          <a
-                            href={d.sfLink}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-indigo hover:underline truncate"
-                            title="Open in Salesforce"
-                          >
-                            {d.label}
-                          </a>
-                        ) : (
-                          <span
-                            className="text-charcoal truncate"
-                            title="No Salesforce link"
-                          >
-                            {d.label}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-slate-muted">
-                      {d.account ?? '—'}
-                    </td>
-                    <td className="px-3 py-2 text-slate-muted">
-                      {d.region ?? '—'}
-                    </td>
-                    <td className="px-3 py-2 text-charcoal">
-                      {FUNNEL_STAGE_LABELS[d.currentStage as AttributionStageKey]}
-                    </td>
-                    <td
-                      className={
-                        'px-3 py-2 ' +
-                        (d.isStale ? 'text-danger font-medium' : 'text-charcoal')
-                      }
-                    >
-                      {d.isStale ? '🚩 ' : ''}
-                      {d.daysInCurrentStage}
-                    </td>
-                    <td className="px-3 py-2 text-charcoal">
-                      {d.daysSinceHpp === null ? '—' : d.daysSinceHpp}
-                    </td>
-                    <td className="px-3 py-2 text-charcoal">
-                      {formatCurrency(d.amount, { nullDisplay: '—' })}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+    <div className="min-h-full bg-gradient-to-b from-muted/80 via-bg to-bg p-4 sm:p-6 xl:p-8">
+      <div className="mx-auto max-w-[1800px] space-y-5">
+        <header className="relative overflow-hidden rounded-2xl border border-border bg-bg shadow-sm">
+          <div aria-hidden="true" className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo via-teal to-success" />
+          <div className="p-5 sm:p-6">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-indigo/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo">Pipeline analytics</span>
+              <ReportingBasisDisclosure basis={REPORTING_BASIS.basis} showExplanation={false} variant="accent" />
+            </div>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-charcoal">Marketing Funnel: Opportunities</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-muted">Monitor the current pipeline, stage movement, and opportunity influence from one workspace.</p>
           </div>
+          <div className="border-t border-border bg-muted/25 p-4 sm:px-6 sm:py-5">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo">Reporting view</p>
+                <h2 className="mt-1 text-base font-semibold text-charcoal">{view === 'current' ? 'Current pipeline' : 'Movement and velocity'}</h2>
+              </div>
+              <div className="inline-flex rounded-lg border border-border bg-bg p-1" role="group" aria-label="Opportunity reporting view">
+                <ViewButton active={view === 'current'} onClick={() => setView('current')}>Current pipeline</ViewButton>
+                <ViewButton active={view === 'movement'} onClick={() => setView('movement')}>Movement and velocity</ViewButton>
+              </div>
+            </div>
+            {view === 'current' ? (
+              <div className="space-y-3">
+                <FilterChipGroup
+                  label="Commercial region"
+                  chips={REGION_CHIPS}
+                  selected={[...regions]}
+                  onToggle={toggleRegion}
+                  onClear={() => onRegionsChange(new Set<RegionKey>())}
+                  onSelectAll={() => onRegionsChange(new Set(REGIONS))}
+                />
+                <p className="text-xs text-slate-muted">Current pipeline includes every open opportunity in the selected regions, regardless of when it was created.</p>
+              </div>
+            ) : (
+              <FunnelReportingFilters
+                year={year}
+                filter={filter}
+                yearOptions={yearOptions}
+                onYearChange={onYearChange}
+                onFilterChange={onFilterChange}
+                regions={regions}
+                onRegionsChange={onRegionsChange}
+                showComparison={false}
+              />
+            )}
+          </div>
+        </header>
+
+        {view === 'current' ? (
+          <section aria-labelledby="pipeline-snapshot-title" className="rounded-2xl border border-border bg-bg p-4 shadow-sm sm:p-5">
+            <SectionHeading id="pipeline-snapshot-title" eyebrow="Executive pipeline" title="Current pipeline snapshot" />
+            <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
+              <MetricCard label="Open pipeline" value={compactCurrency(pipelineSummary.totalAmount)} accent="indigo" />
+              <MetricCard label="Open opportunities" value={String(pipelineSummary.openDeals)} accent="teal" />
+              <MetricCard label="HPP (SQL)" value={String(pipelineSummary.byStage.hpp)} accent="blue" />
+              <MetricCard label="Opp (SAO)" value={String(pipelineSummary.byStage.opp)} accent="purple" />
+              <MetricCard label="Pursuit" value={String(pipelineSummary.byStage.pursuit)} accent="orange" />
+            </div>
+          </section>
+        ) : (
+          <section aria-labelledby="velocity-title" className="rounded-2xl border border-border bg-bg p-4 shadow-sm sm:p-5">
+            <SectionHeading id="velocity-title" eyebrow="Stage movement" title={`Velocity for ${periodLabel(year, filter)}`} />
+            <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {TRANSITIONS.map((transition) => {
+                const stat = statsByKey.get(transition.key);
+                return (
+                  <VelocityCard
+                    key={transition.key}
+                    label={transition.label}
+                    average={stat?.average ?? null}
+                    median={stat?.median ?? null}
+                    count={stat?.count ?? 0}
+                    invalidCount={stat?.invalidCount ?? 0}
+                    threshold={VELOCITY_THRESHOLDS[transition.key]}
+                  />
+                );
+              })}
+            </div>
+          </section>
         )}
-      </section>
 
-      {editingAttributionId && (
-        <AttributionEditorModal
-          attributionId={editingAttributionId}
-          channels={channels}
-          attributionsHook={attributionsHook}
-          touchesHook={touchesHook}
-          onClose={() => setEditingAttributionId(null)}
-        />
-      )}
-    </div>
-  );
-}
+        <section aria-labelledby="pipeline-mix-title" className="rounded-2xl border border-border bg-bg p-4 shadow-sm sm:p-5">
+          <SectionHeading
+            id="pipeline-mix-title"
+            eyebrow="Pipeline mix"
+            title={view === 'current' ? 'Open pipeline distribution' : `Open opportunities moving in ${periodLabel(year, filter)}`}
+          />
+          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <ChartCard title="By commercial region" subtitle="Distinct open opportunities in the reporting view." className="shadow-none">
+              <RegionDistributionDonut distribution={distributions.regionDistribution} />
+            </ChartCard>
+            <ChartCard title="By attributed channel" subtitle="Distinct open opportunities grouped by their approved top-level channel." className="shadow-none">
+              <ChannelDistributionDonut distribution={distributions.channelDistribution} />
+            </ChartCard>
+          </div>
+        </section>
 
-// Year + Status filter rows above the Opportunity Influence card
-// list. Two independent multi-selects styled to match the Region
-// pill row below (matches Sara's spec). Empty set on either axis
-// is treated as "no filter on that axis" — same semantics the
-// Region row already uses.
-const STATUS_OPTIONS: { key: InfluenceStatus; label: string }[] = [
-  { key: 'open', label: 'Open' },
-  { key: 'closeWon', label: 'Close-Won' },
-  { key: 'closeLost', label: 'Close-Lost' },
-];
+        <section aria-labelledby="opportunity-explorer-title" className="rounded-2xl border border-border bg-bg p-4 shadow-sm sm:p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+            <div>
+              <SectionHeading id="opportunity-explorer-title" eyebrow="Opportunity journeys" title="Journey explorer" />
+              <p className="mt-1 text-sm text-slate-muted">Select one opportunity to see its source influence and stage path.</p>
+            </div>
+            <span className="text-xs text-slate-muted">{visibleRows.length} of {explorerRows.length} opportunities</span>
+          </div>
 
-function InfluenceYearStatusFilters({
-  yearOptions,
-  years,
-  statuses,
-  allYearsSet,
-  onYearsChange,
-  onStatusesChange,
-}: {
-  yearOptions: number[];
-  years: Set<number>;
-  statuses: Set<InfluenceStatus>;
-  allYearsSet: Set<number>;
-  onYearsChange: (next: Set<number>) => void;
-  onStatusesChange: (next: Set<InfluenceStatus>) => void;
-}) {
-  const toggleYear = (y: number) => {
-    const next = new Set(years);
-    if (next.has(y)) next.delete(y);
-    else next.add(y);
-    onYearsChange(next);
-  };
-  const toggleStatus = (s: InfluenceStatus) => {
-    const next = new Set(statuses);
-    if (next.has(s)) next.delete(s);
-    else next.add(s);
-    onStatusesChange(next);
-  };
-  const clearYears = () => onYearsChange(new Set(allYearsSet));
-  const clearStatuses = () =>
-    onStatusesChange(
-      new Set<InfluenceStatus>(['open', 'closeWon', 'closeLost']),
-    );
+          <div className="my-4 grid gap-3 lg:grid-cols-[minmax(240px,1fr)_auto_minmax(190px,0.6fr)] lg:items-end">
+            <label className="flex flex-col gap-1 text-xs font-medium text-slate-muted">
+              Search
+              <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Opportunity or account" className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-charcoal outline-none focus:ring-2 focus:ring-indigo/30" />
+            </label>
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-muted">Status</span>
+              <div className="inline-flex rounded-lg border border-border bg-muted/30 p-1" role="group" aria-label="Opportunity status">
+                {STATUS_OPTIONS.map((option) => (
+                  <ViewButton key={option.value} active={status === option.value} onClick={() => setStatus(option.value)}>{option.label}</ViewButton>
+                ))}
+              </div>
+            </div>
+            <label className="flex flex-col gap-1 text-xs font-medium text-slate-muted">
+              Attributed channel
+              <select value={channelId} onChange={(event) => setChannelId(event.target.value)} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-charcoal outline-none focus:ring-2 focus:ring-indigo/30">
+                <option value="">All channels</option>
+                {channelOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+              </select>
+            </label>
+          </div>
 
-  return (
-    <div className="pl-3 border-l-2 border-border space-y-2">
-      <div className="flex flex-wrap items-center gap-1">
-        <span className="text-xs text-slate-muted mr-1 w-14">Year</span>
-        <button
-          type="button"
-          onClick={clearYears}
-          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
-        >
-          Clear
-        </button>
-        {yearOptions.map((y) => {
-          const on = years.has(y);
-          const cls = on
-            ? 'bg-indigo text-white border-indigo'
-            : 'bg-bg text-charcoal border-border hover:border-charcoal/30';
-          return (
-            <button
-              key={y}
-              type="button"
-              onClick={() => toggleYear(y)}
-              className={`text-xs px-2 py-1 rounded-full border transition-colors ${cls}`}
-              aria-pressed={on}
-            >
-              {y}
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex flex-wrap items-center gap-1">
-        <span className="text-xs text-slate-muted mr-1 w-14">Status</span>
-        <button
-          type="button"
-          onClick={clearStatuses}
-          className="text-xs px-2 py-1 rounded-full border border-border text-slate-muted hover:text-charcoal hover:border-charcoal/30"
-        >
-          Clear
-        </button>
-        {STATUS_OPTIONS.map((opt) => {
-          const on = statuses.has(opt.key);
-          const cls = on
-            ? 'bg-indigo text-white border-indigo'
-            : 'bg-bg text-charcoal border-border hover:border-charcoal/30';
-          return (
-            <button
-              key={opt.key}
-              type="button"
-              onClick={() => toggleStatus(opt.key)}
-              className={`text-xs px-2 py-1 rounded-full border transition-colors ${cls}`}
-              aria-pressed={on}
-            >
-              {opt.label}
-            </button>
-          );
-        })}
+          {selectedDeal && selectedRow ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-muted/25 p-4">
+                <label className="flex min-w-[280px] flex-1 flex-col gap-1 text-xs font-medium text-slate-muted">
+                  Opportunity
+                  <select value={selectedDeal.dealId} onChange={(event) => setSelectedDealId(event.target.value)} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm font-medium text-charcoal outline-none focus:ring-2 focus:ring-indigo/30">
+                    {visibleRows.map((row) => <option key={row.deal.dealId} value={row.deal.dealId}>{row.deal.label} · {row.deal.account ?? 'Account not available'}</option>)}
+                  </select>
+                </label>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => selectAdjacentDeal(-1)} disabled={visibleRows.length < 2} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm font-medium text-charcoal hover:border-indigo disabled:cursor-not-allowed disabled:opacity-40">Previous</button>
+                  <span className="min-w-[72px] text-center text-xs text-slate-muted">{selectedIndex + 1} of {visibleRows.length}</span>
+                  <button type="button" onClick={() => selectAdjacentDeal(1)} disabled={visibleRows.length < 2} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm font-medium text-charcoal hover:border-indigo disabled:cursor-not-allowed disabled:opacity-40">Next</button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+                <JourneyFact label="Opportunity" className="sm:col-span-2">
+                  {selectedDeal.sfLink ? <a href={selectedDeal.sfLink} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline">{selectedDeal.label} ↗</a> : selectedDeal.label}
+                </JourneyFact>
+                <JourneyFact label="Account">{selectedDeal.account ?? 'Not available'}</JourneyFact>
+                <JourneyFact label="Current stage">{FUNNEL_STAGE_LABELS[selectedDeal.currentStage]}</JourneyFact>
+                <JourneyFact label="SaaS revenue USD">{formatCurrency(selectedDeal.amount, { nullDisplay: '—' })}</JourneyFact>
+                <JourneyFact label="Attributed channel">{selectedRow.channelName}</JourneyFact>
+              </div>
+
+              <div className="rounded-xl border border-border bg-bg p-3 sm:p-4">
+                <CampaignInfluenceView
+                  attributions={attributionsHook.attributions}
+                  attributionTouches={touchesHook.touches}
+                  channels={channels}
+                  yearFilter={new Set<number>()}
+                  statusFilter={new Set<'open' | 'closeWon' | 'closeLost'>()}
+                  allYearsSet={allYears}
+                  dealIdFilter={selectedDeal.dealId}
+                  showFilters={false}
+                />
+              </div>
+
+              <div className="border-t border-border pt-4">
+                <button type="button" aria-expanded={browseOpen} onClick={() => setBrowseOpen((current) => !current)} className="rounded-lg border border-border px-3 py-2 text-sm font-medium text-charcoal hover:border-indigo hover:text-indigo">{browseOpen ? 'Hide opportunity list' : `Browse all ${visibleRows.length} opportunities`}</button>
+                {browseOpen && (
+                  <div className="mt-3 max-h-80 overflow-y-auto rounded-xl border border-border" role="listbox" aria-label="Available opportunities">
+                    {visibleRows.map((row) => {
+                      const active = row.deal.dealId === selectedDeal.dealId;
+                      return (
+                        <button key={row.deal.dealId} type="button" role="option" aria-selected={active} onClick={() => setSelectedDealId(row.deal.dealId)} className={`grid w-full gap-1 border-b border-border px-4 py-3 text-left last:border-b-0 sm:grid-cols-[minmax(220px,1.5fr)_minmax(180px,1fr)_140px_140px] sm:items-center ${active ? 'bg-indigo/5' : 'bg-bg hover:bg-muted/35'}`}>
+                          <span className="text-sm font-medium text-charcoal">{row.deal.label}</span>
+                          <span className="text-xs text-slate-muted">{row.deal.account ?? 'Account not available'}</span>
+                          <span className="text-xs text-slate-muted">{FUNNEL_STAGE_LABELS[row.deal.currentStage]}</span>
+                          <span className="text-xs text-slate-muted">{row.channelName}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="rounded-xl border border-border bg-muted/30 px-4 py-8 text-center text-sm text-slate-muted">No opportunities match these filters.</p>
+          )}
+        </section>
       </div>
     </div>
   );
 }
 
-function VelocityCard({
-  label,
-  average,
-  median,
-  count,
-  threshold,
-}: {
-  label: string;
-  average: number | null;
-  median: number | null;
-  count: number;
-  threshold: VelocityThreshold;
-}) {
-  const avgColor = colorClass(average, threshold);
+function SectionHeading({ id, eyebrow, title }: { id: string; eyebrow: string; title: string }) {
   return (
-    <div className="border border-border rounded bg-bg p-4 space-y-1">
-      <div className="text-xs text-slate-muted uppercase tracking-wide">
-        {label}
-      </div>
-      {count === 0 ? (
-        <div className="text-3xl font-semibold text-slate-muted">—</div>
-      ) : (
-        <div className={`text-3xl font-semibold ${avgColor}`}>
-          {roundOne(average ?? 0)} <span className="text-base font-normal text-slate-muted">days avg</span>
-        </div>
-      )}
-      <div className="text-xs text-slate-muted">
-        {count === 0
-          ? 'No deals measured yet'
-          : `Median ${median === null ? '—' : roundOne(median)} days · ${count} deal${count === 1 ? '' : 's'} measured`}
-      </div>
-      <div className="text-xs text-slate-muted">
-        Stale threshold: {threshold.stale} days
-      </div>
+    <div>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo">{eyebrow}</p>
+      <h2 id={id} className="mt-1 text-lg font-semibold text-charcoal">{title}</h2>
     </div>
   );
 }
 
-function Th({
-  col,
-  sortCol,
-  sortDir,
-  onClick,
-  children,
-}: {
-  col: SortColumn;
-  sortCol: SortColumn;
-  sortDir: SortDir;
-  onClick: (col: SortColumn) => void;
-  children: React.ReactNode;
-}) {
-  const active = col === sortCol;
+function ViewButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return <button type="button" aria-pressed={active} onClick={onClick} className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${active ? 'bg-indigo text-white shadow-sm' : 'text-slate-muted hover:text-charcoal'}`}>{children}</button>;
+}
+
+function MetricCard({ label, value, accent }: { label: string; value: string; accent: 'indigo' | 'teal' | 'blue' | 'purple' | 'orange' }) {
+  const accentClass = { indigo: 'border-t-indigo', teal: 'border-t-teal', blue: 'border-t-blue-500', purple: 'border-t-purple-500', orange: 'border-t-orange-500' }[accent];
+  return <div className={`rounded-xl border border-border border-t-2 ${accentClass} bg-bg p-4 shadow-sm`}><p className="text-[11px] font-semibold uppercase tracking-wide text-slate-muted">{label}</p><p className="mt-2 text-2xl font-semibold text-charcoal">{value}</p></div>;
+}
+
+function VelocityCard({ label, average, median, count, invalidCount, threshold }: { label: string; average: number | null; median: number | null; count: number; invalidCount: number; threshold: VelocityThreshold }) {
+  const color = average === null ? 'text-charcoal' : average <= threshold.typical ? 'text-success' : average <= threshold.stale ? 'text-warning' : 'text-danger';
   return (
-    <th
-      onClick={() => onClick(col)}
-      className="px-3 py-2 text-left font-medium cursor-pointer select-none hover:text-charcoal"
-    >
-      <span className={active ? 'text-charcoal' : ''}>{children}</span>
-      {active && (
-        <span className="ml-1 text-charcoal">
-          {sortDir === 'asc' ? '↑' : '↓'}
-        </span>
-      )}
-    </th>
+    <div className="rounded-xl border border-border bg-muted/20 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-muted">{label}</p>
+      <p className={`mt-2 text-3xl font-semibold ${color}`}>{average === null ? '—' : roundOne(average)}{average !== null && <span className="ml-1 text-base font-normal text-slate-muted">days average</span>}</p>
+      <p className="mt-2 text-xs text-slate-muted">{count === 0 ? 'No valid transitions in this period' : `Median ${median === null ? '—' : roundOne(median)} days · ${count} transition${count === 1 ? '' : 's'}`}</p>
+      {invalidCount > 0 && <p className="mt-1 text-xs text-warning">{invalidCount} contradictory date interval{invalidCount === 1 ? '' : 's'} excluded</p>}
+    </div>
   );
 }
 
-function compareDeals(
-  a: DealVelocity,
-  b: DealVelocity,
-  col: SortColumn,
-): number {
-  const nullsLast = (av: number | null, bv: number | null): number => {
-    if (av === null && bv === null) return 0;
-    if (av === null) return 1;
-    if (bv === null) return -1;
-    return av - bv;
-  };
-  switch (col) {
-    case 'label':
-      return a.label.localeCompare(b.label);
-    case 'account':
-      return (a.account ?? '').localeCompare(b.account ?? '');
-    case 'region':
-      return (a.region ?? '').localeCompare(b.region ?? '');
-    case 'currentStage':
-      return a.currentStage.localeCompare(b.currentStage);
-    case 'daysInCurrentStage':
-      return a.daysInCurrentStage - b.daysInCurrentStage;
-    case 'daysSinceHpp':
-      return nullsLast(a.daysSinceHpp, b.daysSinceHpp);
-    case 'amount':
-      return nullsLast(a.amount, b.amount);
-  }
+function JourneyFact({ label, className = '', children }: { label: string; className?: string; children: React.ReactNode }) {
+  return (
+    <div className={`rounded-xl border border-border bg-muted/20 p-3 ${className}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-muted">{label}</p>
+      <p className="mt-1 text-sm font-medium text-charcoal">{children}</p>
+    </div>
+  );
 }
