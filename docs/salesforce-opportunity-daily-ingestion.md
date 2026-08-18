@@ -55,7 +55,10 @@ reopening. Reporting promotion will derive the reversible current-qualified
 path from that evidence: current HPP reports HPP only, current Opportunity
 reports HPP + Opportunity, and current Pursuit reports HPP + Opportunity +
 Pursuit. A regression removes the higher stage from reporting without deleting
-the historical movement.
+the historical movement and resets the destination date. A witnessed direct
+HPP-to-Pursuit move assigns the same Salesforce transition date to Opportunity
+and Pursuit; after a regression to HPP, both downstream dates remain clear
+until later Salesforce history proves a new forward movement.
 
 ## Review and attribution
 

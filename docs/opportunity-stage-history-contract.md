@@ -1,10 +1,11 @@
 # Opportunity movement and velocity contract
 
-Status: Bite 5A foundation. Pure calculation, audit, and documentation only.
-Not connected to the dashboard, Create HPP, attributions, Supabase, n8n, or
-production. No database schema, migration, or import workflow was created.
-This document contains no Opportunity IDs, names, accounts, owners, or
-campaign names; source-export findings are aggregate facts only.
+Status: authoritative movement calculation bundled into the Salesforce
+Opportunity daily workflow. The protected
+`sf_derive_opportunity_stage_dates(UUID)` database function mirrors the
+active-path date rules used for reporting. This document contains no
+Opportunity IDs, names, accounts, owners, or campaign names; source-export
+findings are aggregate facts only.
 
 Implementing module: `src/lib/opportunityStageHistory.ts`.
 
@@ -113,8 +114,10 @@ Rules:
    only; the ledger keeps every event.
 2. Re-entering a stage uses the latest valid entry date for the current
    path.
-3. Skipped stages remain null. An Opportunity date is never invented for an
-   HPP-to-Pursuit skip.
+3. A witnessed forward skip fills every crossed stage with the exact source
+   transition date. HPP-to-Pursuit therefore records Opportunity and Pursuit
+   on the same day. A current snapshot without supporting history still
+   invents nothing.
 4. A deal first observed at a stage without earlier retained history keeps
    that stage as the observed baseline with UNKNOWN entry dates; earlier
    stages are unknown, and no HPP or Opportunity event is invented.
@@ -133,8 +136,10 @@ Worked examples (all covered by tests):
 - HPP Jan 1, Opportunity Feb 1, back to HPP Mar 1: current path shows HPP
   entered Mar 1 with Opportunity and Pursuit null; the ledger retains all
   three movements.
-- HPP Jan 1, Pursuit Feb 1: HPP Jan 1, Opportunity null (skipped), Pursuit
-  Feb 1.
+- HPP Jan 1, Pursuit Feb 1: HPP Jan 1, Opportunity Feb 1, Pursuit Feb 1.
+- HPP Jan 1, Pursuit Feb 1, back to HPP Mar 1: current path shows HPP
+  entered Mar 1 with Opportunity and Pursuit null. A later forward move gets
+  fresh dates from its new Salesforce transition.
 - Pursuit Feb 1, Opportunity Mar 1, Pursuit Apr 1: current Pursuit entry is
   Apr 1; the February visit stays in history.
 - First observed as Pursuit with no earlier history: Pursuit is the observed
@@ -158,14 +163,15 @@ Velocity describes the latest currently valid forward path only:
 
 - HPP-to-Opportunity and Opportunity-to-Pursuit intervals are computed only
   when both ACTIVE dates belong to the valid current path.
-- A skipped Opportunity makes that interval unavailable (null), not zero;
-  the direct HPP-to-Pursuit interval is exposed only in that skip case.
+- A witnessed HPP-to-Pursuit skip records Opportunity and Pursuit on the
+  same transition day, so Opportunity-to-Pursuit velocity is a source-backed
+  zero days. Missing history remains null and never becomes zero.
 - A regression suppresses the invalidated downstream interval until the
   stage is reached again; re-entry restores velocity using the new date.
 - Unknown or incomplete history (baselines, pre-history entries) suppresses
   the affected intervals.
-- Missing stages never produce zero-day velocity; only a real same-day
-  transition can be 0 days.
+- Missing stages never produce zero-day velocity; only a witnessed same-day
+  transition, including a forward skip, can be 0 days.
 - Historical cycle durations remain derivable from the append-only ledger
   for future analysis; they are never mixed into current-path velocity.
 

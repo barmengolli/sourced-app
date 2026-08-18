@@ -309,8 +309,10 @@ Type (HPP/Opportunity/Pursuit via a closed alias mapping, never RecordType
 IDs), movement is non-monotonic (regressions, skips, re-entries, Nurture
 visits), and `src/lib/opportunityStageHistory.ts` derives an append-only
 movement ledger plus a current path where a regression clears higher-stage
-dates without deleting history, skipped stages stay null, and velocity uses
-only the current valid path (null, never zero, when unavailable). Terminal
+dates without deleting history, a witnessed forward skip assigns every
+crossed stage the same source date, and velocity uses only the current valid
+path (null when unavailable; zero only for a witnessed same-day transition).
+Terminal
 status (won/lost/reopened) comes from the detailed Stage field, separately
 from record-type movement. Not wired into dashboards, Create HPP, or
 attributions.

@@ -64,7 +64,7 @@ describe('forward movement and skips', () => {
     expect(o.incompleteBaseline).toBe(false);
   });
 
-  it('HPP to Pursuit skip leaves Opportunity null and never invents its date', () => {
+  it('HPP to Pursuit skip records Opportunity and Pursuit on the witnessed transition day', () => {
     const o = one(
       adaptOpportunityHistory(
         [
@@ -75,12 +75,32 @@ describe('forward movement and skips', () => {
       ),
     );
     expect(o.currentStage).toBe('pursuit');
-    expect(o.activeDates).toEqual({ hpp: '2026-01-01', opp: null, pursuit: '2026-02-01' });
+    expect(o.activeDates).toEqual({ hpp: '2026-01-01', opp: '2026-02-01', pursuit: '2026-02-01' });
     expect(o.skips.forward).toBe(1);
-    // The skipped interval is unavailable, not zero; the direct interval is.
+    expect(o.velocity.hppToOppDays).toBe(31);
+    // Salesforce proves that Opportunity and Pursuit were reached together.
+    expect(o.velocity.oppToPursuitDays).toBe(0);
+    expect(o.velocity.hppToPursuitDays).toBeNull();
+  });
+
+  it('a first retained HPP to Pursuit transition fills only the newly proven stages', () => {
+    const o = one(
+      adaptOpportunityHistory(
+        [
+          row({
+            historyId: 'oh-s3',
+            oldValue: 'High Potential Prospect',
+            newValue: 'Pursuit',
+            changedAt: '2026-02-01T09:00:00Z',
+          }),
+        ],
+        config,
+      ),
+    );
+    expect(o.incompleteBaseline).toBe(true);
+    expect(o.activeDates).toEqual({ hpp: null, opp: '2026-02-01', pursuit: '2026-02-01' });
     expect(o.velocity.hppToOppDays).toBeNull();
-    expect(o.velocity.oppToPursuitDays).toBeNull();
-    expect(o.velocity.hppToPursuitDays).toBe(31);
+    expect(o.velocity.oppToPursuitDays).toBe(0);
   });
 
   it('a deal first observed as Pursuit is a baseline with unknown earlier history', () => {
@@ -131,6 +151,28 @@ describe('regressions, re-entries, and the append-only ledger', () => {
     expect(o.skips.backward).toBe(1);
     expect(o.currentStage).toBe('hpp');
     expect(o.activeDates.pursuit).toBeNull();
+  });
+
+  it('a regression clears downstream dates and later movement writes fresh dates', () => {
+    const o = one(
+      adaptOpportunityHistory(
+        [
+          row({ historyId: 'oh-cycle-1', oldValue: null, newValue: 'High Potential Prospect', changedAt: '2026-01-01T09:00:00Z' }),
+          row({ historyId: 'oh-cycle-2', oldValue: 'High Potential Prospect', newValue: 'Pursuit', changedAt: '2026-02-01T09:00:00Z' }),
+          row({ historyId: 'oh-cycle-3', oldValue: 'Pursuit', newValue: 'High Potential Prospect', changedAt: '2026-03-01T09:00:00Z' }),
+          row({ historyId: 'oh-cycle-4', oldValue: 'High Potential Prospect', newValue: 'Opportunity', changedAt: '2026-04-01T09:00:00Z' }),
+          row({ historyId: 'oh-cycle-5', oldValue: 'Opportunity', newValue: 'Pursuit', changedAt: '2026-05-01T09:00:00Z' }),
+        ],
+        config,
+      ),
+    );
+    expect(o.activeDates).toEqual({ hpp: '2026-03-01', opp: '2026-04-01', pursuit: '2026-05-01' });
+    expect(o.velocity.hppToOppDays).toBe(31);
+    expect(o.velocity.oppToPursuitDays).toBe(30);
+    expect(o.backwardMoves).toBe(1);
+    expect(o.reEntries.hpp).toBe(1);
+    expect(o.reEntries.opp).toBe(1);
+    expect(o.reEntries.pursuit).toBe(1);
   });
 
   it('Pursuit to Opportunity to Pursuit re-enters with the new date and restores velocity', () => {
