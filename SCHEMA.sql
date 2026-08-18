@@ -810,6 +810,10 @@ CREATE TABLE IF NOT EXISTS sf_opportunity_reviews (
   market_override TEXT,
   commercial_region_override TEXT,
   gtm_cube_override TEXT,
+  -- Reviewer-owned fallback used only when Salesforce has no usable SaaS
+  -- Revenue USD value. The reporting-write trigger below keeps this value
+  -- stable across nightly source refreshes without changing the source mirror.
+  saas_revenue_usd_override NUMERIC(14, 2),
   -- Reviewer-confirmed active-path dates. HPP is prefilled from the
   -- Salesforce Opportunity CreatedDate; downstream dates are never invented.
   hpp_entered_at_override DATE,
@@ -821,6 +825,9 @@ CREATE TABLE IF NOT EXISTS sf_opportunity_reviews (
   reviewed_by TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT sf_opportunity_reviews_revenue_override_nonnegative CHECK (
+    saas_revenue_usd_override IS NULL OR saas_revenue_usd_override >= 0
+  ),
   CONSTRAINT sf_opportunity_reviews_one_per_opp UNIQUE (sf_opportunity_uuid)
 );
 
@@ -934,6 +941,37 @@ CREATE TRIGGER set_timestamp_sf_opportunity_deal_links BEFORE UPDATE ON sf_oppor
 DROP TRIGGER IF EXISTS set_timestamp_sf_opportunity_reviews ON sf_opportunity_reviews;
 CREATE TRIGGER set_timestamp_sf_opportunity_reviews BEFORE UPDATE ON sf_opportunity_reviews
   FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+-- Apply an explicit reviewer-owned revenue fallback at the final reporting
+-- write boundary. Salesforce still owns the source snapshot; the override is
+-- used only for approved/linked reporting rows and survives nightly refreshes.
+CREATE OR REPLACE FUNCTION sf_apply_opportunity_revenue_override()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_override NUMERIC(14, 2);
+BEGIN
+  IF NEW.source_system = 'salesforce'
+     AND NULLIF(btrim(NEW.sf_opportunity_id), '') IS NOT NULL THEN
+    SELECT r.saas_revenue_usd_override
+    INTO v_override
+    FROM sf_opportunity_reviews r
+    JOIN sf_opportunities o ON o.id = r.sf_opportunity_uuid
+    WHERE o.sf_opportunity_id = NEW.sf_opportunity_id
+      AND r.review_state IN ('approved', 'linked');
+
+    IF v_override IS NOT NULL THEN
+      NEW.amount := v_override;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog;
+
+DROP TRIGGER IF EXISTS apply_sf_opportunity_revenue_override ON attributions;
+CREATE TRIGGER apply_sf_opportunity_revenue_override
+  BEFORE INSERT OR UPDATE OF amount, source_system, sf_opportunity_id
+  ON attributions
+  FOR EACH ROW EXECUTE FUNCTION sf_apply_opportunity_revenue_override();
 
 -- =============================================================
 -- Row Level Security: enabled, NO policies on purpose
@@ -1954,3 +1992,17 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- empty generated rows were removed, and zero touches were removed. Direct
 -- post-apply queries verified the retained exact Salesforce links and no
 -- duplicate rows remaining for those three Opportunities.
+
+-- =============================================================
+-- Active duplicate fill-missing reconciliation
+-- migrations/2026-08-17_opportunity_active_duplicate_fill_missing.sql
+-- STATUS: PENDING.
+-- =============================================================
+-- Adds a reviewer-owned SaaS Revenue USD fallback and protected, service-role-
+-- only reconciliation for one exact-ID active duplicate whose generated copy
+-- has no touches. Salesforce continues to own identity, status, and proven
+-- stage dates; a consistent legacy amount or BDR may fill only a missing
+-- source/review value. The mutation preserves the legacy attribution row IDs
+-- and touches, removes only the empty generated rows, redirects the exact
+-- Salesforce link, and records an append-only adoption. No reconciliation is
+-- invoked by applying the migration.
