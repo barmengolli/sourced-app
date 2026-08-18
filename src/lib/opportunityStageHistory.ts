@@ -22,8 +22,9 @@
 // the run, unknown record-type values are retained as evidence but never
 // mapped to a visible stage, and today's date is never substituted.
 //
-// This is a calculation/audit foundation only: not wired into dashboards,
-// Create HPP, attributions, Supabase, or n8n. No RecordType IDs are
+// This module is the authoritative movement calculation bundled into the
+// Salesforce Opportunity daily workflow. The protected database reporting
+// function mirrors its active-path date rules. No RecordType IDs are
 // hardcoded; classification uses a closed, validated, configurable mapping
 // of record-type labels and developer names.
 
@@ -201,12 +202,14 @@ export interface OpportunityReviewItem {
 
 export interface OpportunityVelocity {
   // Days between ACTIVE entry dates on the current valid path. null means
-  // unavailable (stage skipped, regressed away, or entry date unknown),
-  // never zero: only a real same-day transition may be 0.
+  // unavailable (stage regressed away or entry date unknown). A witnessed
+  // forward skip records every crossed stage on that transition day, so the
+  // skipped interval is a real same-day 0 rather than missing.
   hppToOppDays: number | null;
   oppToPursuitDays: number | null;
-  // Direct HPP-to-Pursuit interval, available only when Opportunity was
-  // skipped on the current path (both endpoint dates known, opp null).
+  // Legacy compatibility interval for an older path whose HPP and Pursuit
+  // dates are known while Opportunity is still missing. New witnessed skips
+  // fill Opportunity and therefore use the two adjacent intervals above.
   hppToPursuitDays: number | null;
 }
 
@@ -218,9 +221,10 @@ export interface OpportunityDerivedState {
   // Raw current state including out_of_scope/unknown, for diagnostics.
   currentState: OpportunityEventState | null;
   // ACTIVE entry dates on the current path. A regression clears the higher
-  // stages here (the ledger keeps the events); a skipped stage stays null;
-  // re-entry uses the latest valid entry date; a baseline-observed stage has
-  // an unknown (null) entry date.
+  // stages here (the ledger keeps the events); a witnessed forward skip fills
+  // every crossed stage with the same transition date; re-entry uses the
+  // latest valid entry date; a baseline-observed stage has an unknown (null)
+  // entry date.
   activeDates: Record<OpportunityFunnelStage, string | null>;
   terminalStatus: OpportunityTerminalState;
   forwardMoves: number;
@@ -350,12 +354,39 @@ interface PathSim {
   dates: Record<OpportunityFunnelStage, string | null>;
 }
 
-function applyPathStep(sim: PathSim, toState: OpportunityEventState, day: string): PathSim {
+function applyPathStep(
+  sim: PathSim,
+  fromState: OpportunityEventState | null,
+  toState: OpportunityEventState,
+  day: string,
+): PathSim {
   const next: PathSim = { state: toState, dates: { ...sim.dates } };
   if (toState === 'hpp' || toState === 'opp' || toState === 'pursuit') {
-    next.dates[toState] = day;
+    const toRank = STAGE_RANK[toState];
+    const fromRank =
+      fromState === 'hpp' || fromState === 'opp' || fromState === 'pursuit'
+        ? STAGE_RANK[fromState]
+        : null;
+
+    // Salesforce can move a deal directly across multiple funnel levels.
+    // The source old/new values prove that every crossed level was reached
+    // on this same transition, so fill the intermediate milestone(s) with
+    // the exact source day. This is not inferred from a current snapshot.
+    if (fromRank !== null && fromRank < toRank) {
+      for (const s of FUNNEL_STAGES) {
+        if (STAGE_RANK[s] > fromRank && STAGE_RANK[s] <= toRank) {
+          next.dates[s] = day;
+        }
+      }
+    } else {
+      next.dates[toState] = day;
+    }
+
+    // A backward movement resets its destination date and clears every
+    // downstream milestone. A later forward movement will receive fresh
+    // dates from the later Salesforce history event.
     for (const s of FUNNEL_STAGES) {
-      if (STAGE_RANK[s] > STAGE_RANK[toState]) next.dates[s] = null;
+      if (STAGE_RANK[s] > toRank) next.dates[s] = null;
     }
   }
   // out_of_scope / unknown suspend the visible stage without erasing dates.
@@ -609,7 +640,17 @@ export function adaptOpportunityHistory(
           if (delta === -2) backwardSkips += 1;
         }
       }
-      if (toRank !== null) entries[toState as OpportunityFunnelStage] += 1;
+      if (toRank !== null) {
+        if (fromRank !== null && fromRank < toRank) {
+          // A witnessed forward skip is one source movement but it enters
+          // every crossed funnel level for active-date and re-entry purposes.
+          for (const s of FUNNEL_STAGES) {
+            if (STAGE_RANK[s] > fromRank && STAGE_RANK[s] <= toRank) entries[s] += 1;
+          }
+        } else {
+          entries[toState as OpportunityFunnelStage] += 1;
+        }
+      }
 
       steps.push({ row, fromState, toState });
     }
@@ -630,10 +671,10 @@ export function adaptOpportunityHistory(
       }
       const day = group[0].row.changedAt.slice(0, 10);
       if (group.length === 1) {
-        sim = applyPathStep(sim, group[0].toState, day);
+        sim = applyPathStep(sim, group[0].fromState, group[0].toState, day);
       } else {
         const run = (perm: RtStep[]): PathSim =>
-          perm.reduce((acc, st) => applyPathStep(acc, st.toState, day), sim);
+          perm.reduce((acc, st) => applyPathStep(acc, st.fromState, st.toState, day), sim);
         const allAgree = (perms: RtStep[][]): PathSim | null => {
           const outcomes = perms.map(run);
           return outcomes.every((o) => samePathSim(o, outcomes[0])) ? outcomes[0] : null;

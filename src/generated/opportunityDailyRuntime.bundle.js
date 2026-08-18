@@ -109,14 +109,18 @@ var OpportunityDailyRuntime = (function(exports) {
 		if (config.openStageValues?.includes(v)) return { kind: "open" };
 		return { kind: "unknown" };
 	}
-	function applyPathStep(sim, toState, day) {
+	function applyPathStep(sim, fromState, toState, day) {
 		const next = {
 			state: toState,
 			dates: { ...sim.dates }
 		};
 		if (toState === "hpp" || toState === "opp" || toState === "pursuit") {
-			next.dates[toState] = day;
-			for (const s of FUNNEL_STAGES) if (STAGE_RANK[s] > STAGE_RANK[toState]) next.dates[s] = null;
+			const toRank = STAGE_RANK[toState];
+			const fromRank = fromState === "hpp" || fromState === "opp" || fromState === "pursuit" ? STAGE_RANK[fromState] : null;
+			if (fromRank !== null && fromRank < toRank) {
+				for (const s of FUNNEL_STAGES) if (STAGE_RANK[s] > fromRank && STAGE_RANK[s] <= toRank) next.dates[s] = day;
+			} else next.dates[toState] = day;
+			for (const s of FUNNEL_STAGES) if (STAGE_RANK[s] > toRank) next.dates[s] = null;
 		}
 		return next;
 	}
@@ -324,7 +328,9 @@ var OpportunityDailyRuntime = (function(exports) {
 						if (delta === -2) backwardSkips += 1;
 					}
 				}
-				if (toRank !== null) entries[toState] += 1;
+				if (toRank !== null) if (fromRank !== null && fromRank < toRank) {
+					for (const s of FUNNEL_STAGES) if (STAGE_RANK[s] > fromRank && STAGE_RANK[s] <= toRank) entries[s] += 1;
+				} else entries[toState] += 1;
 				steps.push({
 					row,
 					fromState,
@@ -344,9 +350,9 @@ var OpportunityDailyRuntime = (function(exports) {
 					next += 1;
 				}
 				const day = group[0].row.changedAt.slice(0, 10);
-				if (group.length === 1) sim = applyPathStep(sim, group[0].toState, day);
+				if (group.length === 1) sim = applyPathStep(sim, group[0].fromState, group[0].toState, day);
 				else {
-					const run = (perm) => perm.reduce((acc, st) => applyPathStep(acc, st.toState, day), sim);
+					const run = (perm) => perm.reduce((acc, st) => applyPathStep(acc, st.fromState, st.toState, day), sim);
 					const allAgree = (perms) => {
 						const outcomes = perms.map(run);
 						return outcomes.every((o) => samePathSim(o, outcomes[0])) ? outcomes[0] : null;
