@@ -76,7 +76,7 @@ function DonutTooltip({ active, payload, colorOf }: DonutTooltipProps) {
         Amount: {fmtUsdCompact(d.totalAmount ?? 0)}
       </div>
       <div className="text-charcoal tabular-nums">
-        Share: {(d.percentageOfCount ?? 0).toFixed(0)}%
+        Share: {(d.percentageOfCount ?? 0).toFixed(1)}%
       </div>
     </div>
   );
@@ -163,7 +163,7 @@ export default function ChannelDistributionDonut({
               {fmtUsdCompact(c.totalAmount)}
             </span>
             <span className="text-slate-muted tabular-nums text-right">
-              {c.percentageOfCount.toFixed(0)}%
+              {c.percentageOfCount.toFixed(1)}%
             </span>
           </li>
         ))}

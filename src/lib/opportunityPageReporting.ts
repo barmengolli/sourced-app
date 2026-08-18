@@ -18,6 +18,12 @@ export interface OpportunityPipelineSummary {
   byStage: Record<'hpp' | 'opp' | 'pursuit', number>;
 }
 
+export interface OpportunityExplorerRow {
+  deal: DealVelocity;
+  channelId: string;
+  channelName: string;
+}
+
 function rowsByDeal(attributions: Attribution[]): Map<string, Attribution[]> {
   const grouped = new Map<string, Attribution[]>();
   for (const row of attributions) {
@@ -193,4 +199,61 @@ export function buildOpportunityDistributions(input: {
   };
 
   return { regionDistribution, channelDistribution };
+}
+
+export function buildOpportunityExplorerRows(input: {
+  deals: DealVelocity[];
+  attributions: Attribution[];
+  channels: Channel[];
+}): OpportunityExplorerRow[] {
+  const { deals, attributions, channels } = input;
+  const grouped = rowsByDeal(attributions);
+  const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+
+  return deals
+    .map((deal) => {
+      const first = primaryRow(grouped.get(deal.dealId) ?? []);
+      const channelId = first?.channel_id
+        ? rootChannelId(first.channel_id, channelById)
+        : NO_CHANNEL_KEY;
+      return {
+        deal,
+        channelId,
+        channelName:
+          channelId === NO_CHANNEL_KEY
+            ? 'No channel'
+            : channelById.get(channelId)?.name ?? 'Unknown',
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.deal.currentStageEnteredAt.localeCompare(
+          left.deal.currentStageEnteredAt,
+        ) || left.deal.label.localeCompare(right.deal.label),
+    );
+}
+
+export function filterOpportunityExplorerRows(input: {
+  rows: OpportunityExplorerRow[];
+  status: OpportunityStatusFilter;
+  search?: string;
+  channelId?: string | null;
+}): OpportunityExplorerRow[] {
+  const {
+    rows,
+    status,
+    search = '',
+    channelId = null,
+  } = input;
+  const query = search.trim().toLowerCase();
+
+  return rows.filter((row) => {
+    if (!opportunityMatchesStatus(row.deal, status)) return false;
+    if (channelId && row.channelId !== channelId) return false;
+    if (!query) return true;
+    return (
+      row.deal.label.toLowerCase().includes(query) ||
+      (row.deal.account ?? '').toLowerCase().includes(query)
+    );
+  });
 }

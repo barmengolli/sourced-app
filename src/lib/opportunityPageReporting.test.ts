@@ -3,6 +3,8 @@ import type { Attribution, AttributionStageKey, Channel } from '../types/db';
 import { computeStageVelocityStats } from './compute';
 import {
   buildOpportunityDistributions,
+  buildOpportunityExplorerRows,
+  filterOpportunityExplorerRows,
   scopeOpportunityDeals,
   summarizeOpenPipeline,
 } from './opportunityPageReporting';
@@ -141,6 +143,50 @@ describe('opportunity page reporting contract', () => {
         totalAmount: 750,
       }),
     ]);
+    expect(
+      result.regionDistribution.regions.reduce(
+        (sum, row) => sum + row.percentageOfCount,
+        0,
+      ),
+    ).toBe(100);
+    expect(
+      result.channelDistribution.channels.reduce(
+        (sum, row) => sum + row.percentageOfCount,
+        0,
+      ),
+    ).toBe(100);
+  });
+
+  it('builds a read-only journey index with the same top-level channel rollup', () => {
+    const rows = [
+      attribution({ id: 'a', dealId: 'a', stage: 'hpp', enteredAt: '2026-01-01', label: 'Alpha' }),
+      attribution({ id: 'b', dealId: 'b', stage: 'hpp', enteredAt: '2026-03-01', label: 'Beta' }),
+      attribution({ id: 'b-won', dealId: 'b', stage: 'closeWon', enteredAt: '2026-05-01', label: 'Beta' }),
+      attribution({ id: 'c', dealId: 'c', stage: 'closeLost', enteredAt: '2026-04-01', label: 'Gamma' }),
+    ];
+    const deals = scopeOpportunityDeals({ attributions: rows, regions: new Set(), today: TODAY });
+    const explorerRows = buildOpportunityExplorerRows({ deals, attributions: rows, channels });
+
+    expect(explorerRows.map((row) => row.deal.dealId)).toEqual(['b', 'c', 'a']);
+    expect(explorerRows.every((row) => row.channelId === 'channel-root')).toBe(true);
+    expect(explorerRows.every((row) => row.channelName === '2026 - Website')).toBe(true);
+  });
+
+  it('keeps every opportunity reachable through journey status, search, and channel filters', () => {
+    const rows = [
+      attribution({ id: 'open', dealId: 'open', stage: 'hpp', enteredAt: '2026-01-01', label: 'Northstar' }),
+      attribution({ id: 'won', dealId: 'won', stage: 'closeWon', enteredAt: '2026-02-01', label: 'Beacon' }),
+      attribution({ id: 'lost', dealId: 'lost', stage: 'closeLost', enteredAt: '2026-03-01', label: 'Compass' }),
+    ];
+    const deals = scopeOpportunityDeals({ attributions: rows, regions: new Set(), today: TODAY });
+    const explorerRows = buildOpportunityExplorerRows({ deals, attributions: rows, channels });
+
+    expect(filterOpportunityExplorerRows({ rows: explorerRows, status: 'all' })).toHaveLength(3);
+    expect(filterOpportunityExplorerRows({ rows: explorerRows, status: 'open' })[0]?.deal.dealId).toBe('open');
+    expect(filterOpportunityExplorerRows({ rows: explorerRows, status: 'won' })[0]?.deal.dealId).toBe('won');
+    expect(filterOpportunityExplorerRows({ rows: explorerRows, status: 'lost' })[0]?.deal.dealId).toBe('lost');
+    expect(filterOpportunityExplorerRows({ rows: explorerRows, status: 'all', search: 'account won' })[0]?.deal.dealId).toBe('won');
+    expect(filterOpportunityExplorerRows({ rows: explorerRows, status: 'all', channelId: 'missing-channel' })).toEqual([]);
   });
 
   it('anchors velocity to the destination period and excludes contradictory dates', () => {

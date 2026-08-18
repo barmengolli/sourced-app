@@ -5,11 +5,12 @@ import { useChannels } from '../hooks/useChannels';
 import { useLeads } from '../hooks/useLeads';
 import {
   computeStageVelocityStats,
-  type DealVelocity,
   type PeriodFilter,
 } from '../lib/compute';
 import {
   buildOpportunityDistributions,
+  buildOpportunityExplorerRows,
+  filterOpportunityExplorerRows,
   scopeOpportunityDeals,
   summarizeOpenPipeline,
   type OpportunityStatusFilter,
@@ -22,14 +23,12 @@ import ChartCard from '../components/charts/ChartCard';
 import CampaignInfluenceView from '../components/charts/CampaignInfluenceView';
 import ChannelDistributionDonut from '../components/charts/ChannelDistributionDonut';
 import RegionDistributionDonut from '../components/charts/RegionDistributionDonut';
-import AttributionEditorModal from '../components/attribution/AttributionEditorModal';
 import {
   VELOCITY_THRESHOLDS,
   type VelocityThreshold,
 } from '../constants/velocityThresholds';
 import { FUNNEL_STAGE_LABELS } from '../constants/funnelStages';
 import { REGIONS, type RegionKey } from '../constants/regions';
-import type { AttributionStageKey } from '../types/db';
 import type { ComparisonMode } from '../types/reporting';
 import ReportingBasisDisclosure from '../components/reporting/ReportingBasisDisclosure';
 import { reportingContractFor } from '../constants/reportingPages';
@@ -46,15 +45,6 @@ interface FunnelVelocityPageProps {
 }
 
 type OpportunityView = 'current' | 'movement';
-type SortColumn =
-  | 'label'
-  | 'account'
-  | 'region'
-  | 'currentStage'
-  | 'daysInCurrentStage'
-  | 'daysSinceHpp'
-  | 'amount';
-type SortDir = 'asc' | 'desc';
 
 const REPORTING_BASIS = reportingContractFor('funnel-velocity')!;
 const REGION_CHIPS = REGIONS.map((region) => ({ value: region, label: region }));
@@ -98,10 +88,9 @@ export default function FunnelVelocityPage({
   const [view, setView] = useState<OpportunityView>('current');
   const [status, setStatus] = useState<OpportunityStatusFilter>('open');
   const [search, setSearch] = useState('');
-  const [sortCol, setSortCol] = useState<SortColumn>('daysInCurrentStage');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [editingAttributionId, setEditingAttributionId] = useState<string | null>(null);
-  const [influenceDealId, setInfluenceDealId] = useState<string | null>(null);
+  const [channelId, setChannelId] = useState('');
+  const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
+  const [browseOpen, setBrowseOpen] = useState(false);
 
   const yearOptions = useMemo(() => {
     const years = new Set<number>([new Date().getFullYear()]);
@@ -157,26 +146,39 @@ export default function FunnelVelocityPage({
     [velocityStats],
   );
 
-  const tableBase = view === 'current' ? allRegionDeals : movementDeals;
-  const visibleDeals = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    const filtered = tableBase.filter((deal) => {
-      const statusMatch =
-        status === 'all' ||
-        (status === 'open' && !deal.isTerminal) ||
-        (status === 'won' && deal.currentStage === 'closeWon') ||
-        (status === 'lost' && deal.currentStage === 'closeLost');
-      if (!statusMatch) return false;
-      if (!query) return true;
-      return deal.label.toLowerCase().includes(query) || (deal.account ?? '').toLowerCase().includes(query);
-    });
-    const direction = sortDir === 'asc' ? 1 : -1;
-    return filtered.sort((left, right) => compareDeals(left, right, sortCol) * direction);
-  }, [tableBase, status, search, sortCol, sortDir]);
-
-  const influenceDeal = influenceDealId
-    ? allRegionDeals.find((deal) => deal.dealId === influenceDealId) ?? null
-    : null;
+  const explorerBase = view === 'current' ? allRegionDeals : movementDeals;
+  const explorerRows = useMemo(
+    () =>
+      buildOpportunityExplorerRows({
+        deals: explorerBase,
+        attributions: attributionsHook.attributions,
+        channels,
+      }),
+    [explorerBase, attributionsHook.attributions, channels],
+  );
+  const channelOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const row of explorerRows) byId.set(row.channelId, row.channelName);
+    return [...byId.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [explorerRows]);
+  const visibleRows = useMemo(
+    () =>
+      filterOpportunityExplorerRows({
+        rows: explorerRows,
+        status,
+        search,
+        channelId: channelId || null,
+      }),
+    [explorerRows, status, search, channelId],
+  );
+  const requestedIndex = visibleRows.findIndex(
+    (row) => row.deal.dealId === selectedDealId,
+  );
+  const selectedIndex = requestedIndex >= 0 ? requestedIndex : 0;
+  const selectedRow = visibleRows[selectedIndex] ?? null;
+  const selectedDeal = selectedRow?.deal ?? null;
   const allYears = useMemo(() => new Set(yearOptions), [yearOptions]);
 
   const toggleRegion = (region: RegionKey) => {
@@ -185,17 +187,11 @@ export default function FunnelVelocityPage({
     else next.add(region);
     onRegionsChange(next);
   };
-  const onHeaderClick = (column: SortColumn) => {
-    if (sortCol === column) {
-      setSortDir((current) => (current === 'asc' ? 'desc' : 'asc'));
-      return;
-    }
-    setSortCol(column);
-    setSortDir(
-      column === 'daysInCurrentStage' || column === 'daysSinceHpp' || column === 'amount'
-        ? 'desc'
-        : 'asc',
-    );
+  const selectAdjacentDeal = (offset: number) => {
+    if (visibleRows.length === 0) return;
+    const nextIndex =
+      (selectedIndex + offset + visibleRows.length) % visibleRows.length;
+    setSelectedDealId(visibleRows[nextIndex].deal.dealId);
   };
 
   return (
@@ -300,11 +296,15 @@ export default function FunnelVelocityPage({
 
         <section aria-labelledby="opportunity-explorer-title" className="rounded-2xl border border-border bg-bg p-4 shadow-sm sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
-            <SectionHeading id="opportunity-explorer-title" eyebrow="Opportunity detail" title="Opportunity explorer" />
-            <span className="text-xs text-slate-muted">{visibleDeals.length} of {tableBase.length} opportunities</span>
+            <div>
+              <SectionHeading id="opportunity-explorer-title" eyebrow="Opportunity journeys" title="Journey explorer" />
+              <p className="mt-1 text-sm text-slate-muted">Select one opportunity to see its source influence and stage path.</p>
+            </div>
+            <span className="text-xs text-slate-muted">{visibleRows.length} of {explorerRows.length} opportunities</span>
           </div>
-          <div className="my-4 flex flex-wrap items-end gap-3">
-            <label className="flex min-w-[260px] flex-1 flex-col gap-1 text-xs font-medium text-slate-muted">
+
+          <div className="my-4 grid gap-3 lg:grid-cols-[minmax(240px,1fr)_auto_minmax(190px,0.6fr)] lg:items-end">
+            <label className="flex flex-col gap-1 text-xs font-medium text-slate-muted">
               Search
               <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Opportunity or account" className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-charcoal outline-none focus:ring-2 focus:ring-indigo/30" />
             </label>
@@ -316,88 +316,78 @@ export default function FunnelVelocityPage({
                 ))}
               </div>
             </div>
+            <label className="flex flex-col gap-1 text-xs font-medium text-slate-muted">
+              Attributed channel
+              <select value={channelId} onChange={(event) => setChannelId(event.target.value)} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-charcoal outline-none focus:ring-2 focus:ring-indigo/30">
+                <option value="">All channels</option>
+                {channelOptions.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+              </select>
+            </label>
           </div>
-          {visibleDeals.length === 0 ? (
-            <p className="rounded-xl border border-border bg-muted/30 px-4 py-8 text-center text-sm text-slate-muted">No opportunities match these filters.</p>
-          ) : (
-            <div className="overflow-x-auto rounded-xl border border-border">
-              <table className="min-w-full text-sm">
-                <thead className="bg-muted text-xs uppercase tracking-wide text-slate-muted">
-                  <tr>
-                    <Th col="label" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>Opportunity</Th>
-                    <Th col="account" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>Account</Th>
-                    <Th col="region" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>Region</Th>
-                    <Th col="currentStage" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>Current stage</Th>
-                    <Th col="daysInCurrentStage" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>Days in stage</Th>
-                    <Th col="daysSinceHpp" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>Days since HPP</Th>
-                    <Th col="amount" sortCol={sortCol} sortDir={sortDir} onClick={onHeaderClick}>SaaS revenue USD</Th>
-                    <th className="px-3 py-2 text-left font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleDeals.map((deal, index) => (
-                    <tr key={deal.dealId} className={index % 2 === 0 ? 'bg-bg' : 'bg-muted/30'}>
-                      <td className="px-3 py-3 font-medium text-charcoal">
-                        {deal.sfLink ? <a href={deal.sfLink} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline">{deal.label}</a> : deal.label}
-                      </td>
-                      <td className="px-3 py-3 text-slate-muted">{deal.account ?? '—'}</td>
-                      <td className="px-3 py-3 text-slate-muted">{deal.region ?? 'Other'}</td>
-                      <td className="px-3 py-3 text-charcoal">{FUNNEL_STAGE_LABELS[deal.currentStage as AttributionStageKey]}</td>
-                      <td className={`px-3 py-3 ${deal.isStale ? 'font-medium text-danger' : 'text-charcoal'}`}>{deal.daysInCurrentStage}</td>
-                      <td className="px-3 py-3 text-charcoal">{deal.daysSinceHpp ?? '—'}</td>
-                      <td className="px-3 py-3 text-charcoal">{formatCurrency(deal.amount, { nullDisplay: '—' })}</td>
-                      <td className="px-3 py-3">
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => setInfluenceDealId(deal.dealId)} className="rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-charcoal hover:border-indigo hover:text-indigo">View influence</button>
-                          <button type="button" onClick={() => setEditingAttributionId(deal.currentAttributionId)} className="rounded-md border border-border px-2.5 py-1.5 text-xs text-slate-muted hover:text-charcoal">Edit</button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+
+          {selectedDeal && selectedRow ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-muted/25 p-4">
+                <label className="flex min-w-[280px] flex-1 flex-col gap-1 text-xs font-medium text-slate-muted">
+                  Opportunity
+                  <select value={selectedDeal.dealId} onChange={(event) => setSelectedDealId(event.target.value)} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm font-medium text-charcoal outline-none focus:ring-2 focus:ring-indigo/30">
+                    {visibleRows.map((row) => <option key={row.deal.dealId} value={row.deal.dealId}>{row.deal.label} · {row.deal.account ?? 'Account not available'}</option>)}
+                  </select>
+                </label>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => selectAdjacentDeal(-1)} disabled={visibleRows.length < 2} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm font-medium text-charcoal hover:border-indigo disabled:cursor-not-allowed disabled:opacity-40">Previous</button>
+                  <span className="min-w-[72px] text-center text-xs text-slate-muted">{selectedIndex + 1} of {visibleRows.length}</span>
+                  <button type="button" onClick={() => selectAdjacentDeal(1)} disabled={visibleRows.length < 2} className="rounded-lg border border-border bg-bg px-3 py-2 text-sm font-medium text-charcoal hover:border-indigo disabled:cursor-not-allowed disabled:opacity-40">Next</button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+                <JourneyFact label="Opportunity" className="sm:col-span-2">
+                  {selectedDeal.sfLink ? <a href={selectedDeal.sfLink} target="_blank" rel="noopener noreferrer" className="text-indigo hover:underline">{selectedDeal.label} ↗</a> : selectedDeal.label}
+                </JourneyFact>
+                <JourneyFact label="Account">{selectedDeal.account ?? 'Not available'}</JourneyFact>
+                <JourneyFact label="Current stage">{FUNNEL_STAGE_LABELS[selectedDeal.currentStage]}</JourneyFact>
+                <JourneyFact label="SaaS revenue USD">{formatCurrency(selectedDeal.amount, { nullDisplay: '—' })}</JourneyFact>
+                <JourneyFact label="Attributed channel">{selectedRow.channelName}</JourneyFact>
+              </div>
+
+              <div className="rounded-xl border border-border bg-bg p-3 sm:p-4">
+                <CampaignInfluenceView
+                  attributions={attributionsHook.attributions}
+                  attributionTouches={touchesHook.touches}
+                  channels={channels}
+                  yearFilter={new Set<number>()}
+                  statusFilter={new Set<'open' | 'closeWon' | 'closeLost'>()}
+                  allYearsSet={allYears}
+                  dealIdFilter={selectedDeal.dealId}
+                  showFilters={false}
+                />
+              </div>
+
+              <div className="border-t border-border pt-4">
+                <button type="button" aria-expanded={browseOpen} onClick={() => setBrowseOpen((current) => !current)} className="rounded-lg border border-border px-3 py-2 text-sm font-medium text-charcoal hover:border-indigo hover:text-indigo">{browseOpen ? 'Hide opportunity list' : `Browse all ${visibleRows.length} opportunities`}</button>
+                {browseOpen && (
+                  <div className="mt-3 max-h-80 overflow-y-auto rounded-xl border border-border" role="listbox" aria-label="Available opportunities">
+                    {visibleRows.map((row) => {
+                      const active = row.deal.dealId === selectedDeal.dealId;
+                      return (
+                        <button key={row.deal.dealId} type="button" role="option" aria-selected={active} onClick={() => setSelectedDealId(row.deal.dealId)} className={`grid w-full gap-1 border-b border-border px-4 py-3 text-left last:border-b-0 sm:grid-cols-[minmax(220px,1.5fr)_minmax(180px,1fr)_140px_140px] sm:items-center ${active ? 'bg-indigo/5' : 'bg-bg hover:bg-muted/35'}`}>
+                          <span className="text-sm font-medium text-charcoal">{row.deal.label}</span>
+                          <span className="text-xs text-slate-muted">{row.deal.account ?? 'Account not available'}</span>
+                          <span className="text-xs text-slate-muted">{FUNNEL_STAGE_LABELS[row.deal.currentStage]}</span>
+                          <span className="text-xs text-slate-muted">{row.channelName}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
+          ) : (
+            <p className="rounded-xl border border-border bg-muted/30 px-4 py-8 text-center text-sm text-slate-muted">No opportunities match these filters.</p>
           )}
         </section>
       </div>
-
-      {influenceDeal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/45 p-4" role="dialog" aria-modal="true" aria-labelledby="influence-dialog-title">
-          <div className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-border bg-bg shadow-xl">
-            <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border bg-bg p-5">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-indigo">Opportunity influence</p>
-                <h2 id="influence-dialog-title" className="mt-1 text-xl font-semibold text-charcoal">{influenceDeal.label}</h2>
-                <p className="mt-1 text-sm text-slate-muted">{influenceDeal.account ?? 'Account not available'}</p>
-              </div>
-              <button type="button" onClick={() => setInfluenceDealId(null)} className="rounded-md border border-border px-3 py-2 text-sm text-charcoal hover:bg-muted">Close</button>
-            </header>
-            <div className="p-5">
-              <CampaignInfluenceView
-                attributions={attributionsHook.attributions}
-                attributionTouches={touchesHook.touches}
-                channels={channels}
-                yearFilter={new Set<number>()}
-                statusFilter={new Set<'open' | 'closeWon' | 'closeLost'>()}
-                allYearsSet={allYears}
-                dealIdFilter={influenceDeal.dealId}
-                showFilters={false}
-                onEditDeal={(attributionId) => setEditingAttributionId(attributionId)}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {editingAttributionId && (
-        <AttributionEditorModal
-          attributionId={editingAttributionId}
-          channels={channels}
-          attributionsHook={attributionsHook}
-          touchesHook={touchesHook}
-          onClose={() => setEditingAttributionId(null)}
-        />
-      )}
     </div>
   );
 }
@@ -432,23 +422,11 @@ function VelocityCard({ label, average, median, count, invalidCount, threshold }
   );
 }
 
-function Th({ col, sortCol, sortDir, onClick, children }: { col: SortColumn; sortCol: SortColumn; sortDir: SortDir; onClick: (column: SortColumn) => void; children: React.ReactNode }) {
-  const active = col === sortCol;
-  return <th onClick={() => onClick(col)} className="cursor-pointer select-none px-3 py-2 text-left font-medium hover:text-charcoal"><span className={active ? 'text-charcoal' : ''}>{children}</span>{active && <span className="ml-1 text-charcoal">{sortDir === 'asc' ? '↑' : '↓'}</span>}</th>;
-}
-
-function compareDeals(left: DealVelocity, right: DealVelocity, column: SortColumn): number {
-  const nullsLast = (leftValue: number | null, rightValue: number | null): number => {
-    if (leftValue === null && rightValue === null) return 0;
-    if (leftValue === null) return 1;
-    if (rightValue === null) return -1;
-    return leftValue - rightValue;
-  };
-  if (column === 'label') return left.label.localeCompare(right.label);
-  if (column === 'account') return (left.account ?? '').localeCompare(right.account ?? '');
-  if (column === 'region') return (left.region ?? '').localeCompare(right.region ?? '');
-  if (column === 'currentStage') return left.currentStage.localeCompare(right.currentStage);
-  if (column === 'daysInCurrentStage') return left.daysInCurrentStage - right.daysInCurrentStage;
-  if (column === 'daysSinceHpp') return nullsLast(left.daysSinceHpp, right.daysSinceHpp);
-  return nullsLast(left.amount, right.amount);
+function JourneyFact({ label, className = '', children }: { label: string; className?: string; children: React.ReactNode }) {
+  return (
+    <div className={`rounded-xl border border-border bg-muted/20 p-3 ${className}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-muted">{label}</p>
+      <p className="mt-1 text-sm font-medium text-charcoal">{children}</p>
+    </div>
+  );
 }
