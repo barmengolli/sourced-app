@@ -1994,6 +1994,21 @@ EXECUTE FUNCTION public.sourced_supersede_legacy_import_touch();
 -- duplicate rows remaining for those three Opportunities.
 
 -- =============================================================
+-- Pending legacy Opportunity reconciliation
+-- migrations/2026-08-18_opportunity_pending_legacy_reconciliation.sql
+-- STATUS: PENDING.
+-- =============================================================
+-- Adds a service-role-only preview and explicit mutation for pending reviews
+-- whose legacy reporting history is proven but does not meet the narrower
+-- automatic exact-ID adoption shape. The mutation requires the complete deal
+-- set, row/touch counts, review version, actor, idempotency key, and exact-ID
+-- evidence or a literal manual-identity confirmation. Split deal histories are
+-- consolidated only when any duplicate-stage fields and ordered touches are
+-- identical. Retained attribution IDs and meaningful touches survive;
+-- Salesforce history refreshes the canonical stage dates. Applying the
+-- migration invokes no reconciliation.
+
+-- =============================================================
 -- Active duplicate fill-missing reconciliation
 -- migrations/2026-08-17_opportunity_active_duplicate_fill_missing.sql
 -- STATUS: PENDING.
