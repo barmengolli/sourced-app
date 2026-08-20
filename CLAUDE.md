@@ -153,6 +153,14 @@ alone is not proof of production state.
 
 #### Outreach
 
+- A separate daily ingestion contract is implemented but not yet the live
+  dashboard source. The inactive generated workflow runs at 11:50 PM
+  `America/Denver`, captures the prior fully closed calendar day, writes the
+  Google Sheets QA row first, and keeps the Supabase RPC behind two exact
+  confirmations. Daily rows use (`snapshot_date`, `sequence_id`), preserve
+  null missingness, sum enrollment events, difference cumulative counters,
+  and take the latest point-in-time state. Do not switch the dashboard from
+  the weekly feed until consecutive daily coverage has been reconciled.
 - Populated by a scheduled n8n workflow intended for Thursdays 8:00 Mountain;
   the exported workflow stores no explicit timezone.
 - Rows are weekly cumulative lifetime counters per sequence, keyed by
@@ -479,7 +487,7 @@ Current source semantics:
 | Funnel spend | Date range plus dated events | Recalculate ratios from period totals |
 | Events | Lead cohort with undated activation labels | Do not claim the activation happened in the selected period |
 | LinkedIn Ads | Weekly additive flow on `snapshot_date` (week-ending Sunday) | Whole week assigned by its week-ending Sunday; never prorated across months |
-| Outreach | Weekly cumulative snapshots on `export_date` (Derived activity, exact Thursday baselines) | Dashboard migrated to Month/Quarter/Year with reset, coverage, and completeness suppression; Data/Compare tabs pending |
+| Outreach | Weekly cumulative snapshots remain live; daily snapshots use prior-closed Denver days with event / cumulative / point-in-time semantics | Daily ingestion is disabled pending migration and reconciliation; do not mix the two feeds or cut over the dashboard implicitly |
 | 6sense | Monthly point-in-time snapshot | Quarter and year use the latest snapshot, never a sum |
 | BDR quota | HPP cohort against annual quota | Period quota interpretation needs business approval |
 | Funnel Data Entry | Quarterly stored values | Do not create monthly editable cells |
