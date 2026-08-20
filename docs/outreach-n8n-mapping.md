@@ -1,5 +1,11 @@
 # Outreach sequences → Supabase: n8n source contract
 
+> The weekly contract below remains the live dashboard source. The separate
+> daily ingestion implementation, storage boundary, and controlled cutover
+> requirements are documented in
+> [`outreach-daily-reporting.md`](outreach-daily-reporting.md). Do not combine
+> weekly and daily rows in one calculation.
+
 Audited 2026-07-23 (Bite 3A) against a read-only exported workflow JSON and a
 read-only CSV export of the destination Sheet. **This audit does not prove the
 live database schema or the live n8n instance state**; it documents the
