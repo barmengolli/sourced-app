@@ -6,6 +6,10 @@ const MIGRATION = readFileSync(
   resolve(process.cwd(), 'migrations/2026-08-20_outreach_daily_ingestion.sql'),
   'utf8',
 );
+const ACTIVITY_MIGRATION = readFileSync(
+  resolve(process.cwd(), 'migrations/2026-08-24_outreach_daily_activity_inputs.sql'),
+  'utf8',
+);
 const SCHEMA = readFileSync(resolve(process.cwd(), 'SCHEMA.sql'), 'utf8');
 
 const metricColumns = [
@@ -98,6 +102,28 @@ describe('Outreach daily storage contract', () => {
       'OUTREACH APPLY REFUSED: extraction completeness checks failed',
     ]) {
       expect(SCHEMA).toContain(fragment);
+    }
+  });
+
+  it('adds an explicit basis without relabeling legacy cumulative history', () => {
+    for (const sql of [ACTIVITY_MIGRATION, SCHEMA]) {
+      expect(sql).toContain("activity_basis TEXT NOT NULL DEFAULT 'legacy_cumulative'");
+      expect(sql).toContain("activity_basis IN ('legacy_cumulative', 'daily_event')");
+      expect(sql).toContain("source_counts JSONB NOT NULL DEFAULT '{}'::JSONB");
+    }
+    expect(ACTIVITY_MIGRATION).toContain("WHERE snapshot_date = v_snapshot_date");
+    expect(ACTIVITY_MIGRATION).not.toMatch(/UPDATE public\.outreach_daily_snapshots\s+SET activity_basis = 'daily_event'\s*;/s);
+  });
+
+  it('provides a service-role-only daily-event wrapper around the atomic apply', () => {
+    for (const sql of [ACTIVITY_MIGRATION, SCHEMA]) {
+      expect(sql).toContain('CREATE OR REPLACE FUNCTION public.sourced_apply_outreach_daily_activity_v2');
+      expect(sql).toContain("p_run->>'activity_basis' <> 'daily_event'");
+      expect(sql).toContain("item->>'activity_basis' <> 'daily_event'");
+      expect(sql).toContain("p_run->'source_counts'");
+      expect(sql).toContain('public.sourced_apply_outreach_daily_snapshot(p_rows, p_run)');
+      expect(sql).toContain('FROM PUBLIC, anon, authenticated');
+      expect(sql).toContain('TO service_role');
     }
   });
 });

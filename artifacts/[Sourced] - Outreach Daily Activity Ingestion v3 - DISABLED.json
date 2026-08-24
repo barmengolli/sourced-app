@@ -1,0 +1,1287 @@
+{
+  "name": "[Sourced] - Outreach Daily Activity Ingestion v3 - DISABLED",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1320,
+        180
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000001",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 23,
+              "triggerAtMinute": 50
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1320,
+        -20
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000002",
+      "name": "Daily 11:50 PM America/Denver (DISABLED)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// CLOSED DAILY WINDOW.\n// Leave TARGET_DATE blank for the prior America/Denver calendar day.\n// Set YYYY-MM-DD only for a controlled manual backfill.\nconst TARGET_DATE = '';\nconst TIMEZONE = 'America/Denver';\n\nconst partsInZone = (instant) => Object.fromEntries(\n  new Intl.DateTimeFormat('en-US', {\n    timeZone: TIMEZONE,\n    year: 'numeric', month: '2-digit', day: '2-digit',\n    hour: '2-digit', minute: '2-digit', second: '2-digit',\n    hourCycle: 'h23',\n  }).formatToParts(instant)\n    .filter((part) => part.type !== 'literal')\n    .map((part) => [part.type, Number(part.value)]),\n);\n\nconst zonedMidnightUtc = (year, month, day) => {\n  const desired = Date.UTC(year, month - 1, day, 0, 0, 0, 0);\n  let candidate = desired;\n  for (let pass = 0; pass < 2; pass += 1) {\n    const seen = partsInZone(new Date(candidate));\n    const seenAsUtc = Date.UTC(\n      seen.year, seen.month - 1, seen.day, seen.hour, seen.minute, seen.second,\n    );\n    candidate = desired - (seenAsUtc - candidate);\n  }\n  return new Date(candidate);\n};\n\nlet targetDate = TARGET_DATE;\nif (!targetDate) {\n  const localNow = partsInZone(new Date());\n  const previous = new Date(\n    Date.UTC(localNow.year, localNow.month - 1, localNow.day) - 86400000,\n  );\n  targetDate = [\n    previous.getUTCFullYear(),\n    String(previous.getUTCMonth() + 1).padStart(2, '0'),\n    String(previous.getUTCDate()).padStart(2, '0'),\n  ].join('-');\n}\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(targetDate)) {\n  throw new Error('CONFIG FAILED: TARGET_DATE must be blank or YYYY-MM-DD.');\n}\n\nconst [year, month, day] = targetDate.split('-').map(Number);\nconst start = zonedMidnightUtc(year, month, day);\nconst nextMarker = new Date(Date.UTC(year, month - 1, day) + 86400000);\nconst next = zonedMidnightUtc(\n  nextMarker.getUTCFullYear(),\n  nextMarker.getUTCMonth() + 1,\n  nextMarker.getUTCDate(),\n);\n\nreturn [{ json: {\n  dry_run: true,\n  writes_attempted: 0,\n  activity_basis: 'daily_event',\n  timezone: TIMEZONE,\n  snapshot_date: targetDate,\n  window_start_utc: start.toISOString(),\n  window_end_utc: new Date(next.getTime() - 1).toISOString(),\n  collected_at: new Date().toISOString(),\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1080,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000003",
+      "name": "Prepare closed daily window"
+    },
+    {
+      "parameters": {
+        "url": "https://api.outreach.io/api/v2/sequences",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields[sequence]",
+              "value": "name,createdAt,sequenceStepCount,durationInDays,enabled"
+            },
+            {
+              "name": "count",
+              "value": "true"
+            },
+            {
+              "name": "page[size]",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/vnd.api+json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "paginationMode": "responseContainsNextURL",
+            "nextURL": "={{ (typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next || '' }}",
+            "paginationCompleteWhen": "other",
+            "completeExpression": "={{ !((typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next) }}",
+            "requestInterval": 350
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -840,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000004",
+      "name": "READ: all Outreach sequences"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsePage = (input) => {\n  let page = input;\n  if (typeof page === 'string') page = JSON.parse(page);\n  if (page && page.data && !Array.isArray(page.data) && Array.isArray(page.data.data)) {\n    page = page.data;\n  }\n  return page || {};\n};\nconst pages = $input.all().map((item) => parsePage(item.json));\nconst records = pages.flatMap((page) => Array.isArray(page.data) ? page.data : []);\nconst firstMeta = pages.find((page) => page.meta)?.meta;\nif (!firstMeta || !Number.isInteger(Number(firstMeta.count)) || firstMeta.count_truncated === true) {\n  throw new Error('EXTRACTION FAILED: exact untruncated source count is unavailable.');\n}\nif (records.length !== Number(firstMeta.count)) {\n  throw new Error('EXTRACTION FAILED: expected ' + firstMeta.count + ' records, received ' + records.length + '.');\n}\nconst ids = records.map((record) => String(record.id));\nif (new Set(ids).size !== ids.length) {\n  throw new Error('EXTRACTION FAILED: duplicate source id across pages.');\n}\nconst sequenceId = (record) => {\n  const data = record && record.relationships && record.relationships.sequence\n    ? record.relationships.sequence.data\n    : null;\n  return data && data.id !== undefined && data.id !== null ? String(data.id) : null;\n};\nconst config = $('Prepare closed daily window').first().json;\nconst numberOrNull = (value) => {\n  if (value === null || value === undefined || value === '') return null;\n  const parsed = Number(value);\n  return Number.isFinite(parsed) ? parsed : null;\n};\nconst denverDate = (value) => {\n  if (!value) return null;\n  const date = new Date(value);\n  if (Number.isNaN(date.getTime())) return null;\n  const parts = Object.fromEntries(\n    new Intl.DateTimeFormat('en-US', {\n      timeZone: config.timezone,\n      year: 'numeric', month: '2-digit', day: '2-digit',\n    }).formatToParts(date)\n      .filter((part) => part.type !== 'literal')\n      .map((part) => [part.type, part.value]),\n  );\n  return parts.year + '-' + parts.month + '-' + parts.day;\n};\nconst rows = records.map((record) => {\n  const attributes = record.attributes || {};\n  return {\n    ...config,\n    expected_sequence_count: Number(firstMeta.count),\n    sequence_id: Number(record.id),\n    sequence_name: attributes.name || '',\n    sequence_created_at: attributes.createdAt || null,\n    sequence_created_date: denverDate(attributes.createdAt),\n    enabled: Boolean(attributes.enabled),\n    step_count: numberOrNull(attributes.sequenceStepCount),\n    duration_days: numberOrNull(attributes.durationInDays),\n  };\n});\nreturn [{ json: {\n  ...config,\n  _private_rows: rows,\n  _private_source_counts: { sequences: records.length },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000005",
+      "name": "Normalize complete sequences"
+    },
+    {
+      "parameters": {
+        "url": "https://api.outreach.io/api/v2/sequenceStates",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "newFilterSyntax",
+              "value": "true"
+            },
+            {
+              "name": "filter[createdAt][gte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_start_utc }}"
+            },
+            {
+              "name": "filter[createdAt][lte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_end_utc }}"
+            },
+            {
+              "name": "fields[sequenceState]",
+              "value": "createdAt,sequence"
+            },
+            {
+              "name": "count",
+              "value": "true"
+            },
+            {
+              "name": "page[size]",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/vnd.api+json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "paginationMode": "responseContainsNextURL",
+            "nextURL": "={{ (typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next || '' }}",
+            "paginationCompleteWhen": "other",
+            "completeExpression": "={{ !((typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next) }}",
+            "requestInterval": 350
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -360,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000006",
+      "name": "READ: daily sequence-state enrollments"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsePage = (input) => {\n  let page = input;\n  if (typeof page === 'string') page = JSON.parse(page);\n  if (page && page.data && !Array.isArray(page.data) && Array.isArray(page.data.data)) {\n    page = page.data;\n  }\n  return page || {};\n};\nconst pages = $input.all().map((item) => parsePage(item.json));\nconst records = pages.flatMap((page) => Array.isArray(page.data) ? page.data : []);\nconst firstMeta = pages.find((page) => page.meta)?.meta;\nif (!firstMeta || !Number.isInteger(Number(firstMeta.count)) || firstMeta.count_truncated === true) {\n  throw new Error('EXTRACTION FAILED: exact untruncated source count is unavailable.');\n}\nif (records.length !== Number(firstMeta.count)) {\n  throw new Error('EXTRACTION FAILED: expected ' + firstMeta.count + ' records, received ' + records.length + '.');\n}\nconst ids = records.map((record) => String(record.id));\nif (new Set(ids).size !== ids.length) {\n  throw new Error('EXTRACTION FAILED: duplicate source id across pages.');\n}\nconst sequenceId = (record) => {\n  const data = record && record.relationships && record.relationships.sequence\n    ? record.relationships.sequence.data\n    : null;\n  return data && data.id !== undefined && data.id !== null ? String(data.id) : null;\n};\nconst prior = $('Normalize complete sequences').first().json;\nconst counts = new Map();\nfor (const record of records) {\n  const id = sequenceId(record);\n  if (id) counts.set(id, (counts.get(id) || 0) + 1);\n}\nconst rows = prior._private_rows.map((row) => ({\n  ...row,\n  prospects_enrolled: counts.get(String(row.sequence_id)) || 0,\n}));\nreturn [{ json: {\n  ...prior,\n  _private_rows: rows,\n  _private_source_counts: {\n    ...prior._private_source_counts,\n    daily_sequence_states: records.length,\n  },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -120,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000007",
+      "name": "Collect daily enrollments"
+    },
+    {
+      "parameters": {
+        "url": "https://api.outreach.io/api/v2/sequenceStates",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filter[state]",
+              "value": "active"
+            },
+            {
+              "name": "fields[sequenceState]",
+              "value": "state,sequence"
+            },
+            {
+              "name": "count",
+              "value": "true"
+            },
+            {
+              "name": "page[size]",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/vnd.api+json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "paginationMode": "responseContainsNextURL",
+            "nextURL": "={{ (typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next || '' }}",
+            "paginationCompleteWhen": "other",
+            "completeExpression": "={{ !((typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next) }}",
+            "requestInterval": 350
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        120,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000008",
+      "name": "READ: active sequence-state snapshot"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsePage = (input) => {\n  let page = input;\n  if (typeof page === 'string') page = JSON.parse(page);\n  if (page && page.data && !Array.isArray(page.data) && Array.isArray(page.data.data)) {\n    page = page.data;\n  }\n  return page || {};\n};\nconst pages = $input.all().map((item) => parsePage(item.json));\nconst records = pages.flatMap((page) => Array.isArray(page.data) ? page.data : []);\nconst firstMeta = pages.find((page) => page.meta)?.meta;\nif (!firstMeta || !Number.isInteger(Number(firstMeta.count)) || firstMeta.count_truncated === true) {\n  throw new Error('EXTRACTION FAILED: exact untruncated source count is unavailable.');\n}\nif (records.length !== Number(firstMeta.count)) {\n  throw new Error('EXTRACTION FAILED: expected ' + firstMeta.count + ' records, received ' + records.length + '.');\n}\nconst ids = records.map((record) => String(record.id));\nif (new Set(ids).size !== ids.length) {\n  throw new Error('EXTRACTION FAILED: duplicate source id across pages.');\n}\nconst sequenceId = (record) => {\n  const data = record && record.relationships && record.relationships.sequence\n    ? record.relationships.sequence.data\n    : null;\n  return data && data.id !== undefined && data.id !== null ? String(data.id) : null;\n};\nconst prior = $('Collect daily enrollments').first().json;\nconst counts = new Map();\nfor (const record of records) {\n  const id = sequenceId(record);\n  if (id) counts.set(id, (counts.get(id) || 0) + 1);\n}\nconst rows = prior._private_rows.map((row) => ({\n  ...row,\n  prospects_active: counts.get(String(row.sequence_id)) || 0,\n}));\nreturn [{ json: {\n  ...prior,\n  _private_rows: rows,\n  _private_source_counts: {\n    ...prior._private_source_counts,\n    active_sequence_states: records.length,\n  },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000009",
+      "name": "Collect active prospect snapshot"
+    },
+    {
+      "parameters": {
+        "url": "https://api.outreach.io/api/v2/mailings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "newFilterSyntax",
+              "value": "true"
+            },
+            {
+              "name": "filter[updatedAt][gte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_start_utc }}"
+            },
+            {
+              "name": "filter[updatedAt][lte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_end_utc }}"
+            },
+            {
+              "name": "fields[mailing]",
+              "value": "deliveredAt,bouncedAt,openedAt,clickedAt,repliedAt,unsubscribedAt,state,stateChangedAt,updatedAt,sequence"
+            },
+            {
+              "name": "count",
+              "value": "true"
+            },
+            {
+              "name": "page[size]",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/vnd.api+json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "paginationMode": "responseContainsNextURL",
+            "nextURL": "={{ (typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next || '' }}",
+            "paginationCompleteWhen": "other",
+            "completeExpression": "={{ !((typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next) }}",
+            "requestInterval": 350
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        600,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000010",
+      "name": "READ: mailings updated in daily window"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsePage = (input) => {\n  let page = input;\n  if (typeof page === 'string') page = JSON.parse(page);\n  if (page && page.data && !Array.isArray(page.data) && Array.isArray(page.data.data)) {\n    page = page.data;\n  }\n  return page || {};\n};\nconst pages = $input.all().map((item) => parsePage(item.json));\nconst records = pages.flatMap((page) => Array.isArray(page.data) ? page.data : []);\nconst firstMeta = pages.find((page) => page.meta)?.meta;\nif (!firstMeta || !Number.isInteger(Number(firstMeta.count)) || firstMeta.count_truncated === true) {\n  throw new Error('EXTRACTION FAILED: exact untruncated source count is unavailable.');\n}\nif (records.length !== Number(firstMeta.count)) {\n  throw new Error('EXTRACTION FAILED: expected ' + firstMeta.count + ' records, received ' + records.length + '.');\n}\nconst ids = records.map((record) => String(record.id));\nif (new Set(ids).size !== ids.length) {\n  throw new Error('EXTRACTION FAILED: duplicate source id across pages.');\n}\nconst sequenceId = (record) => {\n  const data = record && record.relationships && record.relationships.sequence\n    ? record.relationships.sequence.data\n    : null;\n  return data && data.id !== undefined && data.id !== null ? String(data.id) : null;\n};\nconst prior = $('Collect active prospect snapshot').first().json;\nconst start = Date.parse(prior.window_start_utc);\nconst end = Date.parse(prior.window_end_utc);\nconst inWindow = (value) => {\n  const timestamp = Date.parse(value || '');\n  return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;\n};\nconst empty = () => ({\n  total_sent: 0, delivered: 0, bounced: 0, failed: 0,\n  opened: 0, clicked: 0, replied: 0, opted_out: 0,\n});\nconst counts = new Map();\nfor (const record of records) {\n  const id = sequenceId(record);\n  if (!id) continue;\n  const attributes = record.attributes || {};\n  const row = counts.get(id) || empty();\n  const delivered = inWindow(attributes.deliveredAt);\n  const bounced = inWindow(attributes.bouncedAt);\n  const failed = String(attributes.state || '').toLowerCase().includes('fail')\n    && inWindow(attributes.stateChangedAt || attributes.updatedAt);\n  if (delivered || bounced || failed) row.total_sent += 1;\n  if (delivered) row.delivered += 1;\n  if (bounced) row.bounced += 1;\n  if (failed) row.failed += 1;\n  if (inWindow(attributes.openedAt)) row.opened += 1;\n  if (inWindow(attributes.clickedAt)) row.clicked += 1;\n  if (inWindow(attributes.repliedAt)) row.replied += 1;\n  if (inWindow(attributes.unsubscribedAt)) row.opted_out += 1;\n  counts.set(id, row);\n}\nconst rows = prior._private_rows.map((row) => ({\n  ...row,\n  ...(counts.get(String(row.sequence_id)) || empty()),\n  positive_replies: null,\n  neutral_replies: null,\n  negative_replies: null,\n}));\nreturn [{ json: {\n  ...prior,\n  _private_rows: rows,\n  _private_source_counts: {\n    ...prior._private_source_counts,\n    mailings_updated_in_window: records.length,\n  },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000011",
+      "name": "Collect daily mailing activity"
+    },
+    {
+      "parameters": {
+        "url": "https://api.outreach.io/api/v2/calls",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "newFilterSyntax",
+              "value": "true"
+            },
+            {
+              "name": "filter[completedAt][gte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_start_utc }}"
+            },
+            {
+              "name": "filter[completedAt][lte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_end_utc }}"
+            },
+            {
+              "name": "fields[call]",
+              "value": "completedAt,direction,sequence"
+            },
+            {
+              "name": "count",
+              "value": "true"
+            },
+            {
+              "name": "page[size]",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/vnd.api+json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "paginationMode": "responseContainsNextURL",
+            "nextURL": "={{ (typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next || '' }}",
+            "paginationCompleteWhen": "other",
+            "completeExpression": "={{ !((typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next) }}",
+            "requestInterval": 350
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1080,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000012",
+      "name": "READ: calls completed in daily window"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsePage = (input) => {\n  let page = input;\n  if (typeof page === 'string') page = JSON.parse(page);\n  if (page && page.data && !Array.isArray(page.data) && Array.isArray(page.data.data)) {\n    page = page.data;\n  }\n  return page || {};\n};\nconst pages = $input.all().map((item) => parsePage(item.json));\nconst records = pages.flatMap((page) => Array.isArray(page.data) ? page.data : []);\nconst firstMeta = pages.find((page) => page.meta)?.meta;\nif (!firstMeta || !Number.isInteger(Number(firstMeta.count)) || firstMeta.count_truncated === true) {\n  throw new Error('EXTRACTION FAILED: exact untruncated source count is unavailable.');\n}\nif (records.length !== Number(firstMeta.count)) {\n  throw new Error('EXTRACTION FAILED: expected ' + firstMeta.count + ' records, received ' + records.length + '.');\n}\nconst ids = records.map((record) => String(record.id));\nif (new Set(ids).size !== ids.length) {\n  throw new Error('EXTRACTION FAILED: duplicate source id across pages.');\n}\nconst sequenceId = (record) => {\n  const data = record && record.relationships && record.relationships.sequence\n    ? record.relationships.sequence.data\n    : null;\n  return data && data.id !== undefined && data.id !== null ? String(data.id) : null;\n};\nconst prior = $('Collect daily mailing activity').first().json;\nconst start = Date.parse(prior.window_start_utc);\nconst end = Date.parse(prior.window_end_utc);\nconst inWindow = (value) => {\n  const timestamp = Date.parse(value || '');\n  return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;\n};\nconst counts = new Map();\nfor (const record of records) {\n  const attributes = record.attributes || {};\n  if (!inWindow(attributes.completedAt)) continue;\n  if (String(attributes.direction || '').toLowerCase() !== 'outbound') continue;\n  const id = sequenceId(record);\n  if (id) counts.set(id, (counts.get(id) || 0) + 1);\n}\nconst rows = prior._private_rows.map((row) => ({\n  ...row,\n  outbound_calls: counts.get(String(row.sequence_id)) || 0,\n}));\nreturn [{ json: {\n  ...prior,\n  _private_rows: rows,\n  _private_source_counts: {\n    ...prior._private_source_counts,\n    calls_completed_in_window: records.length,\n  },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000013",
+      "name": "Collect daily outbound calls"
+    },
+    {
+      "parameters": {
+        "url": "https://api.outreach.io/api/v2/tasks",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "newFilterSyntax",
+              "value": "true"
+            },
+            {
+              "name": "filter[completedAt][gte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_start_utc }}"
+            },
+            {
+              "name": "filter[completedAt][lte]",
+              "value": "={{ $('Prepare closed daily window').first().json.window_end_utc }}"
+            },
+            {
+              "name": "filter[state]",
+              "value": "complete"
+            },
+            {
+              "name": "fields[task]",
+              "value": "completedAt,completed,state,taskType,sequence"
+            },
+            {
+              "name": "count",
+              "value": "true"
+            },
+            {
+              "name": "page[size]",
+              "value": "200"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/vnd.api+json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "paginationMode": "responseContainsNextURL",
+            "nextURL": "={{ (typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next || '' }}",
+            "paginationCompleteWhen": "other",
+            "completeExpression": "={{ !((typeof $response.body === 'string' ? JSON.parse($response.body) : $response.body).links?.next) }}",
+            "requestInterval": 350
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1560,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000014",
+      "name": "READ: LinkedIn tasks completed in daily window"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsePage = (input) => {\n  let page = input;\n  if (typeof page === 'string') page = JSON.parse(page);\n  if (page && page.data && !Array.isArray(page.data) && Array.isArray(page.data.data)) {\n    page = page.data;\n  }\n  return page || {};\n};\nconst pages = $input.all().map((item) => parsePage(item.json));\nconst records = pages.flatMap((page) => Array.isArray(page.data) ? page.data : []);\nconst firstMeta = pages.find((page) => page.meta)?.meta;\nif (!firstMeta || !Number.isInteger(Number(firstMeta.count)) || firstMeta.count_truncated === true) {\n  throw new Error('EXTRACTION FAILED: exact untruncated source count is unavailable.');\n}\nif (records.length !== Number(firstMeta.count)) {\n  throw new Error('EXTRACTION FAILED: expected ' + firstMeta.count + ' records, received ' + records.length + '.');\n}\nconst ids = records.map((record) => String(record.id));\nif (new Set(ids).size !== ids.length) {\n  throw new Error('EXTRACTION FAILED: duplicate source id across pages.');\n}\nconst sequenceId = (record) => {\n  const data = record && record.relationships && record.relationships.sequence\n    ? record.relationships.sequence.data\n    : null;\n  return data && data.id !== undefined && data.id !== null ? String(data.id) : null;\n};\nconst prior = $('Collect daily outbound calls').first().json;\nconst start = Date.parse(prior.window_start_utc);\nconst end = Date.parse(prior.window_end_utc);\nconst linkedInTypes = new Set([\n  'sequence_step_linkedin_interact_with_post',\n  'sequence_step_linkedin_other',\n  'sequence_step_linkedin_send_connection_request',\n  'sequence_step_linkedin_send_message',\n  'sequence_step_linkedin_view_profile',\n]);\nconst inWindow = (value) => {\n  const timestamp = Date.parse(value || '');\n  return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;\n};\nconst counts = new Map();\nfor (const record of records) {\n  const attributes = record.attributes || {};\n  const complete = attributes.completed === true\n    || ['complete', 'completed'].includes(String(attributes.state || '').toLowerCase());\n  if (!complete || !inWindow(attributes.completedAt) || !linkedInTypes.has(attributes.taskType)) {\n    continue;\n  }\n  const id = sequenceId(record);\n  if (id) counts.set(id, (counts.get(id) || 0) + 1);\n}\nconst rows = prior._private_rows.map((row) => ({\n  ...row,\n  linkedin_tasks_completed: counts.get(String(row.sequence_id)) || 0,\n}));\nreturn [{ json: {\n  ...prior,\n  _private_rows: rows,\n  _private_source_counts: {\n    ...prior._private_source_counts,\n    tasks_completed_in_window: records.length,\n  },\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000015",
+      "name": "Collect daily LinkedIn tasks"
+    },
+    {
+      "parameters": {
+        "jsCode": "const collected = $input.first().json;\nconst rows = collected._private_rows;\nif (!Array.isArray(rows) || rows.length === 0) {\n  throw new Error('DAILY EXTRACTION FAILED: zero sequence rows.');\n}\nconst expected = rows[0].expected_sequence_count;\nif (!Number.isInteger(expected) || rows.length !== expected) {\n  throw new Error('DAILY EXTRACTION FAILED: expected ' + expected + ' rows, assembled ' + rows.length + '.');\n}\nconst keys = rows.map((row) => row.snapshot_date + '|' + row.sequence_id);\nif (new Set(keys).size !== rows.length) {\n  throw new Error('DAILY EXTRACTION FAILED: duplicate snapshot_date + sequence_id key.');\n}\nconst required = [\n  'prospects_enrolled', 'prospects_active', 'total_sent', 'delivered', 'bounced',\n  'failed', 'opened', 'clicked', 'replied', 'opted_out', 'outbound_calls',\n  'linkedin_tasks_completed',\n];\nfor (const row of rows) {\n  if (row.activity_basis !== 'daily_event') {\n    throw new Error('DAILY EXTRACTION FAILED: row is not daily_event activity.');\n  }\n  for (const metric of required) {\n    if (!Number.isInteger(row[metric]) || row[metric] < 0) {\n      throw new Error('DAILY EXTRACTION FAILED: invalid ' + metric + ' for sequence ' + row.sequence_id + '.');\n    }\n  }\n}\nreturn rows.map((row) => ({ json: {\n  ...row,\n  _private_source_counts: collected._private_source_counts,\n} }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2040,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000016",
+      "name": "PRIVATE: daily activity rows - DO NOT SHARE"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((item) => item.json);\nconst blankIfMissing = (value) => value === null || value === undefined ? '' : value;\nreturn rows.map((row) => ({ json: {\n  snapshot_key: row.snapshot_date + '|' + row.sequence_id,\n  snapshot_date: row.snapshot_date,\n  activity_basis: row.activity_basis,\n  timezone: row.timezone,\n  window_start_utc: row.window_start_utc,\n  window_end_utc: row.window_end_utc,\n  collected_at: row.collected_at,\n  source_name: 'outreach',\n  sequence_id: row.sequence_id,\n  sequence_name: row.sequence_name,\n  sequence_created_at: blankIfMissing(row.sequence_created_at),\n  sequence_created_date: blankIfMissing(row.sequence_created_date),\n  enabled: row.enabled,\n  step_count: blankIfMissing(row.step_count),\n  duration_days: blankIfMissing(row.duration_days),\n  prospects_enrolled: row.prospects_enrolled,\n  prospects_active: row.prospects_active,\n  total_sent: row.total_sent,\n  delivered: row.delivered,\n  bounced: row.bounced,\n  failed: row.failed,\n  opened: row.opened,\n  clicked: row.clicked,\n  replied: row.replied,\n  positive_replies: blankIfMissing(row.positive_replies),\n  neutral_replies: blankIfMissing(row.neutral_replies),\n  negative_replies: blankIfMissing(row.negative_replies),\n  opted_out: row.opted_out,\n  outbound_calls: row.outbound_calls,\n  linkedin_tasks_completed: row.linkedin_tasks_completed,\n  expected_sequence_count: row.expected_sequence_count,\n  pagination_complete: true,\n  natural_keys_unique: true,\n} }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2280,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000017",
+      "name": "Prepare Google Sheets QA rows"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1OT2q0JF0mfvOFkSfHWyBUJKTt68fDzHlrSew2IWzvEo",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Daily Sequence Activity v3",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "snapshot_key": "={{ $json.snapshot_key }}",
+            "snapshot_date": "={{ $json.snapshot_date }}",
+            "activity_basis": "={{ $json.activity_basis }}",
+            "timezone": "={{ $json.timezone }}",
+            "window_start_utc": "={{ $json.window_start_utc }}",
+            "window_end_utc": "={{ $json.window_end_utc }}",
+            "collected_at": "={{ $json.collected_at }}",
+            "source_name": "={{ $json.source_name }}",
+            "sequence_id": "={{ $json.sequence_id }}",
+            "sequence_name": "={{ $json.sequence_name }}",
+            "sequence_created_at": "={{ $json.sequence_created_at }}",
+            "sequence_created_date": "={{ $json.sequence_created_date }}",
+            "enabled": "={{ $json.enabled }}",
+            "step_count": "={{ $json.step_count }}",
+            "duration_days": "={{ $json.duration_days }}",
+            "prospects_enrolled": "={{ $json.prospects_enrolled }}",
+            "prospects_active": "={{ $json.prospects_active }}",
+            "total_sent": "={{ $json.total_sent }}",
+            "delivered": "={{ $json.delivered }}",
+            "bounced": "={{ $json.bounced }}",
+            "failed": "={{ $json.failed }}",
+            "opened": "={{ $json.opened }}",
+            "clicked": "={{ $json.clicked }}",
+            "replied": "={{ $json.replied }}",
+            "positive_replies": "={{ $json.positive_replies }}",
+            "neutral_replies": "={{ $json.neutral_replies }}",
+            "negative_replies": "={{ $json.negative_replies }}",
+            "opted_out": "={{ $json.opted_out }}",
+            "outbound_calls": "={{ $json.outbound_calls }}",
+            "linkedin_tasks_completed": "={{ $json.linkedin_tasks_completed }}",
+            "expected_sequence_count": "={{ $json.expected_sequence_count }}",
+            "pagination_complete": "={{ $json.pagination_complete }}",
+            "natural_keys_unique": "={{ $json.natural_keys_unique }}"
+          },
+          "matchingColumns": [
+            "snapshot_key"
+          ],
+          "schema": [
+            {
+              "id": "snapshot_key",
+              "displayName": "snapshot_key",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "snapshot_date",
+              "displayName": "snapshot_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "activity_basis",
+              "displayName": "activity_basis",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "timezone",
+              "displayName": "timezone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "window_start_utc",
+              "displayName": "window_start_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "window_end_utc",
+              "displayName": "window_end_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "collected_at",
+              "displayName": "collected_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source_name",
+              "displayName": "source_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sequence_id",
+              "displayName": "sequence_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sequence_name",
+              "displayName": "sequence_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sequence_created_at",
+              "displayName": "sequence_created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "sequence_created_date",
+              "displayName": "sequence_created_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "enabled",
+              "displayName": "enabled",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "step_count",
+              "displayName": "step_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "duration_days",
+              "displayName": "duration_days",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "prospects_enrolled",
+              "displayName": "prospects_enrolled",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "prospects_active",
+              "displayName": "prospects_active",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "total_sent",
+              "displayName": "total_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "delivered",
+              "displayName": "delivered",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "bounced",
+              "displayName": "bounced",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "failed",
+              "displayName": "failed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "opened",
+              "displayName": "opened",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "clicked",
+              "displayName": "clicked",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "replied",
+              "displayName": "replied",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "positive_replies",
+              "displayName": "positive_replies",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "neutral_replies",
+              "displayName": "neutral_replies",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "negative_replies",
+              "displayName": "negative_replies",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "opted_out",
+              "displayName": "opted_out",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "outbound_calls",
+              "displayName": "outbound_calls",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "linkedin_tasks_completed",
+              "displayName": "linkedin_tasks_completed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "expected_sequence_count",
+              "displayName": "expected_sequence_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "pagination_complete",
+              "displayName": "pagination_complete",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "natural_keys_unique",
+              "displayName": "natural_keys_unique",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2520,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000018",
+      "name": "QA WRITE: append or update daily activity"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ONLY ORDINARY CONFIGURATION NODE.\nconst MODE = 'dry_run';\nconst CONFIRM = '';\nconst REQUIRED_CONFIRMATION = 'APPLY APPROVED OUTREACH DAILY ACTIVITY TO SOURCED';\nconst SUPABASE_PROJECT_URL = 'https://rsyjxtuatrwtqajjkgvd.supabase.co';\n\nif (!['dry_run', 'apply'].includes(MODE)) {\n  throw new Error('CONFIG FAILED: MODE must be dry_run or apply.');\n}\nconst validProjectUrl = SUPABASE_PROJECT_URL.startsWith('https://')\n  && /^[a-z0-9-]+\\.supabase\\.co$/.test(SUPABASE_PROJECT_URL.slice('https://'.length));\nif (!validProjectUrl) {\n  throw new Error('CONFIG FAILED: invalid Supabase project URL; never paste a key here.');\n}\n\nconst rows = $('PRIVATE: daily activity rows - DO NOT SHARE').all().map((item) => item.json);\nconst sheetResults = $input.all();\nif (sheetResults.length !== rows.length) {\n  throw new Error('QA WRITE FAILED: Google Sheets returned ' + sheetResults.length + ' row(s) for ' + rows.length + ' submitted row(s).');\n}\nconst first = rows[0];\nconst paginationComplete = rows.length === first.expected_sequence_count;\nconst naturalKeysUnique = new Set(\n  rows.map((row) => row.snapshot_date + '|' + row.sequence_id),\n).size === rows.length;\nif (!paginationComplete || !naturalKeysUnique) {\n  throw new Error('PACKAGE FAILED: extraction completeness or natural-key validation failed.');\n}\nconst sourceCounts = first._private_source_counts;\nif (!sourceCounts || typeof sourceCounts !== 'object' || Array.isArray(sourceCounts)) {\n  throw new Error('PACKAGE FAILED: source counts are unavailable.');\n}\nconst nullableCounters = ['positive_replies', 'neutral_replies', 'negative_replies'];\nconst missingByMetric = Object.fromEntries(nullableCounters.map((metric) => [\n  metric,\n  rows.filter((row) => row[metric] === null || row[metric] === undefined).length,\n]));\nconst privateRows = rows.map(({ _private_source_counts, ...row }) => ({\n  ...row,\n  source_name: 'outreach',\n  pagination_complete: true,\n  natural_keys_unique: true,\n}));\nconst privateRun = {\n  status: 'complete',\n  activity_basis: 'daily_event',\n  snapshot_date: first.snapshot_date,\n  timezone: first.timezone,\n  window_start_utc: first.window_start_utc,\n  window_end_utc: first.window_end_utc,\n  collected_at: first.collected_at,\n  expected_sequences: first.expected_sequence_count,\n  observed_sequences: rows.length,\n  enrollments_observed: rows.reduce((sum, row) => sum + row.prospects_enrolled, 0),\n  active_sequence_states_observed: rows.reduce((sum, row) => sum + row.prospects_active, 0),\n  missing_measurements_by_metric: missingByMetric,\n  source_counts: sourceCounts,\n  pagination_complete: paginationComplete,\n  natural_keys_unique: naturalKeysUnique,\n};\nconst applyAuthorized = MODE === 'apply' && CONFIRM === REQUIRED_CONFIRMATION;\nreturn [{ json: {\n  status: 'QA_SHEET_COMPLETE',\n  dry_run: MODE === 'dry_run',\n  mode: MODE,\n  apply_authorized: applyAuthorized,\n  production_writes_attempted: 0,\n  google_sheet_rows_written_or_updated: rows.length,\n  google_sheet_tab: 'Daily Sequence Activity v3',\n  dedupe_key: 'snapshot_date + sequence_id',\n  activity_basis: 'daily_event',\n  timezone: first.timezone,\n  snapshot_date: first.snapshot_date,\n  window_start_utc: first.window_start_utc,\n  window_end_utc: first.window_end_utc,\n  sequences_expected: first.expected_sequence_count,\n  sequences_observed: rows.length,\n  enrollments_observed: privateRun.enrollments_observed,\n  active_sequence_states_observed: privateRun.active_sequence_states_observed,\n  missing_measurements_by_metric: missingByMetric,\n  source_counts: sourceCounts,\n  pagination_complete: paginationComplete,\n  natural_keys_unique: naturalKeysUnique,\n  _private_supabase_url: SUPABASE_PROJECT_URL,\n  _private_confirmation: CONFIRM,\n  _private_required_confirmation: REQUIRED_CONFIRMATION,\n  _private_rows: privateRows,\n  _private_run: privateRun,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2760,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000019",
+      "name": "PACKAGE: QA result and closed apply gate"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "apply-authorized",
+              "leftValue": "={{ $json.apply_authorized }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3000,
+        80
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000020",
+      "name": "ROUTE: dry run or apply"
+    },
+    {
+      "parameters": {
+        "jsCode": "const packaged = $input.first().json;\nif (packaged.mode !== 'dry_run' || packaged.apply_authorized !== false) {\n  throw new Error('DRY RUN FAILED: apply authorization was not closed.');\n}\nconst {\n  _private_supabase_url, _private_confirmation, _private_required_confirmation,\n  _private_rows, _private_run, ...summary\n} = packaged;\nreturn [{ json: {\n  ...summary,\n  status: 'DRY_RUN_COMPLETE',\n  dry_run: true,\n  apply_payload_created: false,\n  production_writes_attempted: 0,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        180
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000021",
+      "name": "DRY RUN: aggregate summary"
+    },
+    {
+      "parameters": {
+        "jsCode": "const packaged = $input.first().json;\nif (packaged.mode !== 'apply'\n    || packaged.apply_authorized !== true\n    || packaged._private_confirmation !== packaged._private_required_confirmation\n    || packaged.activity_basis !== 'daily_event'\n    || packaged.pagination_complete !== true\n    || packaged.natural_keys_unique !== true\n    || packaged.sequences_expected !== packaged.sequences_observed\n    || !Array.isArray(packaged._private_rows)\n    || packaged._private_rows.length !== packaged.sequences_expected\n    || !packaged._private_rows.every((row) => row.activity_basis === 'daily_event')\n    || !packaged._private_run\n    || packaged._private_run.activity_basis !== 'daily_event') {\n  throw new Error('APPLY GATE CLOSED: exact confirmation and complete daily-event extraction are required.');\n}\nreturn [{ json: {\n  p_rows: packaged._private_rows,\n  p_run: packaged._private_run,\n  _private_supabase_url: packaged._private_supabase_url,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3240,
+        -40
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000022",
+      "name": "APPLY GATE: exact confirmation"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json._private_supabase_url + '/rest/v1/rpc/sourced_apply_outreach_daily_activity_v2' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_rows: $json.p_rows, p_run: $json.p_run }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3480,
+        -40
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000023",
+      "name": "APPLY: daily Outreach activity"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nconst request = $('APPLY GATE: exact confirmation').first().json;\nif (result.status !== 'applied'\n    || result.activity_basis !== 'daily_event'\n    || result.snapshot_date !== request.p_run.snapshot_date\n    || Number(result.sequences_applied) !== request.p_run.observed_sequences) {\n  throw new Error('APPLY FAILED: database result did not reconcile to the packaged daily activity.');\n}\nreturn [{ json: {\n  status: 'APPLY_COMPLETE',\n  dry_run: false,\n  production_writes_attempted: 1,\n  snapshot_date: result.snapshot_date,\n  activity_basis: result.activity_basis,\n  sequences_applied: Number(result.sequences_applied),\n  dedupe_key: result.natural_key,\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3720,
+        -40
+      ],
+      "id": "ac1d9a63-b393-41c0-a1d9-300000000024",
+      "name": "VERIFY: apply result"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare closed daily window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 11:50 PM America/Denver (DISABLED)": {
+      "main": [
+        [
+          {
+            "node": "Prepare closed daily window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare closed daily window": {
+      "main": [
+        [
+          {
+            "node": "READ: all Outreach sequences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ: all Outreach sequences": {
+      "main": [
+        [
+          {
+            "node": "Normalize complete sequences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize complete sequences": {
+      "main": [
+        [
+          {
+            "node": "READ: daily sequence-state enrollments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ: daily sequence-state enrollments": {
+      "main": [
+        [
+          {
+            "node": "Collect daily enrollments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect daily enrollments": {
+      "main": [
+        [
+          {
+            "node": "READ: active sequence-state snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ: active sequence-state snapshot": {
+      "main": [
+        [
+          {
+            "node": "Collect active prospect snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect active prospect snapshot": {
+      "main": [
+        [
+          {
+            "node": "READ: mailings updated in daily window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ: mailings updated in daily window": {
+      "main": [
+        [
+          {
+            "node": "Collect daily mailing activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect daily mailing activity": {
+      "main": [
+        [
+          {
+            "node": "READ: calls completed in daily window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ: calls completed in daily window": {
+      "main": [
+        [
+          {
+            "node": "Collect daily outbound calls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect daily outbound calls": {
+      "main": [
+        [
+          {
+            "node": "READ: LinkedIn tasks completed in daily window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "READ: LinkedIn tasks completed in daily window": {
+      "main": [
+        [
+          {
+            "node": "Collect daily LinkedIn tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect daily LinkedIn tasks": {
+      "main": [
+        [
+          {
+            "node": "PRIVATE: daily activity rows - DO NOT SHARE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PRIVATE: daily activity rows - DO NOT SHARE": {
+      "main": [
+        [
+          {
+            "node": "Prepare Google Sheets QA rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Google Sheets QA rows": {
+      "main": [
+        [
+          {
+            "node": "QA WRITE: append or update daily activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA WRITE: append or update daily activity": {
+      "main": [
+        [
+          {
+            "node": "PACKAGE: QA result and closed apply gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PACKAGE: QA result and closed apply gate": {
+      "main": [
+        [
+          {
+            "node": "ROUTE: dry run or apply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE: dry run or apply": {
+      "main": [
+        [
+          {
+            "node": "APPLY GATE: exact confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DRY RUN: aggregate summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "APPLY GATE: exact confirmation": {
+      "main": [
+        [
+          {
+            "node": "APPLY: daily Outreach activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "APPLY: daily Outreach activity": {
+      "main": [
+        [
+          {
+            "node": "VERIFY: apply result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Denver",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

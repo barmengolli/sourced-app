@@ -20,6 +20,7 @@ function row(
   snapshot_date: string,
   sequence_id: number,
   options: {
+    basis?: 'legacy_cumulative' | 'daily_event';
     created?: string | null;
     enrolled?: number | null;
     active?: number | null;
@@ -32,6 +33,7 @@ function row(
     collected_at: options.collected ?? `${snapshot_date}T06:05:00Z`,
     sequence_id,
     sequence_name: `Sequence ${sequence_id}`,
+    activity_basis: options.basis,
     sequence_created_date: options.created ?? '2026-01-01',
     enabled: true,
     prospects_enrolled: options.enrolled ?? 0,
@@ -52,6 +54,67 @@ function run(snapshot_date: string, overrides: Partial<OutreachDailyRun> = {}): 
 }
 
 describe('daily Outreach period contract', () => {
+  it('sums v3 dated activity without requiring a cumulative baseline', () => {
+    const data = dedupeDailySnapshots([
+      row('2026-08-10', 1, {
+        basis: 'daily_event',
+        counters: { delivered: 40, outbound_calls: 5 },
+      }),
+      row('2026-08-11', 1, {
+        basis: 'daily_event',
+        counters: { delivered: 30, outbound_calls: 2 },
+      }),
+    ]);
+
+    expect(sequenceDailyPeriodActivity(data, 1, 'delivered', august)).toEqual({
+      state: 'present',
+      value: 70,
+      complete: true,
+      issues: [],
+    });
+    expect(sequenceDailyPeriodActivity(data, 1, 'outbound_calls', august)).toEqual({
+      state: 'present',
+      value: 7,
+      complete: true,
+      issues: [],
+    });
+  });
+
+  it('does not subtract one dated activity day from another', () => {
+    const data = dedupeDailySnapshots([
+      row('2026-08-10', 1, {
+        basis: 'daily_event',
+        counters: { total_sent: 100 },
+      }),
+      row('2026-08-11', 1, {
+        basis: 'daily_event',
+        counters: { total_sent: 20 },
+      }),
+    ]);
+    expect(sequenceDailyPeriodActivity(data, 1, 'total_sent', august)).toEqual({
+      state: 'present',
+      value: 120,
+      complete: true,
+      issues: [],
+    });
+  });
+
+  it('marks a cutover period partial instead of mixing legacy and event math silently', () => {
+    const data = dedupeDailySnapshots([
+      row('2026-08-10', 1, { counters: { delivered: 1000 } }),
+      row('2026-08-11', 1, {
+        basis: 'daily_event',
+        counters: { delivered: 15 },
+      }),
+    ]);
+    expect(sequenceDailyPeriodActivity(data, 1, 'delivered', august)).toEqual({
+      state: 'present',
+      value: 15,
+      complete: false,
+      issues: ['mixed_activity_basis'],
+    });
+  });
+
   it('reports July 1,000 and August 1,500 without using sequence count in the formula', () => {
     const data = dedupeDailySnapshots([
       row('2026-06-30', 1, { counters: { total_sent: 0 } }),

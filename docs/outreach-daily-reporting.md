@@ -1,16 +1,16 @@
 # Outreach daily ingestion and reporting contract
 
-Status: implemented locally, inactive, and closed to production writes by
-default. The production migration is pending. The existing weekly Outreach
-workflow and dashboard source remain unchanged.
+Status: v3 implemented locally, inactive, and closed to production writes by
+default. Its compatibility migration is pending. Existing workflows and the
+live dashboard remain unchanged.
 
 ## Business rule
 
 For every `America/Denver` calendar month and Outreach sequence:
 
 - enrollment activity is the sum of prospects added during each day;
-- email, call, and LinkedIn activity is the last cumulative counter in the
-  period minus the last counter before the period;
+- v3 email, call, and LinkedIn activity is summed from dated activity records
+  captured inside each closed Denver day;
 - active prospects and sequence configuration are the latest known state at
   period end; and
 - rates are recomputed from the resulting period totals.
@@ -29,7 +29,7 @@ Examples locked by tests:
 
 The generated inactive workflow is:
 
-`artifacts/[Sourced] - Outreach Daily Ingestion v2 - DISABLED.json`
+`artifacts/[Sourced] - Outreach Daily Activity Ingestion v3 - DISABLED.json`
 
 It is scheduled for **11:50 PM America/Denver** and extracts the **prior fully
 closed Denver day**. This intentionally creates a one-day reporting lag: the
@@ -43,14 +43,15 @@ The workflow sequence is:
 
 1. Resolve the prior closed Denver day, including DST boundaries.
 2. Read every Outreach sequence with complete pagination and an exact count.
-3. Read that day's sequence-state enrollments for each sequence.
-4. Read current active prospects and cumulative email, call, and LinkedIn
-   counters.
-5. Validate row count and unique natural keys.
-6. Append or update `Daily Sequence Snapshots v2` in the approved QA Sheet.
-7. Package an aggregate-only result.
-8. Route to the dry-run terminal unless both apply confirmations are exact.
-9. In apply mode only, invoke the protected Supabase RPC and reconcile its
+3. Read that day's sequence-state enrollments with global pagination.
+4. Read the current active sequence-state snapshot.
+5. Read dated mailings, completed outbound calls, and completed LinkedIn tasks
+   with global pagination. Event timestamps are rechecked inside the workflow.
+6. Validate source pagination, row count, and unique natural keys.
+7. Append or update `Daily Sequence Activity v3` in the approved QA Sheet.
+8. Package an aggregate-only result.
+9. Route to the dry-run terminal unless both apply confirmations are exact.
+10. In apply mode only, invoke the protected Supabase RPC and reconcile its
    returned date and row count.
 
 ## Storage and write safety
@@ -66,6 +67,13 @@ The RPC refuses incomplete pagination, count mismatches, duplicate keys,
 mixed dates or timezones, and stored-day totals that differ from the run
 manifest. It is revoked from PUBLIC, anon, and authenticated roles.
 
+Migration `2026-08-24_outreach_daily_activity_inputs.sql` adds an explicit
+`activity_basis` and the v3 wrapper
+`sourced_apply_outreach_daily_activity_v2(jsonb,jsonb)`. Existing v2 rows keep
+the `legacy_cumulative` basis; v3 rows are stored as `daily_event`. Reporting
+may use both histories without pretending that the older cumulative rows were
+event-level measurements.
+
 The workflow ships with:
 
 ```js
@@ -77,7 +85,7 @@ An apply requires both:
 
 ```js
 const MODE = 'apply';
-const CONFIRM = 'APPLY APPROVED OUTREACH DAILY SNAPSHOT TO SOURCED';
+const CONFIRM = 'APPLY APPROVED OUTREACH DAILY ACTIVITY TO SOURCED';
 ```
 
 The apply gate rechecks the phrase and every completeness invariant. The
@@ -88,14 +96,17 @@ Supabase credential is selected in n8n; no key is embedded in the workflow.
 1. Merge the code change.
 2. Apply the pending migration manually and verify the RPC privileges.
 3. Import the generated workflow and leave it inactive.
-4. Attach the Outreach OAuth credential to the five `READ:` nodes, the Google
+4. Create the `Daily Sequence Activity v3` tab using the workflow's documented
+   columns. Attach the Outreach OAuth credential to the six `READ:` nodes, the Google
    Sheets credential to the QA node, and the Supabase service-role Header Auth
    credential only to the `APPLY:` node.
 5. Run in dry-run mode and share only `DRY RUN: aggregate summary`.
 6. Reconcile the Sheet against Outreach, including a month boundary.
 7. Authorize one apply, then repeat it and prove that the same daily keys were
    updated rather than duplicated.
-8. Restore dry-run mode until activation is explicitly approved.
+8. Restore dry-run mode until activation is explicitly approved. Keep v2
+   published during QA; publish v3 and archive v2 only after the comparison is
+   accepted.
 
 ## Dashboard cutover gate
 
