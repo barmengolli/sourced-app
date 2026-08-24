@@ -4,7 +4,8 @@
 // The existing module interprets the legacy Thursday lifetime snapshots. This
 // module defines the replacement daily grain without changing the live report:
 //
-//   - sequence counters are cumulative and become period activity by delta;
+//   - v3 activity inputs are dated events and are summed directly;
+//   - legacy v2 sequence counters remain cumulative and use period deltas;
 //   - prospects_enrolled is a dated event count and is summed;
 //   - prospects_active is a point-in-time value and uses the latest snapshot;
 //   - a sequence created during the period has a legitimate zero baseline;
@@ -21,6 +22,8 @@ export interface OutreachDailySnapshot {
   collected_at: string | null; // ordering signal for same-day retries
   sequence_id: number;
   sequence_name: string;
+  // Rows written before v3 have no value and are treated as legacy cumulative.
+  activity_basis?: 'legacy_cumulative' | 'daily_event';
   // America/Denver calendar date derived from Outreach sequence.createdAt.
   // This is supporting evidence for a legitimate zero baseline, not part of
   // the business formula for established sequences.
@@ -39,13 +42,15 @@ export interface OutreachDailyRun {
   pagination_complete: boolean;
   expected_sequences: number;
   observed_sequences: number;
+  activity_basis?: 'legacy_cumulative' | 'daily_event';
 }
 
 export type DailyMetricIssue =
   | 'ambiguous_duplicate'
   | 'missing_baseline'
   | 'missing_measurement'
-  | 'counter_reset';
+  | 'counter_reset'
+  | 'mixed_activity_basis';
 
 export type DailyPeriodMetric =
   | {
@@ -82,6 +87,7 @@ export interface DailyCoverageAssessment {
 
 function snapshotPayload(row: OutreachDailySnapshot): string {
   return JSON.stringify({
+    activity_basis: row.activity_basis ?? 'legacy_cumulative',
     sequence_name: row.sequence_name,
     sequence_created_date: row.sequence_created_date,
     enabled: row.enabled,
@@ -89,6 +95,12 @@ function snapshotPayload(row: OutreachDailySnapshot): string {
     prospects_active: row.prospects_active,
     counters: row.counters,
   });
+}
+
+function activityBasis(
+  row: OutreachDailySnapshot,
+): 'legacy_cumulative' | 'daily_event' {
+  return row.activity_basis ?? 'legacy_cumulative';
 }
 
 function resolveDailyDuplicate(
@@ -163,7 +175,9 @@ function hasRelevantAmbiguity(
   );
 }
 
-// Period activity for one sequence and one cumulative counter.
+// Period activity for one sequence. v3 rows are dated event counts. Rows from
+// the superseded v2 feed are cumulative counters and retain the delta contract
+// so historical reports do not silently change.
 export function sequenceDailyPeriodActivity(
   data: DailyDedupedSnapshots,
   sequenceId: number,
@@ -191,9 +205,48 @@ export function sequenceDailyPeriodActivity(
     issues.push('ambiguous_duplicate');
   }
 
+  const dailyRows = inPeriod.filter((row) => activityBasis(row) === 'daily_event');
+  const legacyRows = inPeriod.filter(
+    (row) => activityBasis(row) === 'legacy_cumulative',
+  );
+  if (dailyRows.length > 0) {
+    let value = 0;
+    let measured = 0;
+    for (const row of dailyRows) {
+      const observation = row.counters[metric];
+      if (observation === null || observation === undefined) {
+        if (!issues.includes('missing_measurement')) issues.push('missing_measurement');
+        continue;
+      }
+      if (!Number.isFinite(observation) || observation < 0) {
+        return { state: 'missing', issues: [...issues, 'missing_measurement'] };
+      }
+      value += observation;
+      measured += 1;
+    }
+    if (legacyRows.length > 0) issues.push('mixed_activity_basis');
+    if (measured === 0) {
+      return {
+        state: 'missing',
+        issues: [...new Set<DailyMetricIssue>([...issues, 'missing_measurement'])],
+      };
+    }
+    return {
+      state: 'present',
+      value,
+      complete: issues.length === 0,
+      issues: [...new Set(issues)],
+    };
+  }
+
   const baseline = [...rows]
     .reverse()
-    .find((row) => row.snapshot_date < bounds.start && row.counters[metric] != null);
+    .find(
+      (row) =>
+        activityBasis(row) === 'legacy_cumulative' &&
+        row.snapshot_date < bounds.start &&
+        row.counters[metric] != null,
+    );
   const createdInPeriod = inPeriod.some(
     (row) =>
       row.sequence_created_date !== null &&
